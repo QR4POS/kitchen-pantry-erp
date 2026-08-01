@@ -1,0 +1,13 @@
+-- ============================================================
+-- KITCHEN PANTRY ERP — PART 2 MIGRATION (DEPRECATED)
+-- ============================================================
+-- NOTE: Use migration-complete.sql instead.
+-- This file is kept for reference only.
+-- ============================================================
+-- The file migration-complete.sql contains ALL tables,
+-- indexes, RLS policies, functions, triggers, and seed data
+-- in a single idempotent migration.
+-- ============================================================
+-- Run this in Supabase SQL Editor:
+--   src/lib/db/migration-complete.sql
+-- ============================================================
