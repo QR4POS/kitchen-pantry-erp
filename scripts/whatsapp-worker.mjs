@@ -210,10 +210,15 @@ function recordSentMessage(state, text) {
 // True when a normalized message text matches something this account sent
 // recently (outgoing evidence). Safe to call with an undefined meta.
 function metaHasRecentSent(meta, text) {
-  const norm = normalizeMessageText(text)
+  const cleanText = cleanMessageText(text)
+  const norm = normalizeMessageText(cleanText)
   if (!norm) return false
   const now = Date.now()
-  return ((meta && meta.recentSent) || []).some((e) => e.text === norm && now - (e.ts || 0) < RECENT_SENT_TTL_MS)
+  return ((meta && meta.recentSent) || []).some((e) => {
+    const isPrefix = norm.startsWith(e.text)
+    const isCloseLength = Math.abs(norm.length - e.text.length) < 25
+    return isPrefix && isCloseLength && (now - (e.ts || 0) < RECENT_SENT_TTL_MS)
+  })
 }
 
 function loadMessageState() {
@@ -473,7 +478,9 @@ async function learnOwnSenderToken(page, state, sentText) {
       const el = els.nth(m)
       const pre = (await el.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
       const txt = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
-      if (!pre || normalizeMessageText(txt) !== sentNorm) continue
+      if (!pre) continue
+      const cleanTxt = cleanMessageText(txt)
+      if (normalizeMessageText(cleanTxt) !== sentNorm) continue
       const body = pre.replace(/^\[[^\]]*\]\s*/, '')
       const colonIdx = body.indexOf(':')
       const sender = (colonIdx > 0 ? body.slice(0, colonIdx) : body).trim()
@@ -820,9 +827,31 @@ function cleanMessageText(text) {
 //
 // Unreliable heuristics are intentionally removed: element position, left/right
 // alignment, and true_/false_ data-id prefix guessing.
-async function messageDirection(el, ctx = {}) {
+async function isOutgoingMessage(el) {
   try {
-    return await el.evaluate((node, args) => {
+    const html = await el.evaluate((node) => node.outerHTML).catch(() => '')
+    if (html) {
+      fs.appendFileSync(path.join(ROOT, 'storage', 'debug-messages.html'), `\n<hr>\n[${new Date().toISOString()}] OuterHTML:\n${html}\n`)
+    }
+  } catch (e) {}
+
+  try {
+    return await el.evaluate((node) => {
+      const cls = (node.className && typeof node.className === 'string') ? node.className.toLowerCase() : ''
+      const tokens = cls.split(/\s+/)
+      return tokens.includes('message-out') || tokens.includes('tail-out')
+    })
+  } catch {
+    return false
+  }
+}
+
+async function messageDirection(el, ctx = {}) {
+  let dir = null
+  let html = ''
+  try {
+    html = await el.evaluate((node) => node.outerHTML).catch(() => '')
+    dir = await el.evaluate((node, args) => {
       const ownSenderToken = (args.ownSenderToken || '').toLowerCase()
 
       const dirOf = (n) => {
@@ -875,7 +904,12 @@ async function messageDirection(el, ctx = {}) {
       // D) Nothing conclusive.
       return null
     }, { ownSenderToken: (ctx && ctx.ownSenderToken) || '' })
-  } catch {
+
+    if (html) {
+      fs.appendFileSync(path.join(ROOT, 'storage', 'debug-messages.html'), `\n<hr>\n[${new Date().toISOString()}] Direction: ${dir}\nHTML: ${html.slice(0, 1000)}\n`)
+    }
+    return dir
+  } catch (e) {
     return null
   }
 }
