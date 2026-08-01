@@ -7,6 +7,15 @@
 
 import { createAdminClient } from '@/lib/supabase/admin'
 
+// Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
+// only — when unset there is no behavior change and no extra logs.
+const PERF = process.env.WHATSAPP_PERF === '1'
+
+function perf(label: string, start: number, extra = ''): void {
+  if (!PERF) return
+  console.log(`[PERF] ${label}_ms=${Date.now() - start}${extra ? ' ' + extra : ''}`)
+}
+
 export type AgentAIMessage = { role: 'system' | 'user' | 'assistant'; content: string }
 
 export interface AgentAIResponse {
@@ -35,6 +44,7 @@ async function callGemini(
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 30000)
+  const tStart = Date.now()
 
   try {
     const response = await fetch(
@@ -59,6 +69,7 @@ async function callGemini(
     return { content, provider: 'gemini', model }
   } finally {
     clearTimeout(timeout)
+    perf('ai_gemini', tStart, `model=${model}`)
   }
 }
 
@@ -70,6 +81,7 @@ async function callDeepSeek(
 ): Promise<AgentAIResponse> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 30000)
+  const tStart = Date.now()
 
   try {
     const response = await fetch('https://api.deepseek.com/chat/completions', {
@@ -99,6 +111,7 @@ async function callDeepSeek(
     }
   } finally {
     clearTimeout(timeout)
+    perf('ai_deepseek', tStart, `model=${model}`)
   }
 }
 

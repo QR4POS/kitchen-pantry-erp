@@ -7,14 +7,17 @@
 // - Polls the ERP outbox queue and sends replies via WhatsApp Web.
 // - Detects new incoming messages and forwards to the ERP ingest API.
 // - Honours the AI agent ON/OFF switch (no processing when OFF).
-// - Creates a startup baseline (existing messages are never processed), so
-//   ONLY messages arriving after the worker starts can reach the AI.
-// - Replies only to unsaved phone numbers. Own account (self), groups,
-//   broadcasts/statuses, and saved contacts are always ignored — the JID alone
-//   is never used to classify a customer. Saved-contact detection is a title
-//   heuristic (opened-chat header shows a name vs a phone number) and is
-//   documented as such in the final report; existing-customer resume/new-lead
-//   behaviour is handled by the unchanged AI engine.
+// - Creates a startup baseline that ONLY seeds chats not yet tracked, so
+//   already-processed messages are never replayed while unread/new messages
+//   (including any received while the worker was offline) are still processed
+//   after the worker starts. The first-ever run still baselines every existing
+//   chat so pre-existing history is never sent to the AI.
+// - Processes ALL 1-to-1 chats — saved contacts AND unsaved numbers. Only the
+//   owner's own account (self), groups, and broadcasts are ignored. Multiple
+//   new unread messages in one chat are combined chronologically into a single
+//   ingest, preserving the turn-based one-reply model. Existing-customer
+//   resume / new-lead behaviour is handled by the unchanged AI engine, and the
+//   engine-side intent filter still blocks non-kitchen messages.
 // - Detects new messages directly from the chat list, auto-opens the chat with
 //   a verified multi-strategy opener, and reads the newest incoming message.
 //   If opening fails, the unread chat-list row preview is used instead, so no
@@ -33,6 +36,7 @@
 import { chromium } from 'playwright'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import dotenv from 'dotenv'
 
@@ -57,11 +61,21 @@ const MAX_API_RETRIES = parseInt(process.env.WHATSAPP_API_RETRIES || '3', 10)
 const API_BACKOFF_MS = parseInt(process.env.WHATSAPP_API_BACKOFF_MS || '2000', 10)
 const SCAN_CHAT_LIMIT = parseInt(process.env.WHATSAPP_SCAN_CHAT_LIMIT || '30', 10)
 const MAX_DEEP_READS_PER_SCAN = parseInt(process.env.WHATSAPP_MAX_DEEP_READS || '5', 10)
+const MAX_NEW_MESSAGES = parseInt(process.env.WHATSAPP_MAX_NEW_MESSAGES || '10', 10)
 const WHATSAPP_WEB = 'https://web.whatsapp.com'
 
 // Env-gated debug mode: WHATSAPP_DEBUG=1 prints per-scan chat candidate details
 // and the first chat row outerHTML. Unset by default — no env files change.
 const DEBUG = process.env.WHATSAPP_DEBUG === '1'
+
+// Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
+// only — when unset there is no behavior change and no extra logs.
+const PERF = process.env.WHATSAPP_PERF === '1'
+
+function perf(label, start, extra = '') {
+  if (!PERF) return
+  console.log(`[PERF] ${label}_ms=${Date.now() - start}${extra ? ' ' + extra : ''}`)
+}
 
 if (!SECRET) {
   console.error(
@@ -126,14 +140,90 @@ function readStatus() {
   }
 }
 
+const RECENT_SENT_MAX = 100
+const RECENT_SENT_TTL_MS = 60 * 60 * 1000
+
+// Ensures the persistent outgoing-evidence fields exist on the state object.
+// Backward compatible: existing state files without meta load fine and the
+// missing fields are initialized automatically.
+function ensureMessageStateMeta(state) {
+  const meta = state.meta || {}
+  if (!Array.isArray(meta.recentSent)) meta.recentSent = []
+  if (!meta.ownSenderToken) meta.ownSenderToken = null
+  state.meta = meta
+  return state
+}
+
+// Normalized message text used to match outgoing evidence against DOM text
+// (WhatsApp may line-wrap the same text differently).
+function normalizeMessageText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim()
+}
+
+// Deterministic fallback identity for a message whose data-id the current
+// WhatsApp Web DOM does not expose. MUST be stable across polls — never based
+// on Date.now() — so the persistent dedup boundary keeps working; otherwise the
+// same message would be re-ingested on every scan.
+function generateFallbackId(phoneKey, text, ts) {
+  const norm = normalizeMessageText(text)
+  const hash = createHash('sha256')
+    .update(`${phoneKey || 'chat'}\u0000${norm}\u0000${ts || ''}`)
+    .digest('hex')
+    .slice(0, 8)
+  return `msg_fallback_${phoneKey || 'chat'}_${hash}`
+}
+
+// Build the { text, id, ts } message shape used by every reader. A real
+// WhatsApp data-id wins; when absent a stable fallback id is generated so every
+// message always has an identity for dedup. ts comes from data-pre-plain-text
+// when available (stable, used for the fallback hash), otherwise Date.now() is
+// used as the value only.
+function finalizeMessageIdentity(text, rawId, rawTs, phoneKey) {
+  const cleanText = cleanMessageText(text)
+  let id = rawId
+  let ts = rawTs
+  if (!id) {
+    id = generateFallbackId(phoneKey, cleanText, rawTs || '')
+    if (DEBUG) {
+      console.log('[worker] generated fallback message id:')
+      console.log(`text=${normalizeMessageText(cleanText)}`)
+      console.log(`id=${id}`)
+    }
+  }
+  if (!ts) ts = Date.now()
+  return { text: cleanText, id, ts }
+}
+
+// Record a message this account just sent so it can never be re-ingested as
+// incoming. Kept capped and time-boxed to bound memory.
+function recordSentMessage(state, text) {
+  const meta = ensureMessageStateMeta(state)
+  const norm = normalizeMessageText(text)
+  if (!norm) return
+  const now = Date.now()
+  const fresh = meta.recentSent.filter((e) => now - (e.ts || 0) < RECENT_SENT_TTL_MS)
+  fresh.push({ text: norm, ts: now })
+  meta.recentSent = fresh.slice(-RECENT_SENT_MAX)
+  saveMessageState(state)
+}
+
+// True when a normalized message text matches something this account sent
+// recently (outgoing evidence). Safe to call with an undefined meta.
+function metaHasRecentSent(meta, text) {
+  const norm = normalizeMessageText(text)
+  if (!norm) return false
+  const now = Date.now()
+  return ((meta && meta.recentSent) || []).some((e) => e.text === norm && now - (e.ts || 0) < RECENT_SENT_TTL_MS)
+}
+
 function loadMessageState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(LAST_MESSAGES_FILE, 'utf-8'))
     if (parsed && parsed.chats && typeof parsed.chats === 'object') {
-      return { version: 1, chats: parsed.chats }
+      return ensureMessageStateMeta({ version: 1, chats: parsed.chats })
     }
   } catch { /* first run or corrupt file — start fresh */ }
-  return { version: 1, chats: {} }
+  return ensureMessageStateMeta({ version: 1, chats: {} })
 }
 
 function saveMessageState(state) {
@@ -324,7 +414,8 @@ async function openChatByIdentifier(page, identifier) {
   return ''
 }
 
-async function sendMessageToChat(page, phoneNumber, text) {
+async function sendMessageToChat(page, phoneNumber, text, state) {
+  const tSend = Date.now()
   const identifier = (phoneNumber || '').trim()
   if (!identifier) {
     console.error('[worker] opening chat: empty chat identifier')
@@ -356,8 +447,44 @@ async function sendMessageToChat(page, phoneNumber, text) {
   await pressEnterOrSendButton(page, input)
   await sleep(1200)
 
+  // Persistent outgoing evidence: remember exactly what this account sent and
+  // learn the account's own sender token from the sent bubble, so future polls
+  // (and polls after a restart) can identify these messages as outgoing.
+  if (state) {
+    recordSentMessage(state, text)
+    await learnOwnSenderToken(page, state, text)
+  }
+
+  perf('whatsapp_send', tSend, `chat=${identifier}`)
   console.log('[worker] message sent successfully')
   return true
+}
+
+// Learn this account's own sender token from the just-sent message's
+// data-pre-plain-text (e.g. "[12:34 PM, 8/1/2026] Business Name: hello").
+// Persisted so the worker can identify its own previous AI replies after a
+// restart even when message-in/message-out classes are absent from the DOM.
+async function learnOwnSenderToken(page, state, sentText) {
+  try {
+    const els = page.locator('#main [data-pre-plain-text]')
+    const count = await els.count().catch(() => 0)
+    const sentNorm = normalizeMessageText(sentText)
+    for (let m = count - 1; m >= 0; m--) {
+      const el = els.nth(m)
+      const pre = (await el.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
+      const txt = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
+      if (!pre || normalizeMessageText(txt) !== sentNorm) continue
+      const body = pre.replace(/^\[[^\]]*\]\s*/, '')
+      const colonIdx = body.indexOf(':')
+      const sender = (colonIdx > 0 ? body.slice(0, colonIdx) : body).trim()
+      if (!sender) break
+      const meta = ensureMessageStateMeta(state)
+      meta.ownSenderToken = sender
+      saveMessageState(state)
+      if (DEBUG) console.log(`[direction-debug] learned own sender token: ${sender}`)
+      break
+    }
+  } catch { /* ignore — token will be learned on a later send */ }
 }
 
 // ── Detect and forward genuinely new incoming messages ──
@@ -400,13 +527,13 @@ async function readOpenChatTitle(page, fallbackTitle) {
   try {
     const header = page.locator('[data-testid="conversation-info-header"]').first()
     if ((await header.count().catch(() => 0)) > 0) {
-      const txt = ((await header.innerText().catch(() => '')) || '').trim()
+      const txt = ((await header.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
       const firstLine = txt.split('\n').map((s) => s.trim()).find(Boolean)
       if (firstLine) return firstLine
     }
     const titleSpan = page.locator('header span[title]').first()
     if ((await titleSpan.count().catch(() => 0)) > 0) {
-      const t = (await titleSpan.getAttribute('title').catch(() => '')) || ''
+      const t = (await titleSpan.getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
       if (t) return t
     }
   } catch { /* fall through */ }
@@ -423,20 +550,20 @@ function hasContactName(title) {
 }
 
 async function extractChatTitle(row) {
-  const viaSpanTitle = (await row.locator('span[title]').first().getAttribute('title').catch(() => '')) || ''
+  const viaSpanTitle = (await row.locator('span[title]').first().getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
   if (viaSpanTitle) return viaSpanTitle
-  const viaHeader = (await row.locator('[data-testid="conversation-info-header"]').first().getAttribute('title').catch(() => '')) || ''
+  const viaHeader = (await row.locator('[data-testid="conversation-info-header"]').first().getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
   if (viaHeader) return viaHeader
-  const viaAria = (await row.getAttribute('aria-label').catch(() => '')) || ''
+  const viaAria = (await row.getAttribute('aria-label', { timeout: 100 }).catch(() => '')) || ''
   if (viaAria) return viaAria
-  const viaAnyTitle = (await row.locator('[title]').first().getAttribute('title').catch(() => '')) || ''
+  const viaAnyTitle = (await row.locator('[title]').first().getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
   return viaAnyTitle
 }
 
 async function extractChatPreview(row) {
-  const viaPreview = (await row.locator('[data-testid="last-msg"]').first().innerText().catch(() => '')) || ''
+  const viaPreview = (await row.locator('[data-testid="last-msg"]').first().innerText({ timeout: 100 }).catch(() => '')) || ''
   if (viaPreview.trim()) return viaPreview.trim()
-  const viaDirAuto = (await row.locator('span[dir="auto"]:not([title])').first().innerText().catch(() => '')) || ''
+  const viaDirAuto = (await row.locator('span[dir="auto"]:not([title])').first().innerText({ timeout: 100 }).catch(() => '')) || ''
   if (viaDirAuto.trim()) return viaDirAuto.trim()
   return ''
 }
@@ -447,7 +574,7 @@ async function extractChatPreview(row) {
 async function detectUnread(el) {
   try {
     if ((await el.locator('[data-icon*="unread"]').count().catch(() => 0)) > 0) return true
-    const aria = ((await el.getAttribute('aria-label').catch(() => '')) || '') + ' ' + ((await el.innerText().catch(() => '')) || '')
+    const aria = ((await el.getAttribute('aria-label', { timeout: 100 }).catch(() => '')) || '') + ' ' + ((await el.innerText({ timeout: 100 }).catch(() => '')) || '')
     if (/unread|new message|new messages/i.test(aria)) return true
   } catch { /* ignore */ }
   return false
@@ -457,13 +584,16 @@ async function detectUnread(el) {
 // (preview or time) changes, enabling new-message detection WITHOUT relying on
 // an unread badge.
 async function rowRawText(el) {
-  const txt = ((await el.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim()
+  // Use a longer timeout (3 s) so the row text is actually captured.
+  // A 100 ms timeout silently returns '' for every row, making rowSig
+  // always null and causing the worker to trigger on every scan.
+  const txt = ((await el.innerText({ timeout: 3000 }).catch(() => '')) || '').replace(/\s+/g, ' ').trim()
   return txt
 }
 
 // Robust preview: row innerText minus the chat title and pure time lines.
 async function extractRowPreviewFromText(row, title) {
-  const txt = ((await row.innerText().catch(() => '')) || '')
+  const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
   const lines = txt.split('\n').map((s) => s.trim()).filter(Boolean)
   return lines.filter((l) => l && l !== title && !/^\d{1,2}:\d{2}$/.test(l)).slice(0, 2).join(' ')
 }
@@ -501,6 +631,8 @@ async function probeChatDom(page) {
       msgContainers: await page.locator('div[data-id*="_msg"]').count(),
     }
     console.log('[whatsapp-worker] DOM probe:', JSON.stringify(counts))
+    console.log(`[worker] DOM message-in count: ${await page.locator('#main .message-in').count().catch(() => 0)}`)
+    console.log(`[worker] DOM message-out count: ${await page.locator('#main .message-out').count().catch(() => 0)}`)
   } catch (e) {
     console.error('[whatsapp-worker] DOM probe error:', e.message)
   }
@@ -511,6 +643,7 @@ async function probeChatDom(page) {
 // first that yields candidates. Every candidate carries { title, preview,
 // hasUnread, raw } where raw is the row signature used for change detection.
 async function discoverChatCandidates(page) {
+  const tDisc = Date.now()
   const candidates = []
   const seen = new Set()
 
@@ -568,7 +701,7 @@ async function discoverChatCandidates(page) {
     for (let i = 0; i < ac && i < SCAN_CHAT_LIMIT; i++) {
       try {
         const anchor = anchors.nth(i)
-        const title = (await anchor.getAttribute('title').catch(() => '')) || ''
+        const title = (await anchor.getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
         if (!title || seen.has(title)) continue
         const row = await findRowAncestor(anchor)
         if (!row) continue
@@ -581,10 +714,12 @@ async function discoverChatCandidates(page) {
     }
   }
 
+  perf('discover_candidates', tDisc, `candidates=${candidates.length}`)
   return candidates
 }
 
 async function scanChatRows(page) {
+  const tScanRow = Date.now()
   console.log('[worker] scanning chats')
 
   const candidates = await discoverChatCandidates(page)
@@ -610,6 +745,7 @@ async function scanChatRows(page) {
   if (candidates.length > 0) {
     console.log(`[worker] scanning chats - ${candidates.length} candidate(s)`)
   }
+  perf('scan_chat_rows', tScanRow, `candidates=${candidates.length}`)
   return candidates
 }
 
@@ -625,7 +761,7 @@ async function resolveChatPhone(page, title, messageDataId) {
   const dataIds = page.locator('[data-id*="@c.us"]')
   const count = await dataIds.count().catch(() => 0)
   for (let i = 0; i < count; i++) {
-    const id = (await dataIds.nth(i).getAttribute('data-id').catch(() => '')) || ''
+    const id = (await dataIds.nth(i).getAttribute('data-id', { timeout: 100 }).catch(() => '')) || ''
     const m = id.match(/(\d+)@c\.us/)
     if (m) return m[1]
   }
@@ -639,7 +775,7 @@ async function resolveChatPhone(page, title, messageDataId) {
   const prePlain = page.locator('[data-pre-plain-text]')
   const pc = await prePlain.count().catch(() => 0)
   for (let i = 0; i < pc; i++) {
-    const v = (await prePlain.nth(i).getAttribute('data-pre-plain-text').catch(() => '')) || ''
+    const v = (await prePlain.nth(i).getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
     const sender = v.split('] ').pop() || ''
     const m = sender.match(/(\d{7,14})/)
     if (m) return m[1]
@@ -665,31 +801,221 @@ function cleanMessageText(text) {
   return lines.filter(Boolean).join('\n')
 }
 
-async function readLastIncomingMessage(page) {
-  const selectors = ['div[data-id*="_msg"]', 'div[id="main"] div[data-id]', 'div[data-id]']
+// Classifies a message element's direction using multiple WhatsApp Web
+// indicators (the DOM structure changes between versions, so no single signal
+// is relied upon). Returns:
+//   'in'  → an incoming (customer) message — the only kind ever ingested.
+//   'out' → a message this account sent (our own AI reply) — always skipped.
+//   null  → direction could not be proven. Callers apply the outgoing-evidence
+//           fallback (recentSent cache) before ever treating it as incoming.
+//
+// Priority:
+//   A) Class indicators (message-in/message-out/tail-in/tail-out) on the
+//      element, its ancestors, and its shallow descendants.
+//   B) data-pre-plain-text sender detection ("[time] Sender: message") — the
+//      sender matching our own sender token (or "You"/"Me") is outgoing; a
+//      known own token with a different sender is incoming.
+//   C) aria-label indicators ("you sent"/"outgoing" vs "incoming").
+//   D) Nothing conclusive → null.
+//
+// Unreliable heuristics are intentionally removed: element position, left/right
+// alignment, and true_/false_ data-id prefix guessing.
+async function messageDirection(el, ctx = {}) {
+  try {
+    return await el.evaluate((node, args) => {
+      const ownSenderToken = (args.ownSenderToken || '').toLowerCase()
+
+      const dirOf = (n) => {
+        const cls = (n.className && typeof n.className === 'string') ? n.className.toLowerCase() : ''
+        const tokens = cls.split(/\s+/)
+        if (tokens.includes('message-out') || tokens.includes('tail-out')) return 'out'
+        if (tokens.includes('message-in') || tokens.includes('tail-in')) return 'in'
+        return null
+      }
+
+      const getPrePlain = (n) => {
+        const el = n.hasAttribute && n.hasAttribute('data-pre-plain-text') ? n : n.querySelector('[data-pre-plain-text]')
+        return el ? (el.getAttribute('data-pre-plain-text') || '') : ''
+      }
+
+      // A) Class indicators: element + ancestors + shallow descendants.
+      let cur = node
+      while (cur && cur !== document.body) {
+        const d = dirOf(cur)
+        if (d) return d
+        cur = cur.parentElement
+      }
+      const bubbles = node.querySelectorAll('.message-in, .message-out, [class*="tail-in"], [class*="tail-out"]')
+      for (let i = 0; i < bubbles.length; i++) {
+        const d = dirOf(bubbles[i])
+        if (d) return d
+      }
+
+      // B) data-pre-plain-text sender detection.
+      const pre = getPrePlain(node)
+      if (pre) {
+        const body = pre.replace(/^\[[^\]]*\]\s*/, '')
+        const colonIdx = body.indexOf(':')
+        const sender = (colonIdx > 0 ? body.slice(0, colonIdx) : body).trim().toLowerCase()
+        if (sender === 'you' || sender === 'me') return 'out'
+        if (ownSenderToken && sender === ownSenderToken) return 'out'
+        if (ownSenderToken && sender) return 'in'
+        // Sender unavailable / own token unknown → continue to other signals.
+      }
+
+      // C) aria-label indicators (element + ancestors).
+      let anc = node
+      while (anc && anc !== document.body) {
+        const aria = (anc.getAttribute && anc.getAttribute('aria-label')) || ''
+        if (/you sent|outgoing/i.test(aria)) return 'out'
+        if (/incoming/i.test(aria)) return 'in'
+        anc = anc.parentElement
+      }
+
+      // D) Nothing conclusive.
+      return null
+    }, { ownSenderToken: (ctx && ctx.ownSenderToken) || '' })
+  } catch {
+    return null
+  }
+}
+
+// WHATSAPP_DEBUG=1: dump the raw DOM fields that decided a message's direction.
+async function logDirectionDebug(el, dir) {
+  try {
+    const text = ((await el.innerText({ timeout: 100 }).catch(() => '')) || '').slice(0, 120)
+    const cls = ((await el.getAttribute('class', { timeout: 100 }).catch(() => '')) || '')
+    const dataId = ((await el.getAttribute('data-id', { timeout: 100 }).catch(() => '')) || '')
+    const prePlainText = ((await el.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || '')
+    console.log('[direction-debug]')
+    console.log(`text=${text}`)
+    console.log(`class=${cls}`)
+    console.log(`dataId=${dataId}`)
+    console.log(`prePlainText=${prePlainText}`)
+    console.log(`detected=${dir}`)
+  } catch { /* ignore */ }
+}
+
+
+// Read data-pre-plain-text from the element itself or its first descendant that
+// carries it, so a message yields the same timestamp / fallback-id no matter
+// which selector matched it.
+async function readPrePlainText(el) {
+  const own = (await el.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
+  if (own) return own
+  const desc = el.locator('[data-pre-plain-text]').first()
+  if ((await desc.count().catch(() => 0)) > 0) {
+    return (await desc.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
+  }
+  return ''
+}
+
+async function readLastIncomingMessage(page, meta, phoneKey) {
+  // Only real message bubbles inside the OPEN chat (#main) are ever considered.
+  // Priority: explicit bubble classes, then text rows, then generic data-id.
+  // Direction is decided by messageDirection() (class + data-pre-plain-text
+  // sender + aria-label). Outgoing messages, and unknown-direction messages
+  // whose text matches a recently sent reply, are never accepted as incoming.
+  const selectors = [
+    '#main .message-in',
+    '#main .message-out',
+    '#main [data-pre-plain-text]',
+    '#main [data-id]',
+  ]
   for (const sel of selectors) {
     const messages = page.locator(sel)
     const count = await messages.count().catch(() => 0)
+    if (count === 0) continue
     for (let m = count - 1; m >= 0; m--) {
       const el = messages.nth(m)
       try {
-        const cls = (await el.getAttribute('class').catch(() => '')) || ''
-        // WhatsApp marks outgoing messages with the "message-out" class
-        if (cls.includes('message-out')) continue
-        const text = (await el.innerText().catch(() => '')) || ''
+        const dir = await messageDirection(el, meta)
+        if (DEBUG) await logDirectionDebug(el, dir)
+
+        const text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
         if (!text.trim()) continue
-        const id = (await el.getAttribute('data-id').catch(() => '')) || ''
+
+        const id = (await el.getAttribute('data-id', { timeout: 100 }).catch(() => '')) || ''
         let ts = null
-        const pre = (await el.getAttribute('data-pre-plain-text').catch(() => '')) || ''
+        const pre = await readPrePlainText(el)
         if (pre) {
           const m = pre.match(/^\[([^\]]+)\]/)
           if (m) ts = m[1]
         }
-        return { text: cleanMessageText(text), id, ts }
+
+        if (dir === 'out') continue
+        if (dir !== 'in' && metaHasRecentSent(meta, text)) continue
+
+        return finalizeMessageIdentity(text, id, ts, phoneKey)
       } catch { /* keep scanning up */ }
     }
   }
   return null
+}
+
+// Read incoming messages that are NEWER than the last processed message.
+// Returns newest-first; scanning stops at the already-processed message id
+// boundary. When storedLastId is null (an untracked chat) only the newest
+// message is kept so pre-existing history is never replayed. A cap bounds the
+// work for chats with very long unread runs.
+async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, cap = MAX_NEW_MESSAGES) {
+  const tStart = Date.now()
+  try {
+    // Only real message bubbles inside the OPEN chat (#main) are ever scanned —
+    // sidebar rows, wrappers and unrelated DOM elements never enter. Priority:
+    // explicit bubble classes, then text rows, then generic data-id.
+    // Direction is decided by messageDirection() (class + data-pre-plain-text
+    // sender + aria-label). Outgoing messages, and unknown-direction messages
+    // whose text matches a recently sent reply, are always skipped. Unknown
+    // messages that don't match outgoing evidence are accepted once (they may
+    // be genuine customer messages when the DOM exposes no class indicators).
+    const selectors = [
+      '#main .message-in',
+      '#main .message-out',
+      '#main [data-pre-plain-text]',
+      '#main [data-id]',
+    ]
+    const collected = [] // newest-first
+    for (const sel of selectors) {
+      const messages = page.locator(sel)
+      const count = await messages.count().catch(() => 0)
+      if (count === 0) continue
+      for (let m = count - 1; m >= 0; m--) {
+        const el = messages.nth(m)
+        try {
+          const dir = await messageDirection(el, meta)
+          if (DEBUG) await logDirectionDebug(el, dir)
+
+          const text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
+          if (!text.trim()) continue
+
+          const id = (await el.getAttribute('data-id', { timeout: 100 }).catch(() => '')) || ''
+          let ts = null
+          const pre = await readPrePlainText(el)
+          if (pre) {
+            const tm = pre.match(/^\[([^\]]+)\]/)
+            if (tm) ts = tm[1]
+          }
+
+          if (dir === 'out') continue
+          if (dir !== 'in' && metaHasRecentSent(meta, text)) continue
+
+          const msg = finalizeMessageIdentity(text, id, ts, phoneKey)
+          // Reached the already-processed boundary → everything above is old.
+          if (storedLastId && msg.id && msg.id === storedLastId) return collected
+          collected.push(msg)
+          if (collected.length >= cap) return collected
+        } catch { /* keep scanning up */ }
+      }
+      if (collected.length > 0) break
+    }
+    // Untracked chat: only the newest message is a candidate — never replay the
+    // chat's pre-existing history.
+    if (!storedLastId) return collected.slice(0, 1)
+    return collected
+  } finally {
+    perf('read_new_messages', tStart)
+  }
 }
 
 // ── Robust chat opening ──
@@ -700,7 +1026,7 @@ async function readLastIncomingMessage(page) {
 // unless this returns true (use the chat-list row fallback otherwise).
 
 async function confirmChatOpened(page, chat, targetDigits) {
-  const deadline = Date.now() + 5000
+  const deadline = Date.now() + 2000
   while (Date.now() < deadline) {
     const headerTitle = await readOpenChatTitle(page, chat.title)
     const hDigits = headerTitle.replace(/\D/g, '')
@@ -716,6 +1042,7 @@ async function confirmChatOpened(page, chat, targetDigits) {
 }
 
 async function openChatRobustly(page, chat) {
+  const tOpenStart = Date.now()
   const title = chat.title || ''
   const targetDigits = title.replace(/\D/g, '')
 
@@ -746,17 +1073,25 @@ async function openChatRobustly(page, chat) {
   ]
 
   for (const s of strategies) {
+    const tStrat = Date.now()
     try {
       await s.run()
     } catch (e) {
+      perf('open_strategy', tStrat, `name=${s.name} failed chat=${title}`)
       console.log(`[worker] detect failure: open selector "${s.name}" failed for "${title}" (${e.message})`)
       continue
     }
-    if (await confirmChatOpened(page, chat, targetDigits)) return true
+    const confirmed = await confirmChatOpened(page, chat, targetDigits)
+    perf('open_strategy', tStrat, `name=${s.name} confirmed=${confirmed} chat=${title}`)
+    if (confirmed) {
+      perf('open_robust', tOpenStart, `chat=${title}`)
+      return true
+    }
     console.log(`[worker] detect failure: open selector "${s.name}" did not open "${title}"`)
   }
 
   console.log(`[worker] detect failure: unable to open chat ${title}`)
+  perf('open_robust', tOpenStart, `chat=${title}`)
   return false
 }
 
@@ -775,7 +1110,7 @@ async function findChatRow(page, chat) {
   for (let i = 0; i < n; i++) {
     const row = rows.nth(i)
     try {
-      const txt = ((await row.innerText().catch(() => '')) || '')
+      const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
       if (targetDigits && txt.replace(/\D/g, '').includes(targetDigits)) return row
       if (txt.includes(title)) return row
       const rTitle = await extractChatTitle(row)
@@ -790,7 +1125,7 @@ async function findChatRow(page, chat) {
   }
   for (let i = 0; i < ac; i++) {
     const a = anchors.nth(i)
-    const t = (await a.getAttribute('title').catch(() => '')) || ''
+    const t = (await a.getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
     if (t === title) return a
   }
   return null
@@ -806,12 +1141,12 @@ async function readLastIncomingFromRow(page, chat) {
   let text = ''
   const preview = row.locator('[data-testid="last-msg"]').first()
   if ((await preview.count().catch(() => 0)) > 0) {
-    text = ((await preview.innerText().catch(() => '')) || '').trim()
+    text = ((await preview.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
   }
   if (!text) {
     const dirAuto = row.locator('span[dir="auto"]:not([title])').first()
     if ((await dirAuto.count().catch(() => 0)) > 0) {
-      text = ((await dirAuto.innerText().catch(() => '')) || '').trim()
+      text = ((await dirAuto.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
     }
   }
   if (!text) {
@@ -819,7 +1154,8 @@ async function readLastIncomingFromRow(page, chat) {
     return null
   }
   const phone = (chat.title || '').replace(/\D/g, '')
-  return { text: cleanMessageText(text), id: null, ts: null, phone, fromRow: true }
+  const msg = finalizeMessageIdentity(text, null, null, phone)
+  return { ...msg, phone, fromRow: true }
 }
 
 // ── Diagnostics ──
@@ -841,11 +1177,14 @@ async function dumpChatRowHtml(page, chat) {
 
 async function detectAndForwardIncoming(page, state) {
   try {
+    const tScan = Date.now()
     const chats = await scanChatRows(page)
+    perf('worker_detect', tScan, `chats=${chats.length}`)
     if (chats.length === 0) return
 
     let deepReads = 0
     for (const chat of chats) {
+      const tCandidate = Date.now()
       if (deepReads >= MAX_DEEP_READS_PER_SCAN) break
 
       // Stable key that is never empty — name-only chats are never skipped.
@@ -865,7 +1204,7 @@ async function detectAndForwardIncoming(page, state) {
       // from the chat list alone, without any unread badge selector.
       if (!chat.hasUnread && stored && stored.rowSig && chat.raw && stored.rowSig === chat.raw) continue
 
-      console.log('[worker] new message detected')
+      console.log('[worker] incoming message detected')
       if (chat.hasUnread) console.log('[worker] unread chat detected')
       console.log(`[worker] previous: ${stored?.preview || '(none)'}`)
       console.log(`[worker] current: ${chat.preview || '(none)'}`)
@@ -873,23 +1212,27 @@ async function detectAndForwardIncoming(page, state) {
 
       // 1. Open the chat (verified). Messages are only ever read when this
       //    confirms the correct chat is open — never from a previously-open one.
+      const tOpen = Date.now()
       const opened = await openChatRobustly(page, chat)
+      perf('worker_open_chat', tOpen, `chat=${chat.title}`)
 
-      let last = null
+      console.log(`[worker] processing latest message: ${chat.title}`)
+
+      // 2. Read the messages NEWER than the last processed one. Multiple new
+      //    messages (e.g. received while the worker was offline) are collected
+      //    newest-first and later combined chronologically into a single ingest,
+      //    preserving the turn-based one-reply model. Old history is never read.
+      const tExtract = Date.now()
+      let newMessages = opened ? await readNewIncomingMessages(page, stored?.lastIncomingId || null, state.meta, key) : []
+      let last = newMessages.length > 0 ? newMessages[0] : null
       let phone = ''
-      if (opened) {
-        last = await readLastIncomingMessage(page)
-        if (!last) {
-          console.log('[worker] detect failure: extract selector "div[data-id*=\"_msg\"] / div[id=\"main\"] div[data-id] / div[data-id]" returned no message')
-        }
-      }
-
-      // 2. Fallback: the chat could not be opened (or yielded nothing) but the
-      //    row has an unread badge → read the preview directly from the list.
       if (!last) {
+        // Fallback: the chat could not be opened (or has no newer messages) but
+        // the row has an unread badge → read the preview directly from the list.
         last = await readLastIncomingFromRow(page, chat)
         if (last) phone = last.phone
       }
+      perf('worker_extract', tExtract, `chat=${chat.title}`)
 
       if (!last) {
         if (!opened) {
@@ -899,25 +1242,43 @@ async function detectAndForwardIncoming(page, state) {
           console.log(`[worker] no incoming message found for ${chat.title} (will retry)`)
           continue
         }
-        console.log(`[worker] no incoming message found for ${chat.title}`)
+        // Opened but nothing newer than the last processed message.
+        console.log('[worker] old message ignored')
         state.chats[key] = { ...(stored || {}), title: chat.title, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER', updatedAt: new Date().toISOString() }
         saveMessageState(state)
         continue
       }
 
-      console.log(`[worker] message extracted: ${last.text.slice(0, 120)}`)
+      // Safety guard: if we are waiting for customer reply and readNewIncomingMessages
+      // returned a message with no id (e.g. came from the row fallback), but the text
+      // matches what we last sent as a reply — skip it. Prevents bot messages that
+      // slipped through the selectors from triggering a second AI call.
+      if (stored?.conversationState === 'WAITING_FOR_CUSTOMER' && !last.id) {
+        console.log('[worker] WAITING_FOR_CUSTOMER: no message id — treating as already-replied, skipping')
+        state.chats[key] = { ...(stored), rowSig: chat.raw || stored.rowSig, preview: chat.preview, updatedAt: new Date().toISOString() }
+        saveMessageState(state)
+        continue
+      }
 
-      // 3. Resolve the phone from the correct source only: the opened chat when
+      // 3. Combine multiple new messages chronologically into one payload.
+      let messageToSend = last.text
+      if (newMessages.length > 1) {
+        messageToSend = newMessages.slice().reverse().map((m) => m.text).join('\n')
+        console.log(`[worker] combined ${newMessages.length} new messages into one ingest`)
+      }
+
+      console.log(`[worker] message extracted: ${messageToSend.slice(0, 120)}`)
+
+      // 4. Resolve the phone from the correct source only: the opened chat when
       //    available, otherwise the chat title digits (row fallback).
       if (!phone) {
         phone = opened ? await resolveChatPhone(page, chat.title, last.id || '') : (chat.title || '').replace(/\D/g, '')
       }
       console.log(`[worker] resolved chat id: ${phone}`)
 
-      // 4. Classification. Priority: self → group → broadcast → saved contact →
-      //    unsaved phone number. When the chat could not be opened the JID is
-      //    unknown, so named/lettered titles (saved contacts, groups, broadcasts)
-      //    are still ignored via the title heuristic.
+      // 5. Classification. Self / groups / broadcasts are ignored; ALL confirmed
+      //    1-to-1 chats (saved contacts AND unsaved numbers) enter the AI
+      //    pipeline. Saved contacts are now treated as known customers.
       const headerTitle = opened ? (await readOpenChatTitle(page, chat.title)) || chat.title : chat.title
       const jid = opened ? jidType(last) : null
 
@@ -939,31 +1300,29 @@ async function detectAndForwardIncoming(page, state) {
         saveMessageState(state)
         continue
       }
-      if (hasContactName(headerTitle)) {
-        // Saved-contact heuristic: the opened-chat title shows a NAME for saved
-        // contacts and the phone NUMBER for unsaved numbers. Not a perfect
-        // signal — documented as a heuristic in the final report.
-        console.log('[worker] saved contact ignored')
-        state.chats[key] = {
-          ...(stored || {}),
-          title: chat.title,
-          preview: chat.preview,
-          rowSig: chat.raw || stored?.rowSig || null,
-          lastIncomingText: last.text,
-          lastIncomingId: last.id || null,
-          lastIncomingTs: last.ts,
-          conversationState: 'WAITING_FOR_CUSTOMER',
-          updatedAt: new Date().toISOString(),
-        }
-        saveMessageState(state)
+      if (!opened && hasContactName(headerTitle) && !/\d{7,}/.test(headerTitle)) {
+        // Could not open the chat and the title is a name with no resolvable
+        // number — cannot confirm it is a 1:1 chat (may be a group/broadcast).
+        // Skip this poll; it is retried later.
+        console.log('[worker] chat not verified as 1:1, skipped')
         continue
       }
+      if (hasContactName(headerTitle)) {
+        // Named (saved-contact) 1:1 chat — allowed into the AI pipeline.
+        console.log('[worker] known customer allowed')
+      }
 
-      // Unsaved phone number → the only path that may reach the AI pipeline.
-      // Existing-customer resume / new-lead behaviour is handled by the engine.
-      // Turn-based dedup: only a genuinely new incoming message may trigger the
-      // AI. The stable WhatsApp message id is the primary signal; text and
-      // timestamp are compared when no id is exposed by the DOM.
+      // 6. Existing vs new customer (state-based, no DB call). The engine still
+      //    handles real resume / lead dedup.
+      if (stored) {
+        console.log('[worker] existing customer detected')
+      } else {
+        console.log('[worker] new customer detected')
+      }
+
+      // 7. Turn-based dedup: only genuinely new incoming messages may trigger
+      //    the AI. The stable WhatsApp message id is the primary signal; text
+      //    and timestamp are compared when no id is exposed by the DOM.
       const sameId = stored && last.id && stored.lastIncomingId === last.id
       const sameText = stored && stored.lastIncomingText === last.text
       const sameTs = stored && stored.lastIncomingTs && last.ts && stored.lastIncomingTs === last.ts
@@ -978,18 +1337,18 @@ async function detectAndForwardIncoming(page, state) {
         continue
       }
 
-      console.log('[worker] new unknown customer detected')
-
       processingLocks.set(key, true)
       try {
         state.chats[key] = { ...(stored || {}), title: chat.title, phone, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, lastIncomingText: last.text, lastIncomingId: last.id || null, lastIncomingTs: last.ts, conversationState: 'PROCESS_MESSAGE', updatedAt: new Date().toISOString() }
         saveMessageState(state)
 
         console.log('[worker] sending to ingest')
+        const tIngest = Date.now()
         const res = await apiPost('/api/whatsapp/ingest', {
           phone_number: phone,
-          message: last.text,
+          message: messageToSend,
         })
+        perf('ingest_call', tIngest, `phone=${phone} processed=${res?.processed}`)
         console.log(`[worker] ingest response ok=${res?.ok} processed=${res?.processed}${res?.reason ? ' reason=' + res.reason : ''}`)
 
         state.chats[key] = {
@@ -1005,12 +1364,14 @@ async function detectAndForwardIncoming(page, state) {
         }
         saveMessageState(state)
         if (res?.processed === true) {
+          perf('reply_queued', tIngest, `phone=${phone}`)
           console.log('[worker] AI reply queued')
         }
         deepReads += 1
       } finally {
         processingLocks.delete(key)
       }
+      perf('candidate_process', tCandidate, `chat=${chat.title}`)
     }
   } catch (e) {
     // DOM changed or a transient page issue — never crash the worker.
@@ -1029,16 +1390,30 @@ async function createStartupBaseline(page, state) {
   for (const chat of chats) {
     const key = chatStateKey(chat.title)
 
+    // Already-tracked chats keep their stored lastIncoming/rowSig, so messages
+    // received while the worker was offline are detected as new on the next
+    // poll. Only untracked chats are seeded here (first-ever run), which keeps
+    // pre-existing history from ever being replayed.
+    if (state.chats[key] && state.chats[key].lastIncomingId) continue
+
+    // The user explicitly requested that we reply to UNREAD messages present
+    // upon startup. By skipping them here, they won't be in the baseline, 
+    // so the main loop will detect them as new and process them!
+    if (chat.hasUnread) {
+      console.log(`[worker] skipping baseline for unread chat: ${chat.title}`)
+      continue
+    }
+
     // Open and read the last incoming message where possible. Chats that cannot
     // be opened still get rowSig recorded, so pre-existing messages are treated
     // as already processed and can never be ingested on the first poll.
     const opened = await openChatRobustly(page, chat)
-    const last = opened ? await readLastIncomingMessage(page) : null
+    const last = opened ? await readLastIncomingMessage(page, state.meta, chatStateKey(chat.title)) : null
 
     const entry = {
       title: chat.title,
       preview: chat.preview,
-      rowSig: chat.raw || state.chats[key]?.rowSig || null,
+      rowSig: chat.raw || null,
       conversationState: 'WAITING_FOR_CUSTOMER',
       updatedAt: new Date().toISOString(),
     }
@@ -1122,6 +1497,8 @@ async function run() {
   }, 30000)
 
   while (true) {
+    const tLoop = Date.now()
+    if (PERF) console.log(`[PERF] loop_start=${new Date().toISOString()}`)
     try {
       // Reconnect if the session was lost (logged out / page crashed / network)
       const alive = await ensureLoggedIn(page, 3000).catch(() => false)
@@ -1141,12 +1518,14 @@ async function run() {
 
       // 1. Send queued outgoing messages (only when agent enabled)
       if (health.agentEnabled) {
+        const tPoll = Date.now()
         const { messages } = await apiGet('/api/whatsapp/outbox')
+        perf('outbox_poll', tPoll, `n=${messages?.length ?? 0}`)
         if (messages && messages.length > 0) {
           const results = []
           for (const msg of messages) {
             try {
-              const sent = await sendMessageToChat(page, msg.phone_number, msg.message)
+              const sent = await sendMessageToChat(page, msg.phone_number, msg.message, messageState)
               if (sent) console.log('[worker] reply sent')
               results.push({ id: msg.id, status: sent ? 'sent' : 'failed', error_message: sent ? null : 'chat not found' })
             } catch (e) {
@@ -1164,6 +1543,7 @@ async function run() {
       }
 
       writeStatus({ connected: true })
+      perf('loop_work', tLoop)
     } catch (e) {
       writeStatus({ lastError: e.message })
       console.error('[whatsapp-worker] loop error:', e.message)
@@ -1171,6 +1551,7 @@ async function run() {
     }
 
     await sleep(POLL_INTERVAL_MS)
+    perf('loop_iteration', tLoop)
   }
 }
 

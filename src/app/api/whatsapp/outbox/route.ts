@@ -4,12 +4,17 @@ import { isWorkerAuthorized, unauthorized } from '@/lib/whatsapp/worker-auth'
 import { getAgentSettings } from '@/lib/ai/whatsapp-agent/engine'
 import { logAgent } from '@/lib/ai/agent-provider'
 
+// Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
+// only — when unset there is no behavior change and no extra logs.
+const PERF = process.env.WHATSAPP_PERF === '1'
+
 const LEASE_SECONDS = 60
 const MAX_RETRIES = 3
 const BATCH_SIZE = 10
 
 // Worker → ERP: claim pending outgoing messages (batch lock to avoid duplicate sends)
 export async function GET(request: Request) {
+  const tStart = Date.now()
   if (!isWorkerAuthorized(request)) return unauthorized()
 
   try {
@@ -59,11 +64,13 @@ export async function GET(request: Request) {
       .select('*')
 
     const claimed = updated ?? []
+    if (PERF) console.log(`[PERF] outbox_get_ms=${Date.now() - tStart} claimed=${claimed.length}`)
     if (claimed.length > 0) {
       await logAgent('outbox_claim', null, 'success', { claimed: claimed.length })
     }
     return NextResponse.json({ ok: true, messages: claimed })
   } catch (e) {
+    if (PERF) console.log(`[PERF] outbox_get_ms=${Date.now() - tStart} error`)
     await logAgent('outbox_claim', null, 'error', {}, (e as Error).message)
     return NextResponse.json({ error: 'Failed to claim messages' }, { status: 500 })
   }
@@ -71,6 +78,7 @@ export async function GET(request: Request) {
 
 // Worker → ERP: mark messages sent / failed (with retry handling)
 export async function POST(request: Request) {
+  const tStart = Date.now()
   if (!isWorkerAuthorized(request)) return unauthorized()
 
   try {
@@ -123,8 +131,10 @@ export async function POST(request: Request) {
       }
     }
 
+    if (PERF) console.log(`[PERF] outbox_post_ms=${Date.now() - tStart}`)
     return NextResponse.json({ ok: true })
   } catch (e) {
+    if (PERF) console.log(`[PERF] outbox_post_ms=${Date.now() - tStart} error`)
     return NextResponse.json({ error: (e as Error).message }, { status: 500 })
   }
 }

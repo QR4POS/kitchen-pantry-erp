@@ -13,7 +13,17 @@ import {
   searchCustomerByPhone,
   findActiveLeadByPhone,
 } from './tools'
+import { isKitchenRelatedMessage, NON_KITCHEN_REPLY } from './intent-filter'
 import type { AiAgentSettingsRow, AiConversationRow, LeadRow } from '@/types/database'
+
+// Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
+// only — when unset there is no behavior change and no extra logs.
+const PERF = process.env.WHATSAPP_PERF === '1'
+
+function perf(label: string, start: number, extra = ''): void {
+  if (!PERF) return
+  console.log(`[PERF] ${label}_ms=${Date.now() - start}${extra ? ' ' + extra : ''}`)
+}
 
 const AGENT_SETTINGS_ID = '00000000-0000-0000-0000-000000000001'
 
@@ -161,13 +171,46 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
     await logAgent('skip_message', null, 'info', { phone, reason: 'agent_disabled' })
     return
   }
+  const tEngine = Date.now()
 
+  // ── Kitchen-intent gate ──
+  // Only kitchen-related messages may enter the sales flow. Non-kitchen
+  // messages get a fixed polite reply — no Gemini call, no conversation, no
+  // lead. An active conversation makes the classifier lenient with short
+  // courteous replies (answers to earlier questions).
+  const tIntent = Date.now()
+  const normalizedPhone = normalizePhone(phone)
+  const { data: activeConv } = await admin()
+    .from('ai_conversations')
+    .select('id')
+    .eq('phone_number', normalizedPhone)
+    .in('conversation_status', ['collecting_details', 'waiting_customer'])
+    .limit(1)
+    .maybeSingle()
+
+  const kitchenRelated = await isKitchenRelatedMessage(incomingText, {
+    primary: settings.primary_provider,
+    fallback: settings.fallback_provider,
+    hasActiveConversation: Boolean(activeConv),
+  })
+  perf('intent_filter', tIntent, `phone=${phone}`)
+
+  if (!kitchenRelated) {
+    await queueOutgoingMessage(phone, NON_KITCHEN_REPLY, true)
+    await logAgent('intent_blocked', 'filter', 'success', { phone, message: incomingText })
+    perf('engine_total', tEngine, `phone=${phone} blocked`)
+    return
+  }
+
+  const tConv = Date.now()
   const { conversation, created: conversationCreated } = await getOrCreateConversation(phone)
+  perf('conversation', tConv, `phone=${phone}`)
   let collected = (conversation.collected_data ?? {}) as Record<string, unknown>
 
   try {
     // 1. Extract new details from this message via AI
     if (settings.auto_reply_enabled) {
+      const tExtract = Date.now()
       const extraction = await callAgentAI(
         [
           {
@@ -178,6 +221,7 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
         ],
         { primary: settings.primary_provider, fallback: settings.fallback_provider }
       )
+      perf('extraction_ai', tExtract, `phone=${phone} provider=${extraction.provider}`)
 
       const parsed = safeParseJson(extraction.content)
       if (parsed && typeof parsed === 'object') {
@@ -209,6 +253,7 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
     if (missing.length === 0) {
       // 2. Details complete → lead
       await finalizeConversation(conversation.id, phone, collected, settings)
+      perf('engine_total', tEngine, `phone=${phone} finalized`)
       return
     }
 
@@ -230,12 +275,14 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
           .update({ current_step: missing[0], updated_at: new Date().toISOString() })
           .eq('id', conversation.id)
         await logAgent('welcome_sent', 'fixed', 'success', { phone })
+        perf('engine_total', tEngine, `phone=${phone} welcome`)
         return
       }
     }
 
     // 3. Ask the next question
     if (settings.auto_reply_enabled) {
+      const tReply = Date.now()
       const next = await callAgentAI(
         [
           { role: 'system', content: buildSystemPrompt(collected) },
@@ -243,8 +290,11 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
         ],
         { primary: settings.primary_provider, fallback: settings.fallback_provider }
       )
+      perf('reply_ai', tReply, `phone=${phone} provider=${next.provider}`)
       const reply = next.content
+      const tQueue = Date.now()
       await queueOutgoingMessage(phone, reply, true)
+      perf('queue_out', tQueue, `phone=${phone}`)
       await admin()
         .from('ai_conversations')
         .update({
@@ -258,6 +308,7 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
         replyLength: reply.length,
       })
     }
+    perf('engine_total', tEngine, `phone=${phone}`)
   } catch (e) {
     const err = e as Error
     await logAgent('agent_error', null, 'error', { phone, message: incomingText }, err.message)
