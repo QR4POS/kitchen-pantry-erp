@@ -152,7 +152,7 @@ function ensureMessageStateMeta(state) {
   if (!Array.isArray(meta.recentSent)) meta.recentSent = []
   if (!meta.ownSenderToken) meta.ownSenderToken = null
   state.meta = meta
-  return state
+  return meta
 }
 
 // Normalized message text used to match outgoing evidence against DOM text
@@ -202,7 +202,7 @@ function recordSentMessage(state, text) {
   const norm = normalizeMessageText(text)
   if (!norm) return
   const now = Date.now()
-  const fresh = meta.recentSent.filter((e) => now - (e.ts || 0) < RECENT_SENT_TTL_MS)
+  const fresh = (meta.recentSent || []).filter((e) => now - (e.ts || 0) < RECENT_SENT_TTL_MS)
   fresh.push({ text: norm, ts: now })
   meta.recentSent = fresh.slice(-RECENT_SENT_MAX)
   saveMessageState(state)
@@ -234,14 +234,14 @@ function loadMessageState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(LAST_MESSAGES_FILE, 'utf-8'))
     if (parsed && parsed.chats && typeof parsed.chats === 'object') {
-      return ensureMessageStateMeta({
-        version: 2,
-        chats: parsed.chats,
-        meta: parsed.meta || {},
-      })
+      const loaded = { version: 2, chats: parsed.chats, meta: parsed.meta || {} }
+      ensureMessageStateMeta(loaded)
+      return loaded
     }
   } catch { /* first run or corrupt file — start fresh */ }
-  return ensureMessageStateMeta({ version: 2, chats: {}, meta: {} })
+  const fresh = { version: 2, chats: {}, meta: {} }
+  ensureMessageStateMeta(fresh)
+  return fresh
 }
 
 function saveMessageState(state) {
