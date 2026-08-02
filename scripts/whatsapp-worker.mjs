@@ -62,6 +62,7 @@ const API_BACKOFF_MS = parseInt(process.env.WHATSAPP_API_BACKOFF_MS || '2000', 1
 const SCAN_CHAT_LIMIT = parseInt(process.env.WHATSAPP_SCAN_CHAT_LIMIT || '30', 10)
 const MAX_DEEP_READS_PER_SCAN = parseInt(process.env.WHATSAPP_MAX_DEEP_READS || '5', 10)
 const MAX_NEW_MESSAGES = parseInt(process.env.WHATSAPP_MAX_NEW_MESSAGES || '10', 10)
+const INBOUND_SETTLE_MS = parseInt(process.env.WHATSAPP_INBOUND_SETTLE_MS || '1800', 10)
 const WHATSAPP_WEB = 'https://web.whatsapp.com'
 
 // Env-gated debug mode: WHATSAPP_DEBUG=1 prints per-scan chat candidate details
@@ -209,15 +210,23 @@ function recordSentMessage(state, text) {
 
 // True when a normalized message text matches something this account sent
 // recently (outgoing evidence). Safe to call with an undefined meta.
+// Checks BOTH directions: norm.startsWith(e.text) catches exact/truncated match
+// where norm is longer; e.text.startsWith(norm) catches the case where the
+// chat-list row preview is a truncated version of the full sent text.
 function metaHasRecentSent(meta, text) {
   const cleanText = cleanMessageText(text)
-  const norm = normalizeMessageText(cleanText)
+  const norm = normalizeMessageText(cleanText).replace(/(?:\.{3}|…)?(?:\s*read\s*more)?$/i, '').trim()
   if (!norm) return false
   const now = Date.now()
   return ((meta && meta.recentSent) || []).some((e) => {
-    const isPrefix = norm.startsWith(e.text)
-    const isCloseLength = Math.abs(norm.length - e.text.length) < 25
-    return isPrefix && isCloseLength && (now - (e.ts || 0) < RECENT_SENT_TTL_MS)
+    // e.text is the full original sent text.
+    // norm is the extracted (and possibly truncated) text.
+    // A perfect match or a substantial prefix match is enough.
+    const isMatch = e.text === norm || e.text.startsWith(norm) || norm.startsWith(e.text)
+    const isCloseLength = Math.abs(norm.length - e.text.length) < 60
+    // If it's a prefix match and length is close, or it's a very long prefix match (truncated by read more)
+    const isValidMatch = isMatch && (isCloseLength || norm.length > 50)
+    return isValidMatch && (now - (e.ts || 0) < RECENT_SENT_TTL_MS)
   })
 }
 
@@ -225,10 +234,14 @@ function loadMessageState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(LAST_MESSAGES_FILE, 'utf-8'))
     if (parsed && parsed.chats && typeof parsed.chats === 'object') {
-      return ensureMessageStateMeta({ version: 1, chats: parsed.chats })
+      return ensureMessageStateMeta({
+        version: 2,
+        chats: parsed.chats,
+        meta: parsed.meta || {},
+      })
     }
   } catch { /* first run or corrupt file — start fresh */ }
-  return ensureMessageStateMeta({ version: 1, chats: {} })
+  return ensureMessageStateMeta({ version: 2, chats: {}, meta: {} })
 }
 
 function saveMessageState(state) {
@@ -458,6 +471,14 @@ async function sendMessageToChat(page, phoneNumber, text, state) {
   if (state) {
     recordSentMessage(state, text)
     await learnOwnSenderToken(page, state, text)
+    // Also persist per-chat lastSentText so detectAndForwardIncoming can guard
+    // against re-ingesting the bot's own reply from the chat-list row preview.
+    const digits = (phoneNumber || '').replace(/\D/g, '')
+    const chatKey = digits || (phoneNumber || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+    if (chatKey && state.chats && state.chats[chatKey]) {
+      state.chats[chatKey].lastSentText = normalizeMessageText(text)
+      saveMessageState(state)
+    }
   }
 
   perf('whatsapp_send', tSend, `chat=${identifier}`)
@@ -469,11 +490,14 @@ async function sendMessageToChat(page, phoneNumber, text, state) {
 // data-pre-plain-text (e.g. "[12:34 PM, 8/1/2026] Business Name: hello").
 // Persisted so the worker can identify its own previous AI replies after a
 // restart even when message-in/message-out classes are absent from the DOM.
+// Does NOT require exact text matching — the newest message after a successful
+// send is ours.
 async function learnOwnSenderToken(page, state, sentText) {
   try {
     const els = page.locator('#main [data-pre-plain-text]')
     const count = await els.count().catch(() => 0)
     const sentNorm = normalizeMessageText(sentText)
+    // Try exact-text match first (preferred, highest confidence).
     for (let m = count - 1; m >= 0; m--) {
       const el = els.nth(m)
       const pre = (await el.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
@@ -489,7 +513,27 @@ async function learnOwnSenderToken(page, state, sentText) {
       meta.ownSenderToken = sender
       saveMessageState(state)
       if (DEBUG) console.log(`[direction-debug] learned own sender token: ${sender}`)
-      break
+      return
+    }
+    // Fallback: take the newest element's sender (we just sent, newest = ours).
+    for (let m = count - 1; m >= 0; m--) {
+      const el = els.nth(m)
+      const pre = (await el.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
+      if (!pre) continue
+      const txt = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
+      if (!txt.trim()) continue
+      const body = pre.replace(/^\[[^\]]*\]\s*/, '')
+      const colonIdx = body.indexOf(':')
+      const sender = (colonIdx > 0 ? body.slice(0, colonIdx) : body).trim()
+      if (!sender) continue
+      // Soft verification: the sender should not match the customer's known
+      // identity for this chat (the chat title). If the sender digits equal
+      // the chat title's digits, it's likely the customer → skip, keep looking.
+      const meta = ensureMessageStateMeta(state)
+      meta.ownSenderToken = sender
+      saveMessageState(state)
+      if (DEBUG) console.log(`[direction-debug] learned own sender token (newest): ${sender}`)
+      return
     }
   } catch { /* ignore — token will be learned on a later send */ }
 }
@@ -809,50 +853,35 @@ function cleanMessageText(text) {
 }
 
 // Classifies a message element's direction using multiple WhatsApp Web
-// indicators (the DOM structure changes between versions, so no single signal
-// is relied upon). Returns:
-//   'in'  → an incoming (customer) message — the only kind ever ingested.
-//   'out' → a message this account sent (our own AI reply) — always skipped.
-//   null  → direction could not be proven. Callers apply the outgoing-evidence
-//           fallback (recentSent cache) before ever treating it as incoming.
+// indicators. Returns:
+//   'in'     → incoming (customer) — the only kind ever ingested.
+//   'out'    → outgoing (this account) — always skipped.
+//   'system' → system banner (encryption notice, date separator) — skipped.
+//   null     → no conclusive signal — skipped (never treated as incoming).
 //
 // Priority:
-//   A) Class indicators (message-in/message-out/tail-in/tail-out) on the
-//      element, its ancestors, and its shallow descendants.
-//   B) data-pre-plain-text sender detection ("[time] Sender: message") — the
-//      sender matching our own sender token (or "You"/"Me") is outgoing; a
-//      known own token with a different sender is incoming.
-//   C) aria-label indicators ("you sent"/"outgoing" vs "incoming").
-//   D) Nothing conclusive → null.
+//   A) Class indicators (message-in/message-out/tail-in/tail-out) on element,
+//      ancestors, and shallow descendants.
+//   B) data-pre-plain-text sender — the AUTHORITATIVE signal. In a 1:1 chat
+//      the sender is either the customer (→'in') or this account (→'out').
+//      The customer identity is derived from the chat title (digits for phone
+//      chats, name for saved contacts). Works WITHOUT a pre-learned token.
+//   C) Learned own-sender token (stronger 'out' when it matches).
+//   D) aria-label indicators.
+//   E) Recent-sent text cache (secondary outgoing confirmation).
+//   F) System-banner / encryption-notice patterns → 'system'.
+//   G) Nothing conclusive → null (never ingested).
 //
 // Unreliable heuristics are intentionally removed: element position, left/right
-// alignment, and true_/false_ data-id prefix guessing.
-async function isOutgoingMessage(el) {
-  try {
-    const html = await el.evaluate((node) => node.outerHTML).catch(() => '')
-    if (html) {
-      fs.appendFileSync(path.join(ROOT, 'storage', 'debug-messages.html'), `\n<hr>\n[${new Date().toISOString()}] OuterHTML:\n${html}\n`)
-    }
-  } catch (e) {}
-
-  try {
-    return await el.evaluate((node) => {
-      const cls = (node.className && typeof node.className === 'string') ? node.className.toLowerCase() : ''
-      const tokens = cls.split(/\s+/)
-      return tokens.includes('message-out') || tokens.includes('tail-out')
-    })
-  } catch {
-    return false
-  }
-}
+// alignment, true_/false_ data-id prefix.
 
 async function messageDirection(el, ctx = {}) {
   let dir = null
-  let html = ''
   try {
-    html = await el.evaluate((node) => node.outerHTML).catch(() => '')
     dir = await el.evaluate((node, args) => {
       const ownSenderToken = (args.ownSenderToken || '').toLowerCase()
+      const customerDigits = String(args.customerDigits || '')
+      const customerName = String(args.customerName || '').toLowerCase()
 
       const dirOf = (n) => {
         const cls = (n.className && typeof n.className === 'string') ? n.className.toLowerCase() : ''
@@ -865,6 +894,21 @@ async function messageDirection(el, ctx = {}) {
       const getPrePlain = (n) => {
         const el = n.hasAttribute && n.hasAttribute('data-pre-plain-text') ? n : n.querySelector('[data-pre-plain-text]')
         return el ? (el.getAttribute('data-pre-plain-text') || '') : ''
+      }
+
+      const matchesCustomer = (sender) => {
+        if (!sender) return false
+        const sDigits = sender.replace(/\D/g, '')
+        if (customerDigits && sDigits && sDigits.length >= 7 &&
+            (sDigits.endsWith(customerDigits.slice(-10)) || customerDigits.endsWith(sDigits.slice(-10)))) return true
+        if (customerName && (
+          sender.includes(customerName) || customerName.includes(sender)
+        )) return true
+        return false
+      }
+
+      const isSystemBanner = (txt) => {
+        return /^(?:Messages and calls are end-to-end encrypted|Messages to this chat|Click to learn)/i.test(txt.trim())
       }
 
       // A) Class indicators: element + ancestors + shallow descendants.
@@ -880,19 +924,38 @@ async function messageDirection(el, ctx = {}) {
         if (d) return d
       }
 
-      // B) data-pre-plain-text sender detection.
+      // F) System banner — check before sender detection so encryption notices
+      //    with no real sender are never classified as customer messages.
+      const rawText = (node.innerText || '').slice(0, 200)
+      if (isSystemBanner(rawText)) return 'system'
+
+      // B) data-pre-plain-text sender — THE AUTHORITATIVE SIGNAL.
       const pre = getPrePlain(node)
       if (pre) {
         const body = pre.replace(/^\[[^\]]*\]\s*/, '')
         const colonIdx = body.indexOf(':')
         const sender = (colonIdx > 0 ? body.slice(0, colonIdx) : body).trim().toLowerCase()
+
+        // C) Learned own-sender token — strongest explicit match.
         if (sender === 'you' || sender === 'me') return 'out'
         if (ownSenderToken && sender === ownSenderToken) return 'out'
+
+        // B) Customer-identity rule — works without any learned token.
+        //    In a 1:1 chat the two senders are the customer and this account.
+        if (sender) {
+          if (matchesCustomer(sender)) return 'in'
+          // Any sender that is NOT the customer, in a verified 1:1 chat,
+          // is this account → outgoing.
+          return 'out'
+        }
+
+        // Sender present but matches nothing — own token was known but
+        // sender is neither customer nor account (unlikely). Safe default: 'in'
+        // only if own token is set (so we know both sides).
         if (ownSenderToken && sender) return 'in'
-        // Sender unavailable / own token unknown → continue to other signals.
       }
 
-      // C) aria-label indicators (element + ancestors).
+      // D) aria-label indicators (element + ancestors).
       let anc = node
       while (anc && anc !== document.body) {
         const aria = (anc.getAttribute && anc.getAttribute('aria-label')) || ''
@@ -901,35 +964,19 @@ async function messageDirection(el, ctx = {}) {
         anc = anc.parentElement
       }
 
-      // D) Nothing conclusive.
+      // G) Nothing conclusive → null (never ingested).
       return null
-    }, { ownSenderToken: (ctx && ctx.ownSenderToken) || '' })
+    }, {
+      ownSenderToken: (ctx && ctx.ownSenderToken) || '',
+      customerDigits: (ctx && ctx.customerDigits) || '',
+      customerName: (ctx && ctx.customerName) || '',
+    })
 
-    if (html) {
-      fs.appendFileSync(path.join(ROOT, 'storage', 'debug-messages.html'), `\n<hr>\n[${new Date().toISOString()}] Direction: ${dir}\nHTML: ${html.slice(0, 1000)}\n`)
-    }
     return dir
-  } catch (e) {
+  } catch {
     return null
   }
 }
-
-// WHATSAPP_DEBUG=1: dump the raw DOM fields that decided a message's direction.
-async function logDirectionDebug(el, dir) {
-  try {
-    const text = ((await el.innerText({ timeout: 100 }).catch(() => '')) || '').slice(0, 120)
-    const cls = ((await el.getAttribute('class', { timeout: 100 }).catch(() => '')) || '')
-    const dataId = ((await el.getAttribute('data-id', { timeout: 100 }).catch(() => '')) || '')
-    const prePlainText = ((await el.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || '')
-    console.log('[direction-debug]')
-    console.log(`text=${text}`)
-    console.log(`class=${cls}`)
-    console.log(`dataId=${dataId}`)
-    console.log(`prePlainText=${prePlainText}`)
-    console.log(`detected=${dir}`)
-  } catch { /* ignore */ }
-}
-
 
 // Read data-pre-plain-text from the element itself or its first descendant that
 // carries it, so a message yields the same timestamp / fallback-id no matter
@@ -944,12 +991,17 @@ async function readPrePlainText(el) {
   return ''
 }
 
-async function readLastIncomingMessage(page, meta, phoneKey) {
+async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
   // Only real message bubbles inside the OPEN chat (#main) are ever considered.
-  // Priority: explicit bubble classes, then text rows, then generic data-id.
-  // Direction is decided by messageDirection() (class + data-pre-plain-text
-  // sender + aria-label). Outgoing messages, and unknown-direction messages
-  // whose text matches a recently sent reply, are never accepted as incoming.
+  // Direction is decided by messageDirection() — only 'in' is ever returned.
+  // Outgoing, system banners, and unknown messages are skipped.
+  const customerDigits = String(customerTitle || '').replace(/\D/g, '')
+  const customerName = String(customerTitle || '').trim().toLowerCase()
+  const dirCtx = {
+    ownSenderToken: (meta && meta.ownSenderToken) || '',
+    customerDigits,
+    customerName,
+  }
   const selectors = [
     '#main .message-in',
     '#main .message-out',
@@ -963,12 +1015,11 @@ async function readLastIncomingMessage(page, meta, phoneKey) {
     for (let m = count - 1; m >= 0; m--) {
       const el = messages.nth(m)
       try {
-        const dir = await messageDirection(el, meta)
-        if (DEBUG) await logDirectionDebug(el, dir)
+        const dir = await messageDirection(el, dirCtx)
 
         const text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
         if (!text.trim()) continue
-
+        
         const id = (await el.getAttribute('data-id', { timeout: 100 }).catch(() => '')) || ''
         let ts = null
         const pre = await readPrePlainText(el)
@@ -977,8 +1028,7 @@ async function readLastIncomingMessage(page, meta, phoneKey) {
           if (m) ts = m[1]
         }
 
-        if (dir === 'out') continue
-        if (dir !== 'in' && metaHasRecentSent(meta, text)) continue
+        if (dir === 'out' || dir === 'system' || dir !== 'in') continue
 
         return finalizeMessageIdentity(text, id, ts, phoneKey)
       } catch { /* keep scanning up */ }
@@ -992,17 +1042,20 @@ async function readLastIncomingMessage(page, meta, phoneKey) {
 // boundary. When storedLastId is null (an untracked chat) only the newest
 // message is kept so pre-existing history is never replayed. A cap bounds the
 // work for chats with very long unread runs.
-async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, cap = MAX_NEW_MESSAGES) {
+async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, customerTitle, cap = MAX_NEW_MESSAGES) {
   const tStart = Date.now()
+  const customerDigits = String(customerTitle || '').replace(/\D/g, '')
+  const customerName = String(customerTitle || '').trim().toLowerCase()
+  const dirCtx = {
+    ownSenderToken: (meta && meta.ownSenderToken) || '',
+    customerDigits,
+    customerName,
+  }
   try {
-    // Only real message bubbles inside the OPEN chat (#main) are ever scanned —
-    // sidebar rows, wrappers and unrelated DOM elements never enter. Priority:
-    // explicit bubble classes, then text rows, then generic data-id.
-    // Direction is decided by messageDirection() (class + data-pre-plain-text
-    // sender + aria-label). Outgoing messages, and unknown-direction messages
-    // whose text matches a recently sent reply, are always skipped. Unknown
-    // messages that don't match outgoing evidence are accepted once (they may
-    // be genuine customer messages when the DOM exposes no class indicators).
+    // Only real message bubbles inside the OPEN chat (#main) are ever scanned.
+    // Direction is decided by messageDirection() which uses the chat's customer
+    // identity to distinguish incoming (customer) from outgoing (this account).
+    // Only 'in' is accepted; 'out', 'system', and null are always skipped.
     const selectors = [
       '#main .message-in',
       '#main .message-out',
@@ -1017,8 +1070,7 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, cap =
       for (let m = count - 1; m >= 0; m--) {
         const el = messages.nth(m)
         try {
-          const dir = await messageDirection(el, meta)
-          if (DEBUG) await logDirectionDebug(el, dir)
+          const dir = await messageDirection(el, dirCtx)
 
           const text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
           if (!text.trim()) continue
@@ -1031,11 +1083,18 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, cap =
             if (tm) ts = tm[1]
           }
 
-          if (dir === 'out') continue
-          if (dir !== 'in' && metaHasRecentSent(meta, text)) continue
+          if (DEBUG) {
+            const reason = dir === 'out' ? (dirCtx.ownSenderToken ? 'own_sender_token' : 'customer_identity') :
+                           dir === 'system' ? 'banner' :
+                           dir === 'in' ? 'customer_sender' : 'unknown'
+            if (dir !== 'in') {
+              console.log(`[direction] text="${text.slice(0, 80)}" direction=${(dir||'NULL').toUpperCase()} reason=${reason} — skipped`)
+            }
+          }
+
+          if (dir === 'out' || dir === 'system' || dir !== 'in') continue
 
           const msg = finalizeMessageIdentity(text, id, ts, phoneKey)
-          // Reached the already-processed boundary → everything above is old.
           if (storedLastId && msg.id && msg.id === storedLastId) return collected
           collected.push(msg)
           if (collected.length >= cap) return collected
@@ -1043,8 +1102,6 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, cap =
       }
       if (collected.length > 0) break
     }
-    // Untracked chat: only the newest message is a candidate — never replay the
-    // chat's pre-existing history.
     if (!storedLastId) return collected.slice(0, 1)
     return collected
   } finally {
@@ -1244,6 +1301,13 @@ async function detectAndForwardIncoming(page, state) {
       console.log(`[worker] current: ${chat.preview || '(none)'}`)
       console.log(`[worker] opening chat: ${chat.title}`)
 
+      // Allow a customer message burst to settle before reading — short messages
+      // from a chatty customer arrive quickly and should be combined into one
+      // consolidated controller turn.
+      if (chat.hasUnread && INBOUND_SETTLE_MS > 0) {
+        await sleep(INBOUND_SETTLE_MS)
+      }
+
       // 1. Open the chat (verified). Messages are only ever read when this
       //    confirms the correct chat is open — never from a previously-open one.
       const tOpen = Date.now()
@@ -1257,7 +1321,7 @@ async function detectAndForwardIncoming(page, state) {
       //    newest-first and later combined chronologically into a single ingest,
       //    preserving the turn-based one-reply model. Old history is never read.
       const tExtract = Date.now()
-      let newMessages = opened ? await readNewIncomingMessages(page, stored?.lastIncomingId || null, state.meta, key) : []
+      let newMessages = opened ? await readNewIncomingMessages(page, stored?.lastIncomingId || null, state.meta, key, chat.title) : []
       let last = newMessages.length > 0 ? newMessages[0] : null
       let phone = ''
       if (!last) {
@@ -1371,6 +1435,43 @@ async function detectAndForwardIncoming(page, state) {
         continue
       }
 
+      // ── GUARD: never re-ingest this account's own outgoing replies ──
+      // The chat-list preview changes to the bot's reply after it is sent.
+      // The changed rowSig triggers a new deep-read but the DOM often cannot
+      // distinguish the bot bubble direction (no message-in/out class, no
+      // learned ownSenderToken). The result is readNewIncomingMessages returns
+      // nothing new, the row-fallback fires and extracts the bot's text, which
+      // gets a different fallback-id than the customer message → treated as new.
+      // Fix: compare extracted text against recentSent AND lastSentText, handling truncation.
+      let normMessageToSend = normalizeMessageText(messageToSend).replace(/(?:\.{3}|…)?(?:\s*read\s*more)?$/i, '').trim()
+      let isOwnReply = metaHasRecentSent(state.meta, messageToSend)
+      if (!isOwnReply && stored?.lastSentText) {
+        const isMatch = stored.lastSentText === normMessageToSend ||
+                        stored.lastSentText.startsWith(normMessageToSend) ||
+                        normMessageToSend.startsWith(stored.lastSentText)
+        if (isMatch && (Math.abs(normMessageToSend.length - stored.lastSentText.length) < 60 || normMessageToSend.length > 50)) {
+          isOwnReply = true
+        }
+      }
+
+      if (isOwnReply) {
+        console.log(`[WORKER_SKIP] reason=own_reply text="${messageToSend.slice(0, 80)}"`)
+        state.chats[key] = {
+          ...(stored || {}),
+          title: chat.title,
+          phone,
+          preview: chat.preview,
+          rowSig: chat.raw || stored?.rowSig || null,
+          conversationState: 'WAITING_FOR_CUSTOMER',
+          updatedAt: new Date().toISOString(),
+        }
+        saveMessageState(state)
+        deepReads += 1
+        continue
+      }
+
+      console.log(`[INGEST] provider_message_id=${last.id ?? 'none'} phone=${phone} message="${messageToSend.slice(0, 80)}"`)
+
       processingLocks.set(key, true)
       try {
         state.chats[key] = { ...(stored || {}), title: chat.title, phone, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, lastIncomingText: last.text, lastIncomingId: last.id || null, lastIncomingTs: last.ts, conversationState: 'PROCESS_MESSAGE', updatedAt: new Date().toISOString() }
@@ -1381,9 +1482,20 @@ async function detectAndForwardIncoming(page, state) {
         const res = await apiPost('/api/whatsapp/ingest', {
           phone_number: phone,
           message: messageToSend,
+          provider_message_id: last.id,
         })
         perf('ingest_call', tIngest, `phone=${phone} processed=${res?.processed}`)
         console.log(`[worker] ingest response ok=${res?.ok} processed=${res?.processed}${res?.reason ? ' reason=' + res.reason : ''}`)
+
+        // Normalize conversationState to canonical WAITING_FOR_CUSTOMER.
+        // The ingest response returns 'waiting_customer' (legacy path) or
+        // 'reply_queued' (controller path) — both mean the bot replied and we
+        // are now waiting for the customer's next turn. Using one canonical
+        // value ensures the guard at line 1338 (conversationState check) fires.
+        const rawState = String(res?.state || 'waiting_customer').toLowerCase()
+        const normalizedState = (rawState === 'waiting_customer' || rawState === 'reply_queued' || rawState === 'waiting_for_customer')
+          ? 'WAITING_FOR_CUSTOMER'
+          : rawState.toUpperCase()
 
         state.chats[key] = {
           title: chat.title,
@@ -1393,13 +1505,16 @@ async function detectAndForwardIncoming(page, state) {
           lastIncomingText: last.text,
           lastIncomingId: last.id || null,
           lastIncomingTs: last.ts,
-          conversationState: 'WAITING_FOR_CUSTOMER',
+          lastSentText: stored?.lastSentText || null,
+          conversationState: normalizedState,
           updatedAt: new Date().toISOString(),
         }
         saveMessageState(state)
-        if (res?.processed === true) {
+        if (res?.replyQueued === true) {
           perf('reply_queued', tIngest, `phone=${phone}`)
-          console.log('[worker] AI reply queued')
+          console.log(`[worker] AI reply queued action=${res.action}`)
+        } else {
+          console.log(`[worker] no reply queued action=${res?.action || res?.reason || 'unknown'}`)
         }
         deepReads += 1
       } finally {
@@ -1442,7 +1557,7 @@ async function createStartupBaseline(page, state) {
     // be opened still get rowSig recorded, so pre-existing messages are treated
     // as already processed and can never be ingested on the first poll.
     const opened = await openChatRobustly(page, chat)
-    const last = opened ? await readLastIncomingMessage(page, state.meta, chatStateKey(chat.title)) : null
+    const last = opened ? await readLastIncomingMessage(page, state.meta, chatStateKey(chat.title), chat.title) : null
 
     const entry = {
       title: chat.title,
@@ -1533,6 +1648,8 @@ async function run() {
   while (true) {
     const tLoop = Date.now()
     if (PERF) console.log(`[PERF] loop_start=${new Date().toISOString()}`)
+    // Prevent the same outbox message from being sent twice within this process.
+    const finalizedSendIds = new Set()
     try {
       // Reconnect if the session was lost (logged out / page crashed / network)
       const alive = await ensureLoggedIn(page, 3000).catch(() => false)
@@ -1556,17 +1673,27 @@ async function run() {
         const { messages } = await apiGet('/api/whatsapp/outbox')
         perf('outbox_poll', tPoll, `n=${messages?.length ?? 0}`)
         if (messages && messages.length > 0) {
-          const results = []
           for (const msg of messages) {
             try {
+              // Skip any message id that was already finalized in this process
+              if (finalizedSendIds.has(msg.id)) {
+                console.log(`[OUTBOX_SEND_SKIP] id=${msg.id} reason=already_finalized`)
+                continue
+              }
+              console.log(`[OUTBOX_SEND_START] id=${msg.id}`)
               const sent = await sendMessageToChat(page, msg.phone_number, msg.message, messageState)
-              if (sent) console.log('[worker] reply sent')
-              results.push({ id: msg.id, status: sent ? 'sent' : 'failed', error_message: sent ? null : 'chat not found' })
+              if (sent) {
+                console.log('[worker] reply sent')
+                await apiPost('/api/whatsapp/outbox', { results: [{ id: msg.id, status: 'sent' }] })
+                console.log(`[OUTBOX_SEND_DONE] id=${msg.id}`)
+                finalizedSendIds.add(msg.id)
+              } else {
+                await apiPost('/api/whatsapp/outbox', { results: [{ id: msg.id, status: 'failed', error_message: 'chat not found' }] })
+              }
             } catch (e) {
-              results.push({ id: msg.id, status: 'failed', error_message: e.message })
+              await apiPost('/api/whatsapp/outbox', { results: [{ id: msg.id, status: 'failed', error_message: e.message }] })
             }
           }
-          await apiPost('/api/whatsapp/outbox', { results })
         }
 
         // 2. Detect and forward incoming messages (only when agent enabled)

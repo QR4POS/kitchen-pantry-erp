@@ -12,8 +12,11 @@ import {
   createNotification,
   searchCustomerByPhone,
   findActiveLeadByPhone,
+  getRecentWhatsAppHistory,
 } from './tools'
 import { isKitchenRelatedMessage, NON_KITCHEN_REPLY } from './intent-filter'
+import { decideConversationTurn } from './controller'
+import type { ConversationDecision } from './controller'
 import type { AiAgentSettingsRow, AiConversationRow, LeadRow } from '@/types/database'
 
 // Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
@@ -26,6 +29,13 @@ function perf(label: string, start: number, extra = ''): void {
 }
 
 const AGENT_SETTINGS_ID = '00000000-0000-0000-0000-000000000001'
+
+export interface ProcessWhatsAppResult {
+  action: 'reply' | 'wait' | 'handoff' | 'close'
+  state: string
+  replyQueued: boolean
+  conversationId: string | null
+}
 
 // Required fields to collect, in order
 const REQUIRED_FIELDS = [
@@ -52,26 +62,51 @@ export async function getAgentSettings(): Promise<AiAgentSettingsRow | null> {
 }
 
 // ── Conversation lookup / create (memory) ──
-// Only an in-progress (collecting_details) conversation is resumed. A
-// completed/approved/rejected conversation is closed — a new message starts
-// a fresh conversation, so a finished lead can never be re-created.
+// Only resumable-state conversations are reused. A conversation in a terminal
+// / suppressed state (human_active, ai_suppressed) is never auto-resumed.
 export async function getOrCreateConversation(phone: string): Promise<{
   conversation: AiConversationRow
   created: boolean
+  genuinelyNew: boolean
 }> {
   const normalized = normalizePhone(phone)
   const { data: existing } = await admin()
     .from('ai_conversations')
     .select('*')
     .eq('phone_number', normalized)
-    .eq('conversation_status', 'collecting_details')
+    .in('conversation_status', [
+      'collecting_details',
+      'processing',
+      'reply_queued',
+      'waiting_customer',
+      'paused',
+      'qualified',
+      'closed',
+    ])
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
 
-  if (existing) return { conversation: existing as unknown as AiConversationRow, created: false }
+  if (existing) return { conversation: existing as unknown as AiConversationRow, created: false, genuinelyNew: false }
 
-  // Link to an existing customer when possible (best-effort)
+  // Determine whether this is a genuinely new number BEFORE inserting, so the
+  // newly-created row cannot make the phone look non-new (D8 fix).
+  let genuinelyNew = true
+  try {
+    const customers = await searchCustomerByPhone(normalized)
+    if (customers.length > 0) genuinelyNew = false
+    const { data: prior } = await admin()
+      .from('ai_conversations')
+      .select('id')
+      .eq('phone_number', normalized)
+      .limit(1)
+      .maybeSingle()
+    if (prior) genuinelyNew = false
+  } catch {
+    genuinelyNew = false
+  }
+
+  // Best-effort customer linkage
   let customerId: string | null = null
   try {
     const customers = await searchCustomerByPhone(normalized)
@@ -92,29 +127,7 @@ export async function getOrCreateConversation(phone: string): Promise<{
     .select('*')
     .single()
   if (error) throw error
-  return { conversation: data as unknown as AiConversationRow, created: true }
-}
-
-// True only for a GENUINELY NEW phone number: no customer record and no prior
-// ai_conversations row (any status). Best-effort — on any lookup failure this
-// returns false (conservative: the fixed welcome is skipped and the normal
-// Gemini greeting continues, so nothing breaks).
-async function isGenuinelyNewPhone(phone: string): Promise<boolean> {
-  const normalized = normalizePhone(phone)
-  try {
-    const customers = await searchCustomerByPhone(normalized)
-    if (customers.length > 0) return false
-
-    const { data: prior } = await admin()
-      .from('ai_conversations')
-      .select('id')
-      .eq('phone_number', normalized)
-      .limit(1)
-      .maybeSingle()
-    return !prior
-  } catch {
-    return false
-  }
+  return { conversation: data as unknown as AiConversationRow, created: true, genuinelyNew }
 }
 
 export function normalizePhone(phone: string): string {
@@ -164,20 +177,205 @@ ${JSON.stringify(collected)}
 Return JSON:`
 }
 
+async function processWithConversationController(input: {
+  phone: string
+  incomingText: string
+  providerMessageId?: string | null
+  conversation: AiConversationRow
+  settings: AiAgentSettingsRow
+}): Promise<ProcessWhatsAppResult> {
+  const { phone, incomingText, providerMessageId, conversation, settings } = input
+
+  if (conversation.ai_suppressed || conversation.conversation_status === 'human_active') {
+    await logAgent('ai_reply_suppressed', null, 'info', {
+      phone,
+      conversationId: conversation.id,
+      state: conversation.conversation_status,
+    })
+    return {
+      action: 'wait',
+      state: conversation.conversation_status,
+      replyQueued: false,
+      conversationId: conversation.id,
+    }
+  }
+
+  const db = admin()
+  const now = new Date().toISOString()
+  await db
+    .from('ai_conversations')
+    .update({
+      conversation_status: 'processing',
+      last_inbound_message_id: providerMessageId ?? null,
+      updated_at: now,
+    })
+    .eq('id', conversation.id)
+
+  const collected = (conversation.collected_data ?? {}) as Record<string, unknown>
+  const declined = Array.isArray(collected._declined_fields)
+    ? collected._declined_fields.map(String)
+    : []
+  const history = await getRecentWhatsAppHistory(phone, 12)
+
+  const existingCustomers = await searchCustomerByPhone(phone).catch(() => [])
+  const activeLead = await findActiveLeadByPhone(phone).catch(() => null)
+  const crmContext = {
+    customer: existingCustomers[0] ?? null,
+    active_lead: activeLead,
+  }
+
+  const decision: ConversationDecision = await decideConversationTurn({
+    incomingText,
+    currentState: conversation.conversation_status,
+    collectedData: collected,
+    declinedFields: declined,
+    lastQuestion: conversation.last_question,
+    history,
+    crmContext,
+    primary: settings.primary_provider,
+    fallback: settings.fallback_provider,
+  })
+
+  const nextCollected = {
+    ...collected,
+    ...decision.extracted_fields,
+    _declined_fields: Array.from(new Set([
+      ...declined,
+      ...decision.declined_fields,
+    ])),
+  }
+
+  const autoReplyUnavailable = Boolean(
+    decision.reply && !settings.auto_reply_enabled
+  )
+  const suppressAi =
+    decision.action === 'handoff' ||
+    (decision.action === 'close' && decision.reply === null) ||
+    autoReplyUnavailable
+
+  const immediateState = decision.reply
+    ? settings.auto_reply_enabled
+      ? 'reply_queued'
+      : 'human_active'
+    : decision.next_state
+
+  await db
+    .from('ai_conversations')
+    .update({
+      conversation_status: immediateState,
+      collected_data: nextCollected,
+      last_intent: decision.intent,
+      last_action: decision.action,
+      last_question: decision.next_question,
+      handoff_reason: autoReplyUnavailable
+        ? 'Auto reply is disabled; staff response required'
+        : decision.handoff_reason,
+      ai_suppressed: suppressAi,
+      turn_count: (conversation.turn_count ?? 0) + 1,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', conversation.id)
+
+  if (decision.action === 'handoff' && settings.human_handoff_enabled) {
+    const adminId = await findAdminId()
+    if (adminId) {
+      await createNotification({
+        userId: adminId,
+        title: 'WhatsApp handoff required',
+        message: `${phone}: ${decision.handoff_reason ?? 'Customer needs staff help'}`,
+        type: 'lead',
+        referenceType: 'ai_conversation',
+        referenceId: conversation.id,
+      })
+    }
+  }
+
+  let queued = null
+  if (decision.reply && settings.auto_reply_enabled) {
+    queued = await queueOutgoingMessage(phone, decision.reply, true, {
+      conversationId: conversation.id,
+      sourceInboundMessageId: providerMessageId ?? null,
+      decisionAction: decision.action,
+      postSendState: decision.next_state,
+    })
+
+    if (!queued) {
+      await db
+        .from('ai_conversations')
+        .update({
+          conversation_status: 'human_active',
+          ai_suppressed: true,
+          handoff_reason: 'AI reply could not be queued; staff response required',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', conversation.id)
+
+      await logAgent('conversation_decision', null, 'error', {
+        phone,
+        conversationId: conversation.id,
+        action: 'handoff',
+        reason: 'reply_queue_failed',
+      })
+
+      return {
+        action: 'handoff',
+        state: 'human_active',
+        replyQueued: false,
+        conversationId: conversation.id,
+      }
+    }
+  }
+
+  await logAgent('conversation_decision', null, 'success', {
+    phone,
+    conversationId: conversation.id,
+    action: decision.action,
+    nextState: decision.next_state,
+    intent: decision.intent,
+    confidence: decision.confidence,
+    replyQueued: Boolean(queued),
+  })
+
+  return {
+    action: decision.action,
+    state: immediateState,
+    replyQueued: Boolean(queued),
+    conversationId: conversation.id,
+  }
+}
+
+// ── Conversation turn lock ──
+// Atomically acquires the processing lock for a conversation. Returns true
+// if this caller owns the lock (conversation was in a resumable state).
+// Only one process may hold the lock at a time — the DB UPDATE is guarded by
+// the status check so concurrent callers cannot both succeed.
+async function acquireConversationLock(conversationId: string): Promise<boolean> {
+  const { data, error } = await admin()
+    .from('ai_conversations')
+    .update({ conversation_status: 'processing', updated_at: new Date().toISOString() })
+    .eq('id', conversationId)
+    .in('conversation_status', [
+      'collecting_details', 'waiting_customer', 'paused', 'qualified', 'closed',
+    ])
+    .select('id')
+  if (error) return false
+  return Array.isArray(data) && data.length > 0
+}
+
 // ── Core: process one incoming message ──
-export async function processWhatsAppMessage(phone: string, incomingText: string): Promise<void> {
+export async function processWhatsAppMessage(
+  phone: string,
+  incomingText: string,
+  providerMessageId?: string | null
+): Promise<ProcessWhatsAppResult> {
   const settings = await getAgentSettings()
   if (!settings?.whatsapp_agent_enabled) {
     await logAgent('skip_message', null, 'info', { phone, reason: 'agent_disabled' })
-    return
+    return { action: 'wait', state: 'closed', replyQueued: false, conversationId: null }
   }
   const tEngine = Date.now()
 
   // ── Kitchen-intent gate ──
-  // Only kitchen-related messages may enter the sales flow. Non-kitchen
-  // messages get a fixed polite reply — no Gemini call, no conversation, no
-  // lead. An active conversation makes the classifier lenient with short
-  // courteous replies (answers to earlier questions).
   const tIntent = Date.now()
   const normalizedPhone = normalizePhone(phone)
   const { data: activeConv } = await admin()
@@ -196,15 +394,44 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
   perf('intent_filter', tIntent, `phone=${phone}`)
 
   if (!kitchenRelated) {
-    await queueOutgoingMessage(phone, NON_KITCHEN_REPLY, true)
+    await queueOutgoingMessage(phone, NON_KITCHEN_REPLY, true, {
+      sourceInboundMessageId: providerMessageId ?? null,
+      decisionAction: 'reply',
+      postSendState: 'waiting_customer',
+    })
     await logAgent('intent_blocked', 'filter', 'success', { phone, message: incomingText })
     perf('engine_total', tEngine, `phone=${phone} blocked`)
-    return
+    return { action: 'reply', state: 'waiting_customer', replyQueued: true, conversationId: null }
   }
 
   const tConv = Date.now()
-  const { conversation, created: conversationCreated } = await getOrCreateConversation(phone)
+  const { conversation, created: conversationCreated, genuinelyNew } = await getOrCreateConversation(phone)
   perf('conversation', tConv, `phone=${phone}`)
+
+  // ── Conversation turn lock ──
+  // Only one process may process this conversation at a time. If another
+  // caller already acquired the lock (status is 'processing'), skip.
+  if (!(await acquireConversationLock(conversation.id))) {
+    await logAgent('conversation_locked', null, 'info', {
+      phone,
+      conversationId: conversation.id,
+    })
+    console.log(`[engine] conversation locked conversation_id=${conversation.id}`)
+    return { action: 'wait', state: conversation.conversation_status, replyQueued: false, conversationId: conversation.id }
+  }
+
+  // Route to the validated conversation controller when enabled
+  if (settings.conversation_controller_enabled) {
+    return processWithConversationController({
+      phone: normalizedPhone,
+      incomingText,
+      providerMessageId,
+      conversation,
+      settings,
+    })
+  }
+
+  // === LEGACY PATH (kept until the controller is proven stable) ===
   let collected = (conversation.collected_data ?? {}) as Record<string, unknown>
 
   try {
@@ -227,8 +454,6 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
       if (parsed && typeof parsed === 'object') {
         const cleaned = cleanExtracted(parsed)
         if (Object.keys(cleaned).length > 0) {
-          // Merge against the freshest DB state to avoid lost updates when
-          // messages for the same conversation are processed concurrently.
           const { data: fresh } = await admin()
             .from('ai_conversations')
             .select('collected_data')
@@ -251,24 +476,26 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
     const missing = REQUIRED_FIELDS.filter((f) => !collected[f])
 
     if (missing.length === 0) {
-      // 2. Details complete → lead
-      await finalizeConversation(conversation.id, phone, collected, settings)
+      await finalizeConversation(conversation.id, phone, collected, settings, providerMessageId)
       perf('engine_total', tEngine, `phone=${phone} finalized`)
-      return
+      return { action: 'reply', state: 'completed', replyQueued: true, conversationId: conversation.id }
     }
 
-    // 2b. Fixed welcome for GENUINELY NEW numbers only: no customer record and
-    // no prior conversation (any status). It is a plain queue write (no LLM) so
-    // the opening message never fails on provider issues. If the queue write
-    // fails (returns null), fall through to the normal Gemini greeting.
+    // 2b. Fixed welcome for GENUINELY NEW numbers only (D8 fix: genuinelyNew is
+    //     computed BEFORE the row was inserted, so it is accurate).
     if (
       conversationCreated &&
+      genuinelyNew &&
       settings.auto_reply_enabled &&
       settings.welcome_message &&
-      settings.welcome_message.trim() &&
-      (await isGenuinelyNewPhone(phone))
+      settings.welcome_message.trim()
     ) {
-      const welcomed = await queueOutgoingMessage(phone, settings.welcome_message.trim(), true)
+      const welcomed = await queueOutgoingMessage(phone, settings.welcome_message.trim(), true, {
+        conversationId: conversation.id,
+        sourceInboundMessageId: providerMessageId ?? null,
+        decisionAction: 'reply',
+        postSendState: 'waiting_customer',
+      })
       if (welcomed) {
         await admin()
           .from('ai_conversations')
@@ -276,7 +503,7 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
           .eq('id', conversation.id)
         await logAgent('welcome_sent', 'fixed', 'success', { phone })
         perf('engine_total', tEngine, `phone=${phone} welcome`)
-        return
+        return { action: 'reply', state: 'waiting_customer', replyQueued: true, conversationId: conversation.id }
       }
     }
 
@@ -293,7 +520,12 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
       perf('reply_ai', tReply, `phone=${phone} provider=${next.provider}`)
       const reply = next.content
       const tQueue = Date.now()
-      await queueOutgoingMessage(phone, reply, true)
+      await queueOutgoingMessage(phone, reply, true, {
+        conversationId: conversation.id,
+        sourceInboundMessageId: providerMessageId ?? null,
+        decisionAction: 'reply',
+        postSendState: 'waiting_customer',
+      })
       perf('queue_out', tQueue, `phone=${phone}`)
       await admin()
         .from('ai_conversations')
@@ -309,6 +541,7 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
       })
     }
     perf('engine_total', tEngine, `phone=${phone}`)
+    return { action: 'reply', state: 'waiting_customer', replyQueued: settings.auto_reply_enabled, conversationId: conversation.id }
   } catch (e) {
     const err = e as Error
     await logAgent('agent_error', null, 'error', { phone, message: incomingText }, err.message)
@@ -316,9 +549,16 @@ export async function processWhatsAppMessage(phone: string, incomingText: string
       await queueOutgoingMessage(
         phone,
         'Thank you for your message! Our team is currently offline but will get back to you shortly.',
-        true
+        true,
+        {
+          conversationId: conversation.id,
+          sourceInboundMessageId: providerMessageId ?? null,
+          decisionAction: 'reply',
+          postSendState: 'waiting_customer',
+        }
       )
     }
+    return { action: 'handoff', state: 'human_active', replyQueued: settings.auto_reply_enabled, conversationId: conversation.id }
   }
 }
 
@@ -327,7 +567,8 @@ async function finalizeConversation(
   conversationId: string,
   phone: string,
   collected: Record<string, unknown>,
-  settings: AiAgentSettingsRow
+  settings: AiAgentSettingsRow,
+  providerMessageId?: string | null
 ): Promise<void> {
   await admin()
     .from('ai_conversations')
@@ -419,7 +660,12 @@ async function finalizeConversation(
       settings.admin_approval_required
         ? `Thank you! We have all your details. Our team will review and get back to you with a kitchen plan soon.`
         : `DONE Thank you! We have all your details. Our team will contact you shortly with a kitchen plan.`
-    await queueOutgoingMessage(phone, confirm, true)
+    await queueOutgoingMessage(phone, confirm, true, {
+      conversationId,
+      sourceInboundMessageId: providerMessageId ?? null,
+      decisionAction: 'reply',
+      postSendState: 'completed',
+    })
   }
 }
 

@@ -230,7 +230,20 @@ export interface AuditLogRow {
 
 // ── AI WhatsApp Sales Agent ──
 
-export type AiConversationStatus = 'collecting_details' | 'completed' | 'approved' | 'rejected'
+export type AiConversationStatus =
+  | 'collecting_details'
+  | 'processing'
+  | 'reply_queued'
+  | 'waiting_customer'
+  | 'paused'
+  | 'human_active'
+  | 'qualified'
+  | 'closed'
+  | 'completed'
+  | 'approved'
+  | 'rejected'
+
+export type ConversationAction = 'reply' | 'wait' | 'handoff' | 'close'
 export type WhatsappDirection = 'incoming' | 'outgoing'
 export type WhatsappMessageStatus = 'pending' | 'processing' | 'sent' | 'failed'
 export type LeadStatus = 'new' | 'collecting' | 'waiting_approval' | 'approved' | 'rejected' | 'converted'
@@ -247,6 +260,8 @@ export interface AiAgentSettingsRow {
   primary_provider: string
   fallback_provider: string
   welcome_message: string | null
+  conversation_controller_enabled: boolean
+  human_handoff_enabled: boolean
   created_at: string
   updated_at: string
 }
@@ -258,6 +273,17 @@ export interface AiConversationRow {
   conversation_status: AiConversationStatus
   current_step: string | null
   collected_data: Record<string, unknown> | null
+  last_intent: string | null
+  last_action: ConversationAction | null
+  last_question: string | null
+  last_inbound_message_id: string | null
+  last_outbound_message_id: string | null
+  ai_suppressed: boolean
+  handoff_reason: string | null
+  paused_until: string | null
+  language_code: string | null
+  turn_count: number
+  misunderstanding_count: number
   created_at: string
   updated_at: string
 }
@@ -274,6 +300,11 @@ export interface WhatsappMessageRow {
   dedup_key: string | null
   claimed_at: string | null
   retry_count: number
+  provider_message_id: string | null
+  source_inbound_message_id: string | null
+  conversation_id: string | null
+  decision_action: ConversationAction | null
+  post_send_state: AiConversationStatus | null
   created_at: string
 }
 

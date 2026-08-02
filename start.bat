@@ -105,9 +105,26 @@ echo.
 
 REM ---------------------------------------------------------------
 echo [5/5] Starting the WhatsApp AI worker in a separate window...
+echo.
+echo    Debug mode logs every DOM direction decision.
+echo    Enable it when troubleshooting the worker (loop / detection).
+set "DEBUG_MODE="
+set /p "DEBUG_MODE=    Enable WHATSAPP_DEBUG? (y/N): " <nul 2>nul || set "DEBUG_MODE=N"
+if /i "%DEBUG_MODE%"=="y" (
+    echo    -> Worker starting with WHATSAPP_DEBUG=1
+    start "WhatsApp Worker" cmd /k "cd /d ""%~dp0"" && ping -n 6 127.0.0.1 >nul && set WHATSAPP_DEBUG=1 && npm run whatsapp-worker"
+) else (
+    echo    -> Worker starting (normal mode)
+    echo       Set WHATSAPP_DEBUG=1 in .env.local for persistent debug logging.
+    start "WhatsApp Worker" cmd /k "cd /d ""%~dp0"" && ping -n 6 127.0.0.1 >nul && npm run whatsapp-worker"
+)
 echo    First run: scan the WhatsApp Web QR code in the worker window.
 echo    If you do not need the worker, just close its window.
-start "WhatsApp Worker" cmd /k "cd /d ""%~dp0"" && ping -n 6 127.0.0.1 >nul && npm run whatsapp-worker"
+echo    Logs: storage\whatsapp-worker.log  (when started via Admin)
+echo          storage\whatsapp-last-messages.json (dedup state + outgoing evidence)
+echo          console output (this worker window)
+echo    Debug: set WHATSAPP_DEBUG=1 in .env.local OR answer 'y' above.
+echo           set WHATSAPP_PERF=1  in .env.local for performance timings.
 echo.
 
 echo Starting the Next.js server, opening the website automatically...

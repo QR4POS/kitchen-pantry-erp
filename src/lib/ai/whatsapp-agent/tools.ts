@@ -7,6 +7,7 @@
 import { createAdminClient } from '@/lib/supabase/admin'
 import { logAgent } from '@/lib/ai/agent-provider'
 import { incomingDedupKey, outgoingDedupKey } from './dedup'
+import { createHash } from 'node:crypto'
 import type { LeadStatus, LeadRow, WhatsappMessageRow } from '@/types/database'
 
 const admin = () => createAdminClient()
@@ -141,10 +142,79 @@ export async function createDraftProject(input: {
 }
 
 // ── Outgoing message queue (Playwright worker sends) ──
+// Check if a message with this provider ID already exists as an outgoing
+// (worker scanned its own reply as incoming → reject before ingest).
+export async function findOutgoingByProviderId(phone: string, providerId: string) {
+  const { data } = await admin()
+    .from('whatsapp_messages')
+    .select('id,direction')
+    .eq('phone_number', phone)
+    .eq('provider_message_id', providerId)
+    .eq('direction', 'outgoing')
+    .maybeSingle()
+  return data ?? null
+}
+
+// Check if an outgoing reply already exists for this inbound message.
+// One customer turn must never produce more than one AI reply.
+export async function findOutgoingBySourceInbound(sourceInboundId: string) {
+  const { data } = await admin()
+    .from('whatsapp_messages')
+    .select('id,message,created_at')
+    .eq('source_inbound_message_id', sourceInboundId)
+    .eq('direction', 'outgoing')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+  return data ?? null
+}
+
+// Check if an outgoing message with this text already exists for this phone
+// recently. Normalized comparison catches the worker detecting its own reply
+// even when the DOM-extracted provider_id differs from the DB-stored one.
+export async function findOutgoingByText(phone: string, text: string) {
+  const norm = text.replace(/\s+/g, ' ').trim().toLowerCase()
+  if (!norm) return null
+  const { data } = await admin()
+    .from('whatsapp_messages')
+    .select('id,message,created_at')
+    .eq('phone_number', phone)
+    .eq('direction', 'outgoing')
+    .eq('ai_generated', true)
+    .order('created_at', { ascending: false })
+    .limit(10)
+  if (!data) return null
+  for (const row of data) {
+    const rowNorm = String(row.message || '').replace(/\s+/g, ' ').trim().toLowerCase()
+    if (rowNorm === norm || rowNorm.startsWith(norm) || norm.startsWith(rowNorm)) {
+      return row
+    }
+  }
+  return null
+}
+
+export async function getRecentWhatsAppHistory(phone: string, limit = 12) {
+  const { data, error } = await admin()
+    .from('whatsapp_messages')
+    .select('direction,message,created_at,ai_generated')
+    .eq('phone_number', phone)
+    .order('created_at', { ascending: false })
+    .limit(Math.min(Math.max(limit, 1), 20))
+
+  if (error) throw error
+  return (data ?? []).reverse()
+}
+
 export async function queueOutgoingMessage(
   phone: string,
   message: string,
-  aiGenerated = true
+  aiGenerated = true,
+  options?: {
+    conversationId?: string | null
+    sourceInboundMessageId?: string | null
+    decisionAction?: 'reply' | 'wait' | 'handoff' | 'close' | null
+    postSendState?: string | null
+  }
 ): Promise<WhatsappMessageRow | null> {
   const { data, error } = await admin()
     .from('whatsapp_messages')
@@ -154,12 +224,18 @@ export async function queueOutgoingMessage(
       message,
       status: 'pending',
       ai_generated: aiGenerated,
-      dedup_key: outgoingDedupKey(phone, message),
+      provider_message_id: `out:${createHash('sha256').update(`${phone}\u0000${message}`).digest('hex').slice(0, 12)}`,
+      dedup_key: options?.sourceInboundMessageId && options?.conversationId
+        ? `outgoing-turn:${options.conversationId}:${options.sourceInboundMessageId}`
+        : outgoingDedupKey(phone, message),
+      conversation_id: options?.conversationId ?? null,
+      source_inbound_message_id: options?.sourceInboundMessageId ?? null,
+      decision_action: options?.decisionAction ?? null,
+      post_send_state: options?.postSendState ?? null,
     })
     .select('*')
     .single()
   if (error) {
-    // 23505 → identical message already queued for this phone; idempotent no-op
     if (error.code === '23505') {
       await logAgent('queue_outgoing_duplicate', null, 'info', { phone })
       return null
@@ -167,7 +243,9 @@ export async function queueOutgoingMessage(
     await logAgent('queue_outgoing', null, 'error', { phone }, error.message)
     return null
   }
-  return data as unknown as WhatsappMessageRow
+  const row = data as unknown as WhatsappMessageRow
+  console.log(`[QUEUE_CREATE] outgoing_id=${row.id} source_inbound_message_id=${options?.sourceInboundMessageId ?? 'none'} conversation_id=${options?.conversationId ?? 'none'}`)
+  return row
 }
 
 // ── Notification (admin alerts) ──
@@ -203,6 +281,11 @@ export async function persistWhatsappMessage(input: {
   ai_generated?: boolean
   status?: 'pending' | 'processing' | 'sent' | 'failed'
   dedup_key?: string | null
+  provider_message_id?: string | null
+  source_inbound_message_id?: string | null
+  conversation_id?: string | null
+  decision_action?: 'reply' | 'wait' | 'handoff' | 'close' | null
+  post_send_state?: string | null
 }) {
   const { data, error } = await admin()
     .from('whatsapp_messages')
@@ -213,6 +296,11 @@ export async function persistWhatsappMessage(input: {
       ai_generated: input.ai_generated ?? false,
       status: input.status ?? (input.direction === 'incoming' ? 'sent' : 'pending'),
       dedup_key: input.dedup_key ?? null,
+      provider_message_id: input.provider_message_id ?? null,
+      source_inbound_message_id: input.source_inbound_message_id ?? null,
+      conversation_id: input.conversation_id ?? null,
+      decision_action: input.decision_action ?? null,
+      post_send_state: input.post_send_state ?? null,
     })
     .select('*')
     .single()
@@ -221,13 +309,16 @@ export async function persistWhatsappMessage(input: {
 }
 
 // ── Incoming message persistence (used by ingest route) ──
-export async function persistIncomingMessage(phone: string, message: string) {
+export async function persistIncomingMessage(phone: string, message: string, providerMessageId?: string | null) {
   return persistWhatsappMessage({
     phone_number: phone,
     direction: 'incoming',
     message,
     ai_generated: false,
     status: 'sent',
-    dedup_key: incomingDedupKey(phone, message),
+    provider_message_id: providerMessageId ?? null,
+    dedup_key: providerMessageId
+      ? `incoming-provider:${providerMessageId}`
+      : incomingDedupKey(phone, message),
   })
 }

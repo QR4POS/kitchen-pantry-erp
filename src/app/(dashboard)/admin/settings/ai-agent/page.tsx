@@ -132,6 +132,8 @@ export default function AIAgentSettingsPage() {
   const [stopping, setStopping] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [welcomeDraft, setWelcomeDraft] = useState("")
+  const [conversations, setConversations] = useState<any[]>([])
+  const [convAction, setConvAction] = useState<string | null>(null)
 
   const fetchData = useCallback(async () => {
     try {
@@ -244,6 +246,34 @@ export default function AIAgentSettingsPage() {
       setTestError((e as Error).message)
     } finally {
       setTesting(false)
+    }
+  }
+
+  const loadConversations = useCallback(async () => {
+    try {
+      const res = await fetch("/api/ai-agent/conversations")
+      const data = await res.json()
+      setConversations(data.conversations ?? [])
+    } catch { /* noop */ }
+  }, [])
+
+  useEffect(() => {
+    if (!loading) loadConversations()
+  }, [loading, loadConversations])
+
+  async function handleConversationAction(conversationId: string, action: 'takeover' | 'resume' | 'close', reason?: string) {
+    setConvAction(conversationId)
+    try {
+      await fetch("/api/ai-agent/conversations/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: conversationId, action, reason }),
+      })
+      await loadConversations()
+    } catch {
+      toast({ title: "Error", description: "Action failed", variant: "destructive" })
+    } finally {
+      setConvAction(null)
     }
   }
 
@@ -695,6 +725,72 @@ export default function AIAgentSettingsPage() {
                     </span>
                   </div>
                 )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">Conversations</CardTitle>
+            <CardDescription>Active WhatsApp conversations and manual takeover controls.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {conversations.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No recent conversations found.</p>
+            ) : (
+              <div className="space-y-3">
+                {conversations.slice(0, 10).map((conv: any) => {
+                  const isHuman = conv.conversation_status === 'human_active'
+                  const isSuppressed = conv.ai_suppressed
+                  const owner = isHuman ? 'Human team' : isSuppressed ? 'AI (suppressed)' : 'AI'
+                  return (
+                    <div key={conv.id} className="flex items-center justify-between gap-3 rounded-lg border p-3 text-sm">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium">{conv.phone_number}</p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <Badge variant="outline" className="text-xs">
+                            {String(conv.conversation_status ?? '').replace(/_/g, ' ')}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">{owner}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {!isHuman && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-orange-600 border-orange-300 hover:bg-orange-50 h-8 text-xs"
+                            disabled={convAction === conv.id}
+                            onClick={() => handleConversationAction(conv.id, 'takeover')}
+                          >
+                            Take over
+                          </Button>
+                        )}
+                        {isHuman && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-green-600 border-green-300 hover:bg-green-50 h-8 text-xs"
+                            disabled={convAction === conv.id}
+                            onClick={() => handleConversationAction(conv.id, 'resume')}
+                          >
+                            Resume AI
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-muted-foreground h-8 text-xs"
+                          disabled={convAction === conv.id}
+                          onClick={() => handleConversationAction(conv.id, 'close', 'Closed by staff')}
+                        >
+                          Close
+                        </Button>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </CardContent>

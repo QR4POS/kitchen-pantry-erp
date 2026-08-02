@@ -66,6 +66,9 @@ export async function GET(request: Request) {
     const claimed = updated ?? []
     if (PERF) console.log(`[PERF] outbox_get_ms=${Date.now() - tStart} claimed=${claimed.length}`)
     if (claimed.length > 0) {
+      for (const m of claimed) {
+        console.log(`[OUTBOX_CLAIM] id=${m.id} phone=${m.phone_number} source_inbound_message_id=${m.source_inbound_message_id ?? 'none'}`)
+      }
       await logAgent('outbox_claim', null, 'success', { claimed: claimed.length })
     }
     return NextResponse.json({ ok: true, messages: claimed })
@@ -97,11 +100,28 @@ export async function POST(request: Request) {
     for (const r of results) {
       if (r.status === 'sent') {
         // Guard on 'processing' so an already-finalized message is never re-marked
-        await admin
+        const { data: sentRow } = await admin
           .from('whatsapp_messages')
           .update({ status: 'sent', sent_at: now, claimed_at: null, error_message: null })
           .eq('id', r.id)
           .eq('status', 'processing')
+          .select('id,conversation_id,post_send_state')
+          .maybeSingle()
+
+        console.log(`[OUTBOX_ACK] id=${r.id} status=sent row_found=${Boolean(sentRow)} conversation_id=${sentRow?.conversation_id ?? 'none'}`)
+
+        // Move conversation state after confirmed send (reply_queued → controller's post_send_state)
+        if (sentRow?.conversation_id && sentRow.post_send_state) {
+          await admin
+            .from('ai_conversations')
+            .update({
+              conversation_status: sentRow.post_send_state,
+              last_outbound_message_id: sentRow.id,
+              updated_at: now,
+            })
+            .eq('id', sentRow.conversation_id)
+            .eq('conversation_status', 'reply_queued')
+        }
       } else {
         const { data: msg } = await admin
           .from('whatsapp_messages')
@@ -121,12 +141,29 @@ export async function POST(request: Request) {
             .eq('status', 'processing')
           await logAgent('message_retry', null, 'warn', { messageId: r.id, attempt: retryCount }, errorMessage)
         } else {
-          await admin
+          const { data: failedRow } = await admin
             .from('whatsapp_messages')
             .update({ status: 'failed', retry_count: retryCount, claimed_at: null, error_message: errorMessage })
             .eq('id', r.id)
             .eq('status', 'processing')
+            .select('id,conversation_id')
+            .maybeSingle()
+
           await logAgent('message_failed', null, 'error', { messageId: r.id, attempt: retryCount }, errorMessage)
+
+          // Permanent send failure: move the conversation to human attention
+          if (failedRow?.conversation_id) {
+            await admin
+              .from('ai_conversations')
+              .update({
+                conversation_status: 'human_active',
+                ai_suppressed: true,
+                handoff_reason: 'Outgoing message permanently failed to send',
+                updated_at: now,
+              })
+              .eq('id', failedRow.conversation_id)
+              .eq('conversation_status', 'reply_queued')
+          }
         }
       }
     }
