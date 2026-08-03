@@ -689,6 +689,112 @@ async function probeChatDom(page) {
   }
 }
 
+// TEMP DIAGNOSTIC — captures the current WhatsApp Web DOM (chat-list rows,
+// chat-list container, message bubbles, selector probe) to a log file so the
+// incoming-detection selectors can be updated to match this DOM build. This is
+// temporary and is removed after the selector fix.
+let domListCaptured = false
+let domBubblesCaptured = false
+async function captureDomSnapshot(page, opts = {}) {
+  const out = []
+  const push = (s) => out.push(String(s || ''))
+  if (opts.list && domListCaptured) return
+  if (opts.bubbles && domBubblesCaptured) return
+  if (opts.list) domListCaptured = true
+  if (opts.bubbles) domBubblesCaptured = true
+  push('=== DOM SNAPSHOT ' + (opts.bubbles ? 'BUBBLES' : 'LIST') + ' ' + new Date().toISOString() + ' ===')
+
+  // 1. Selector probe results.
+  try {
+    const probeSelectors = {
+      'div[id="side"] div[role="listitem"]': 'listitemSide',
+      'div[id="side"] div[role="button"]': 'roleButtonSide',
+      '[data-testid="chat-list"]': 'chatList',
+      '[data-testid="chat-list"] div[role="listitem"]': 'chatListListitem',
+      '[data-testid="chat-list"] div[role="button"]': 'chatListButton',
+      '[data-testid="last-msg"]': 'lastMsg',
+      '[data-testid="cell-frame-container"]': 'cellFrame',
+      '[data-testid="conversation-title"]': 'convTitle',
+      '[data-icon*="unread"]': 'unreadIcon',
+      'div[id="side"] span[title]': 'spanTitleSide',
+      'div[data-id*="_msg"]': 'msgContainers',
+      '#main .message-in': 'msgIn',
+      '#main .message-out': 'msgOut',
+      '#main [data-pre-plain-text]': 'prePlain',
+    }
+    const counts = {}
+    for (const [s, k] of Object.entries(probeSelectors)) {
+      counts[k] = await page.locator(s).count().catch(() => -1)
+    }
+    push('PROBE ' + JSON.stringify(counts))
+  } catch (e) { push('PROBE_ERR ' + e.message) }
+
+  if (opts.list) {
+    // 2. Chat-list container HTML.
+    try {
+      const chatList = page.locator('[data-testid="chat-list"]').first()
+      if ((await chatList.count().catch(() => 0)) > 0) {
+        const html = (await chatList.evaluate((el) => el.outerHTML || '').catch(() => '')) || ''
+        push('CHAT_LIST_BEGIN\n' + html.slice(0, 8000) + '\nCHAT_LIST_END')
+      } else {
+        push('CHAT_LIST (no [data-testid="chat-list"])')
+      }
+    } catch (e) { push('CHAT_LIST_ERR ' + e.message) }
+
+    // 3. A real chat row: walk up from the first title span to a DIV container.
+    try {
+      const anchor = page.locator('div[id="side"] span[title]').first()
+      if ((await anchor.count().catch(() => 0)) > 0) {
+        const html = (await anchor.evaluate((el) => {
+          let node = el
+          let best = el
+          for (let i = 0; i < 14 && node; i++) {
+            node = node.parentElement
+            if (!node) break
+            if (node.tagName === 'DIV' && (node.innerText || '').trim().length > 5) best = node
+          }
+          return best.outerHTML || ''
+        }).catch(() => '')) || ''
+        push('ROW_BEGIN\n' + html.slice(0, 5000) + '\nROW_END')
+      } else {
+        push('ROW (no span[title] anchor)')
+      }
+    } catch (e) { push('ROW_ERR ' + e.message) }
+  }
+
+  if (opts.bubbles) {
+    // 4. Message bubbles (chat must be open).
+    for (const cls of ['#main .message-in', '#main .message-out']) {
+      try {
+        const loc = page.locator(cls).first()
+        if ((await loc.count().catch(() => 0)) > 0) {
+          const html = (await loc.evaluate((el) => el.outerHTML || '').catch(() => '')) || ''
+          push(cls + '_BEGIN\n' + html.slice(0, 3000) + '\n' + cls + '_END')
+        } else {
+          push(cls + ' (none)')
+        }
+      } catch (e) { push(cls + '_ERR ' + e.message) }
+    }
+    // 5. First data-pre-plain-text element outerHTML (bubble structure fallback).
+    try {
+      const loc = page.locator('#main [data-pre-plain-text]').first()
+      if ((await loc.count().catch(() => 0)) > 0) {
+        const html = (await loc.evaluate((el) => el.outerHTML || '').catch(() => '')) || ''
+        push('#main [data-pre-plain-text]_BEGIN\n' + html.slice(0, 3000) + '\n_END')
+      }
+    } catch { /* ignore */ }
+  }
+
+  try {
+    const file = path.join(ROOT, 'storage', 'dom-snapshot.log')
+    fs.appendFileSync(file, out.join('\n') + '\n\n')
+    console.log('[domcapture] DOM snapshot (' + (opts.bubbles ? 'bubbles' : 'list') + ') saved to ' + file)
+  } catch (e) {
+    console.error('[domcapture] failed to write snapshot: ' + e.message)
+  }
+  console.log('[domcapture] ' + (out[0] || ''))
+}
+
 // Dynamic chat-row discovery. WhatsApp's DOM changes between versions, so rows
 // are located by trying several strategies in priority order and stopping at the
 // first that yields candidates. Every candidate carries { title, preview,
@@ -775,6 +881,9 @@ async function scanChatRows(page) {
 
   const candidates = await discoverChatCandidates(page)
 
+  // TEMP DIAGNOSTIC — capture the chat-list DOM once candidates are found.
+  if (candidates.length > 0) await captureDomSnapshot(page, { list: true })
+
   if (candidates.length === 0 && Date.now() - lastProbeTs > 60000) {
     lastProbeTs = Date.now()
     await probeChatDom(page)
@@ -850,6 +959,49 @@ function cleanMessageText(text) {
     lines.pop()
   }
   return lines.filter(Boolean).join('\n')
+}
+
+// Detect whether a message bubble contains a media attachment (photo, video,
+// audio, sticker, document) by checking for common WhatsApp Web media markers.
+// Returns a synthetic label like '[photo]', '[video]', '[audio]', '[sticker]',
+// '[document]', or '[media]' when a media element is found; otherwise null.
+async function detectMediaType(el) {
+  try {
+    return await el.evaluate((node) => {
+      // data-testid markers used by different WhatsApp Web versions
+      const testIdMap = [
+        ['image-thumb',   '[photo]'],
+        ['media-state',   '[photo]'],
+        ['media-canvas',  '[photo]'],
+        ['image',         '[photo]'],
+        ['video-thumb',   '[video]'],
+        ['video',         '[video]'],
+        ['audio-message', '[audio]'],
+        ['ptt-message',   '[voice note]'],
+        ['sticker',       '[sticker]'],
+        ['document-thumb','[document]'],
+      ]
+      for (const [id, label] of testIdMap) {
+        if (node.querySelector(`[data-testid="${id}"]`)) return label
+      }
+      // Fallback: look for media-like elements
+      if (node.querySelector('img[src*="blob:"]'))   return '[photo]'
+      if (node.querySelector('video'))                return '[video]'
+      if (node.querySelector('audio'))                return '[audio]'
+      // WhatsApp sometimes uses a span with a camera / microphone icon text
+      const iconText = (node.querySelector('[data-icon]') || node.querySelector('span[class*="icon"]'))
+      if (iconText) {
+        const icon = (iconText.getAttribute('data-icon') || '').toLowerCase()
+        if (icon.includes('photo') || icon.includes('image') || icon.includes('camera')) return '[photo]'
+        if (icon.includes('video'))   return '[video]'
+        if (icon.includes('audio') || icon.includes('mic')) return '[audio]'
+        if (icon.includes('doc'))     return '[document]'
+      }
+      return null
+    })
+  } catch {
+    return null
+  }
 }
 
 // Classifies a message element's direction using multiple WhatsApp Web
@@ -1007,6 +1159,7 @@ async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
     '#main .message-out',
     '#main [data-pre-plain-text]',
     '#main [data-id]',
+    '#main [data-id]:not([data-pre-plain-text])',  // media bubbles — no plain text
   ]
   for (const sel of selectors) {
     const messages = page.locator(sel)
@@ -1015,10 +1168,21 @@ async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
     for (let m = count - 1; m >= 0; m--) {
       const el = messages.nth(m)
       try {
-        const dir = await messageDirection(el, dirCtx)
+        let dir = await messageDirection(el, dirCtx)
 
-        const text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
-        if (!text.trim()) continue
+        let text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
+        if (!text.trim()) {
+          // Photo / media bubbles have no visible text — detect media type and
+          // synthesise a marker so the AI can acknowledge the attachment.
+          const mediaLabel = await detectMediaType(el)
+          if (!mediaLabel) continue
+          text = mediaLabel
+          // If direction is inconclusive (no class, no pre-plain-text) but we
+          // detected a media bubble, infer it is INCOMING: the bot only ever
+          // sends text, so any media with unknown direction must be from the
+          // customer.
+          if (dir === null) dir = 'in'
+        }
         
         const id = (await el.getAttribute('data-id', { timeout: 100 }).catch(() => '')) || ''
         let ts = null
@@ -1061,6 +1225,7 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
       '#main .message-out',
       '#main [data-pre-plain-text]',
       '#main [data-id]',
+      '#main [data-id]:not([data-pre-plain-text])',  // media bubbles — no plain text
     ]
     const collected = [] // newest-first
     for (const sel of selectors) {
@@ -1070,10 +1235,21 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
       for (let m = count - 1; m >= 0; m--) {
         const el = messages.nth(m)
         try {
-          const dir = await messageDirection(el, dirCtx)
+          let dir = await messageDirection(el, dirCtx)
 
-          const text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
-          if (!text.trim()) continue
+          let text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
+          if (!text.trim()) {
+            // Photo / media bubbles have no visible text — detect media type and
+            // synthesise a marker so the AI can acknowledge the attachment.
+            const mediaLabel = await detectMediaType(el)
+            if (!mediaLabel) continue
+            text = mediaLabel
+            // If direction is inconclusive (no class, no pre-plain-text) but we
+            // detected a media bubble, infer it is INCOMING: the bot only ever
+            // sends text, so any media with unknown direction must be from the
+            // customer.
+            if (dir === null) dir = 'in'
+          }
 
           const id = (await el.getAttribute('data-id', { timeout: 100 }).catch(() => '')) || ''
           let ts = null
@@ -1240,6 +1416,46 @@ async function readLastIncomingFromRow(page, chat) {
       text = ((await dirAuto.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
     }
   }
+  // Photo / media row fallback: preview is empty but chat has an unread badge.
+  // WhatsApp shows a camera / photo icon in the row instead of text. Detect
+  // it by looking for known media icon markers and return a synthetic label.
+  if (!text) {
+    try {
+      const mediaLabel = await row.evaluate((rowEl) => {
+        const iconMap = [
+          ['camera', '[photo]'], ['photo', '[photo]'], ['image', '[photo]'],
+          ['video', '[video]'], ['audio', '[audio]'], ['mic', '[voice note]'],
+          ['document', '[document]'], ['sticker', '[sticker]'],
+        ]
+        const icons = rowEl.querySelectorAll('[data-icon]')
+        for (const el of icons) {
+          const icon = (el.getAttribute('data-icon') || '').toLowerCase()
+          for (const [key, label] of iconMap) {
+            if (icon.includes(key)) return label
+          }
+        }
+        const testIds = rowEl.querySelectorAll('[data-testid]')
+        for (const el of testIds) {
+          const tid = (el.getAttribute('data-testid') || '').toLowerCase()
+          if (tid.includes('image') || tid.includes('photo') || tid.includes('media') || tid.includes('camera')) return '[photo]'
+          if (tid.includes('video')) return '[video]'
+          if (tid.includes('audio') || tid.includes('ptt')) return '[audio]'
+        }
+        const svgTitles = rowEl.querySelectorAll('svg title')
+        for (const el of svgTitles) {
+          const t = (el.textContent || '').toLowerCase()
+          for (const [key, label] of iconMap) {
+            if (t.includes(key)) return label
+          }
+        }
+        return null
+      }).catch(() => null)
+      if (mediaLabel) {
+        console.log(`[worker] detected media icon in row preview for "${chat.title}": ${mediaLabel}`)
+        text = mediaLabel
+      }
+    } catch { /* ignore */ }
+  }
   if (!text) {
     console.log(`[worker] detect failure: no preview text in row for "${chat.title}"`)
     return null
@@ -1316,6 +1532,9 @@ async function detectAndForwardIncoming(page, state) {
 
       console.log(`[worker] processing latest message: ${chat.title}`)
 
+      // TEMP DIAGNOSTIC — capture the current WhatsApp DOM (chat open).
+      if (opened) await captureDomSnapshot(page, { bubbles: true })
+
       // 2. Read the messages NEWER than the last processed one. Multiple new
       //    messages (e.g. received while the worker was offline) are collected
       //    newest-first and later combined chronologically into a single ingest,
@@ -1340,30 +1559,27 @@ async function detectAndForwardIncoming(page, state) {
           console.log(`[worker] no incoming message found for ${chat.title} (will retry)`)
           continue
         }
-        // Opened but nothing newer than the last processed message.
-        console.log('[worker] old message ignored')
+        // Only re-read if the chat shows new activity — unread badge or
+        // the row signature (preview/time) actually changed since last poll.
+        const previewChanged = stored && chat.raw && stored.rowSig !== chat.raw
+        if (chat.hasUnread || previewChanged) {
+          last = await readLastIncomingMessage(page, state.meta, key, chat.title)
+          if (last) {
+            console.log(`[worker] re-read ok, found message in ${chat.title}`)
+          }
+        }
+      }
+
+      if (!last) {
         state.chats[key] = { ...(stored || {}), title: chat.title, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER', updatedAt: new Date().toISOString() }
         saveMessageState(state)
         continue
       }
 
-      // Safety guard: if we are waiting for customer reply and readNewIncomingMessages
-      // returned a message with no id (e.g. came from the row fallback), but the text
-      // matches what we last sent as a reply — skip it. Prevents bot messages that
-      // slipped through the selectors from triggering a second AI call.
-      if (stored?.conversationState === 'WAITING_FOR_CUSTOMER' && !last.id) {
-        console.log('[worker] WAITING_FOR_CUSTOMER: no message id — treating as already-replied, skipping')
-        state.chats[key] = { ...(stored), rowSig: chat.raw || stored.rowSig, preview: chat.preview, updatedAt: new Date().toISOString() }
-        saveMessageState(state)
-        continue
-      }
-
-      // 3. Combine multiple new messages chronologically into one payload.
-      let messageToSend = last.text
-      if (newMessages.length > 1) {
-        messageToSend = newMessages.slice().reverse().map((m) => m.text).join('\n')
-        console.log(`[worker] combined ${newMessages.length} new messages into one ingest`)
-      }
+      // 3. Send the most recent message. Multiple new messages (e.g. received
+      //    while the worker was offline) are noted but processed one at a time
+      //    through separate ingest calls on subsequent polls.
+      const messageToSend = last.text
 
       console.log(`[worker] message extracted: ${messageToSend.slice(0, 120)}`)
 
@@ -1416,23 +1632,6 @@ async function detectAndForwardIncoming(page, state) {
         console.log('[worker] existing customer detected')
       } else {
         console.log('[worker] new customer detected')
-      }
-
-      // 7. Turn-based dedup: only genuinely new incoming messages may trigger
-      //    the AI. The stable WhatsApp message id is the primary signal; text
-      //    and timestamp are compared when no id is exposed by the DOM.
-      const sameId = stored && last.id && stored.lastIncomingId === last.id
-      const sameText = stored && stored.lastIncomingText === last.text
-      const sameTs = stored && stored.lastIncomingTs && last.ts && stored.lastIncomingTs === last.ts
-      const noTsInfo = stored && !stored.lastIncomingTs && !last.ts
-      const sameMessage = sameId || (!last.id && sameText && (sameTs || noTsInfo))
-      const isNew = !stored || !sameMessage
-
-      if (!isNew) {
-        console.log('[worker] old message ignored')
-        state.chats[key] = { ...(stored || {}), title: chat.title, phone: stored?.phone || phone, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, lastIncomingText: last.text, lastIncomingId: last.id || null, lastIncomingTs: last.ts, conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER', updatedAt: new Date().toISOString() }
-        saveMessageState(state)
-        continue
       }
 
       // ── GUARD: never re-ingest this account's own outgoing replies ──
@@ -1628,9 +1827,11 @@ async function run() {
   console.log('[whatsapp-worker] Worker online. Polling...')
   writeStatus({ connected: true })
 
-  // Startup baseline: mark every existing message as already processed so only
-  // messages arriving after this point can ever trigger the AI. Polling alone
-  // never generates a reply — a brand-new incoming message is the only trigger.
+  // Startup baseline: record read messages so pre-existing history is never
+  // replayed. Unread chats are intentionally skipped — they have no stored
+  // state, so the main loop detects them as new and processes them on the next
+  // poll. Only a brand-new incoming message or an unread message can trigger
+  // the AI. Polling alone never generates a reply.
   await sleep(2000)
   await createStartupBaseline(page, messageState)
 

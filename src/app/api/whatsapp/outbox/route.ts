@@ -120,7 +120,7 @@ export async function POST(request: Request) {
               updated_at: now,
             })
             .eq('id', sentRow.conversation_id)
-            .eq('conversation_status', 'reply_queued')
+            .in('conversation_status', ['reply_queued', 'processing'])
         }
       } else {
         const { data: msg } = await admin

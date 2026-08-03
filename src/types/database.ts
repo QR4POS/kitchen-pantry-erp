@@ -246,6 +246,7 @@ export type AiConversationStatus =
 export type ConversationAction = 'reply' | 'wait' | 'handoff' | 'close'
 export type WhatsappDirection = 'incoming' | 'outgoing'
 export type WhatsappMessageStatus = 'pending' | 'processing' | 'sent' | 'failed'
+export type WhatsappMessageType = 'text' | 'image'
 export type LeadStatus = 'new' | 'collecting' | 'waiting_approval' | 'approved' | 'rejected' | 'converted'
 
 export interface AiAgentSettingsRow {
@@ -280,6 +281,7 @@ export interface AiConversationRow {
   last_outbound_message_id: string | null
   ai_suppressed: boolean
   handoff_reason: string | null
+  support_mode_at: string | null
   paused_until: string | null
   language_code: string | null
   turn_count: number
@@ -295,6 +297,8 @@ export interface WhatsappMessageRow {
   message: string
   status: WhatsappMessageStatus
   ai_generated: boolean
+  message_type: WhatsappMessageType
+  media_url: string | null
   sent_at: string | null
   error_message: string | null
   dedup_key: string | null

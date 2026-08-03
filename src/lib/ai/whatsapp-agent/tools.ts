@@ -72,6 +72,17 @@ export async function findActiveLeadByPhone(phone: string): Promise<LeadRow | nu
   return (data as unknown as LeadRow | null) ?? null
 }
 
+export async function findLatestLeadByPhone(phone: string): Promise<LeadRow | null> {
+  const { data } = await admin()
+    .from('leads')
+    .select('*')
+    .eq('phone', phone)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  return (data as unknown as LeadRow | null) ?? null
+}
+
 export async function createLead(input: {
   phone: string
   name?: string | null
@@ -104,6 +115,17 @@ export async function createLead(input: {
       conversation_id: input.conversation_id ?? null,
       customer_id: input.customer_id ?? null,
     })
+    .select('*')
+    .single()
+  if (error) throw error
+  return data as unknown as LeadRow
+}
+
+export async function updateLead(id: string, patch: Record<string, unknown>): Promise<LeadRow> {
+  const { data, error } = await admin()
+    .from('leads')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('id', id)
     .select('*')
     .single()
   if (error) throw error
@@ -186,9 +208,10 @@ export async function findOutgoingByText(phone: string, text: string) {
   if (!data) return null
   for (const row of data) {
     const rowNorm = String(row.message || '').replace(/\s+/g, ' ').trim().toLowerCase()
-    if (rowNorm === norm || rowNorm.startsWith(norm) || norm.startsWith(rowNorm)) {
-      return row
-    }
+    if (rowNorm === norm) return row
+    const lenRatio = Math.min(rowNorm.length, norm.length) / Math.max(rowNorm.length, norm.length)
+    if (lenRatio < 0.5) continue
+    if (rowNorm.startsWith(norm) || norm.startsWith(rowNorm)) return row
   }
   return null
 }

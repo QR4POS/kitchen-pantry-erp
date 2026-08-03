@@ -61,15 +61,35 @@ export const PUT = apiGuard({ roles: ['admin'] }, async ({ request }) => {
     return NextResponse.json({ error: 'No valid settings provided' }, { status: 400 })
   }
 
+  const now = new Date().toISOString()
+
+  const { data: existing } = await admin
+    .from('ai_agent_settings')
+    .select('id')
+    .eq('id', SETTINGS_ID)
+    .maybeSingle()
+
+  if (!existing) {
+    const { data: inserted, error: insertErr } = await admin
+      .from('ai_agent_settings')
+      .insert({ id: SETTINGS_ID, ...allowed, created_at: now, updated_at: now })
+      .select('*')
+      .single()
+
+    if (insertErr) return NextResponse.json({ error: insertErr.message }, { status: 500 })
+    await logAgent('settings_updated', null, 'success', { changed: Object.keys(allowed), seeded: true })
+    return NextResponse.json({ settings: inserted })
+  }
+
   const { data, error } = await admin
     .from('ai_agent_settings')
-    .update({ ...allowed, updated_at: new Date().toISOString() })
+    .update({ ...allowed, updated_at: now })
     .eq('id', SETTINGS_ID)
     .select('*')
-    .single()
+    .maybeSingle()
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
   await logAgent('settings_updated', null, 'success', { changed: Object.keys(allowed) })
-  return NextResponse.json({ settings: data })
+  return NextResponse.json({ settings: data ?? {} })
 })

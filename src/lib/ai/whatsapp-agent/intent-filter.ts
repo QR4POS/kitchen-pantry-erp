@@ -128,9 +128,16 @@ const courtesyRe = buildRegex(COURTESY)
  * strong kitchen keyword, a greeting, or a courteous reply
  * (English, Sinhala or Singlish). No AI call is made on a match.
  * Ambiguous generic terms are intentionally left to the classifier.
+ *
+ * Also immediately allows synthetic media markers produced by the
+ * WhatsApp worker ([photo], [video], [audio], [voice note], [sticker],
+ * [document]) so the AI can acknowledge media messages without the
+ * classifier ever blocking them.
  */
 export function hasKitchenIntent(message: string): boolean {
   const m = (message || '').toLowerCase()
+  // Media-marker fast-pass: always allow media messages from customers
+  if (/^\[(photo|video|audio|voice note|sticker|document|media)\]$/i.test(m.trim())) return true
   if (greetingRe.test(m)) return true
   if (courtesyRe.test(m)) return true
   if (strongRe.test(m)) return true
@@ -245,5 +252,153 @@ export async function isKitchenRelatedMessage(
   } catch (e) {
     await logAgent('intent_classifier_error', null, 'error', { message }, (e as Error).message)
     return true
+  }
+}
+
+export const SUB_INTENTS = [
+  'price_inquiry',
+  'quotation',
+  'complaint',
+  'appointment',
+  'material_question',
+  'warranty_question',
+  'installation_question',
+  'delivery_question',
+  'greeting',
+  'follow_up',
+  'returning_customer',
+  'payment',
+  'existing_project',
+  'faq',
+  'human_request',
+  'unknown',
+] as const
+
+export type SubIntent = typeof SUB_INTENTS[number]
+
+export interface SubIntentResult {
+  intent: SubIntent
+  confidence: number
+  method: 'keyword' | 'ai' | 'default'
+}
+
+function normalizeText(text: string): string {
+  return text.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim()
+}
+
+function keywordSubIntent(message: string): SubIntentResult | null {
+  const m = normalizeText(message)
+
+  const patterns: { intent: SubIntent; regex: RegExp }[] = [
+    { intent: 'warranty_question', regex: /\b(warranty|guarantee|guaranty|cover|coverage|defect|damage)\b/ },
+    { intent: 'installation_question', regex: /\b(install|installation|fitting|fittings|setup|set up|assemble|assembly)\b/ },
+    { intent: 'delivery_question', regex: /\b(delivery|deliver|ship|shipping|transport|send|pickup|pick up)\b/ },
+    { intent: 'appointment', regex: /\b(appointment|visit|visiting|come to|meeting|schedule|book|booking|showroom)\b/ },
+    { intent: 'payment', regex: /\b(payment|pay|deposit|advance|installment|finance|loan|emi|transfer)\b/ },
+    { intent: 'complaint', regex: /\b(complaint|complain|problem|issue|broken|damaged|wrong|mistake|bad|poor|not good|disappointed|unhappy)\b/ },
+    { intent: 'faq', regex: /\b(how (do|does|long|much|many|can)|what (is|are)|where (is|are)|when (will|can|does)|can (i|you|we)|do you|tell me|explain)\b/ },
+    { intent: 'material_question', regex: /\b(material|materials|mdf|plywood|acrylic|melamine|hpl|pvc|wood|board|boards|laminat|granite|quartz|marble|corian)\b/ },
+    { intent: 'price_inquiry', regex: /\b(price|prices|cost|costs|rate|rates|budget|how much|estimate|quotation|quote|pricing)\b/ },
+    { intent: 'greeting', regex: /\b(hello|hi|hey|good morning|good afternoon|good evening|good day|greetings|ayubowan|helo|hayi)\b/ },
+    { intent: 'human_request', regex: /\b(human|staff|manager|real person|call me|phone call|speak to|talk to)\b/ },
+  ]
+
+  for (const { intent, regex } of patterns) {
+    if (regex.test(m)) {
+      return { intent, confidence: 0.88, method: 'keyword' }
+    }
+  }
+
+  return null
+}
+
+const SUB_INTENT_CLASSIFIER_PROMPT = `You are a customer intent classifier for a Sri Lankan kitchen showroom.
+Classify the WhatsApp message into exactly ONE intent.
+
+Return ONLY a JSON object with no markdown:
+{"intent":"<type>","confidence":<0.0-1.0>}
+
+INTENT TYPES:
+- price_inquiry      Asking about cost, rates, budget, pricing
+- quotation          Requesting a formal quotation
+- complaint          Unhappy, reporting a problem or issue
+- appointment        Wanting a visit, meeting, or to see the showroom
+- material_question  Asking about materials, MDF, plywood, acrylic etc.
+- warranty_question  Asking about warranty, guarantee, coverage
+- installation_question  Asking about installation, fitting, setup time
+- delivery_question  Asking about delivery, shipping, transport
+- greeting           Just saying hello, hi, good morning
+- follow_up          Short reply during an active sales conversation
+- payment            Asking about payments, deposit, terms
+- existing_project   Referring to a previous or ongoing kitchen project
+- faq                General how-to, what-is, can-you type question
+- human_request      Explicitly asking to speak to a person
+- unknown            None of the above / cannot determine`
+
+export async function classifySubIntent(
+  message: string,
+  opts?: {
+    primary?: string
+    fallback?: string
+    hasActiveConversation?: boolean
+    isReturning?: boolean
+  }
+): Promise<SubIntentResult> {
+  if (!message || !message.trim()) {
+    return { intent: 'unknown', confidence: 0, method: 'default' }
+  }
+
+  const keyword = keywordSubIntent(message)
+  if (keyword && keyword.confidence >= 0.85) {
+    if (opts?.hasActiveConversation && keyword.intent === 'greeting') {
+      return { intent: 'follow_up', confidence: 0.9, method: 'keyword' }
+    }
+    if (opts?.isReturning) {
+      return { intent: 'returning_customer', confidence: 0.9, method: 'keyword' }
+    }
+    return keyword
+  }
+
+  if (opts?.hasActiveConversation) {
+    const m = normalizeText(message)
+    const hasKitchen = /\b(kitchen|cabinet|counter|design)\b/.test(m)
+    const isShort = m.split(/\s+/).length <= 3
+    if (isShort && !hasKitchen) {
+      return { intent: 'follow_up', confidence: 0.7, method: 'default' }
+    }
+  }
+
+  if (opts?.isReturning) {
+    return { intent: 'returning_customer', confidence: 0.8, method: 'default' }
+  }
+
+  try {
+    const result = await callAgentAI(
+      [
+        { role: 'system', content: SUB_INTENT_CLASSIFIER_PROMPT },
+        { role: 'user', content: message },
+      ],
+      {
+        primary: opts?.primary ?? 'gemini',
+        fallback: opts?.fallback ?? 'deepseek',
+      }
+    )
+
+    const cleaned = (result.content || '').replace(/```json/gi, '').replace(/```/g, '').trim()
+    const start = cleaned.indexOf('{')
+    const end = cleaned.lastIndexOf('}')
+    if (start >= 0 && end > start) {
+      const parsed = JSON.parse(cleaned.slice(start, end + 1))
+      const intent = parsed.intent as string | undefined
+      const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0.6
+
+      if (intent && SUB_INTENTS.includes(intent as SubIntent)) {
+        return { intent: intent as SubIntent, confidence: Math.max(0, Math.min(1, confidence)), method: 'ai' }
+      }
+    }
+
+    return { intent: 'unknown', confidence: 0.3, method: 'ai' }
+  } catch {
+    return { intent: 'unknown', confidence: 0, method: 'default' }
   }
 }
