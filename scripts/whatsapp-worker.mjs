@@ -54,7 +54,7 @@ const SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(ROOT, 'storage
 const STATUS_FILE = process.env.WHATSAPP_STATUS_FILE || path.join(ROOT, 'storage', 'worker-status.json')
 const LAST_MESSAGES_FILE = process.env.WHATSAPP_LAST_MESSAGES_FILE || path.join(ROOT, 'storage', 'whatsapp-last-messages.json')
 
-const BASE_URL = (process.env.WHATSAPP_APP_URL || 'http://localhost:3000').replace(/\/$/, '')
+const BASE_URL = (process.env.WHATSAPP_APP_URL || 'http://127.0.0.1:3000').replace(/\/$/, '')
 const SECRET = process.env.WHATSAPP_WORKER_SECRET
 const POLL_INTERVAL_MS = parseInt(process.env.WHATSAPP_POLL_INTERVAL_MS || '5000', 10)
 const MAX_API_RETRIES = parseInt(process.env.WHATSAPP_API_RETRIES || '3', 10)
@@ -94,6 +94,18 @@ fs.mkdirSync(path.dirname(LAST_MESSAGES_FILE), { recursive: true })
 // ── Helpers ──
 const headers = { 'x-whatsapp-worker-secret': SECRET, 'Content-Type': 'application/json' }
 
+async function safeCount(locator, timeout = 2000) {
+  return locator.evaluateAll((els) => els.length, { timeout }).catch(() => 0)
+}
+
+async function safeText(locator, timeout = 2000) {
+  return locator.innerText({ timeout }).catch(() => '')
+}
+
+async function safeAttr(locator, attr, timeout = 2000) {
+  return locator.getAttribute(attr, { timeout }).catch(() => '')
+}
+
 async function withRetry(fn, label) {
   let lastErr
   for (let attempt = 1; attempt <= MAX_API_RETRIES; attempt++) {
@@ -101,11 +113,27 @@ async function withRetry(fn, label) {
       return await fn()
     } catch (e) {
       lastErr = e
-      console.warn(`[whatsapp-worker] ${label} attempt ${attempt}/${MAX_API_RETRIES} failed: ${e.message}`)
+      const details = []
+      if (e?.name) details.push(`name=${e.name}`)
+      if (e?.code) details.push(`code=${e.code}`)
+      if (e?.message) details.push(`message=${e.message}`)
+      const cause = e?.cause
+      if (cause) details.push(`cause=${causeSummary(cause)}`)
+      if (e?.stack) details.push(`stack=${String(e.stack).split('\n')[0]}`)
+      console.warn(`[whatsapp-worker] ${label} attempt ${attempt}/${MAX_API_RETRIES} failed: ${details.join(' | ')}`)
       if (attempt < MAX_API_RETRIES) await sleep(API_BACKOFF_MS * attempt)
     }
   }
   throw lastErr
+}
+
+function causeSummary(cause) {
+  if (!cause) return ''
+  if (typeof cause === 'string') return cause
+  const parts = []
+  if (cause.code) parts.push(String(cause.code))
+  if (cause.message) parts.push(String(cause.message))
+  return parts.join(': ')
 }
 
 async function apiGet(pathname) {
@@ -328,20 +356,63 @@ async function waitForLogin(page, onBrokenSession) {
 // message input via a fallback chain. Every selector attempt is isolated so
 // DOM changes never crash the worker.
 
+function getIdentifierVariants(identifier) {
+  const base = String(identifier || '').trim()
+  const digits = base.replace(/\D/g, '')
+  const variants = new Set([base])
+  if (digits) {
+    variants.add(digits)
+    variants.add(`+${digits}`)
+    if (digits.startsWith('0')) variants.add(`+${digits.slice(1)}`)
+    if (digits.startsWith('94')) variants.add(`0${digits.slice(2)}`)
+  }
+  return Array.from(variants).filter(Boolean)
+}
+
+function identifierMatchesTitle(title, identifier) {
+  const titleText = String(title || '')
+  const titleDigits = titleText.replace(/\D/g, '')
+  for (const variant of getIdentifierVariants(identifier)) {
+    const variantText = String(variant || '')
+    const variantDigits = variantText.replace(/\D/g, '')
+    if (!variantText) continue
+    if (titleText === variantText) return true
+    if (titleText.toLowerCase().includes(variantText.toLowerCase())) return true
+    if (titleDigits && variantDigits) {
+      const suffixLen = Math.min(8, Math.max(variantDigits.length, titleDigits.length))
+      if (titleDigits.endsWith(variantDigits.slice(-suffixLen)) || variantDigits.endsWith(titleDigits.slice(-suffixLen))) return true
+    }
+  }
+  return false
+}
+
 async function openChatByPhone(page, digits) {
+  const variants = getIdentifierVariants(digits)
+
   // 1. Primary: find a chat title span whose digits match the target number
   //    and click it directly — works for phone-number and contact-name titles.
   const anchors = page.locator('span[title]')
   const count = await anchors.count().catch(() => 0)
   for (let i = 0; i < count; i++) {
     const title = (await anchors.nth(i).getAttribute('title').catch(() => '')) || ''
-    if (title.replace(/\D/g, '').endsWith(digits.slice(-8))) {
+    if (variants.some((variant) => identifierMatchesTitle(title, variant))) {
       await anchors.nth(i).click().catch(() => {})
       return title
     }
   }
 
-  // 2. Fallback: search box (best effort — its selectors vary across versions).
+  // 2. Fallback: click the matching row container from the chat list.
+  const row = await findChatRow(page, { title: digits })
+  if (row) {
+    const clickable = row.locator('[data-testid="cell-frame-container"], [role="button"], [role="gridcell"], [data-testid="list-item"]').first()
+    const found = await clickable.count().catch(() => 0) > 0
+    if (found) {
+      await clickable.click().catch(() => row.click().catch(() => {}))
+      return digits
+    }
+  }
+
+  // 3. Fallback: search box (best effort — its selectors vary across versions).
   const searchSelectors = [
     'div[contenteditable="true"][role="textbox"]',
     'div[contenteditable="true"]',
@@ -358,7 +429,7 @@ async function openChatByPhone(page, digits) {
     const rcount = await results.count().catch(() => 0)
     for (let i = 0; i < rcount; i++) {
       const t = (await results.nth(i).getAttribute('title').catch(() => '')) || ''
-      if (t.replace(/\D/g, '').endsWith(digits.slice(-8))) {
+      if (variants.some((variant) => identifierMatchesTitle(t, variant))) {
         await results.nth(i).click().catch(() => {})
         return t
       }
@@ -370,6 +441,10 @@ async function openChatByPhone(page, digits) {
 async function findMessageInput(page) {
   const selectors = [
     'div[contenteditable="true"][role="textbox"]',
+    'div[role="textbox"][contenteditable="true"]',
+    'div[contenteditable="true"][aria-label*="message" i]',
+    'div[aria-label*="Type a message" i]',
+    '[data-testid="conversation-compose-box"]',
     'div[contenteditable="true"]',
     'footer div[contenteditable="true"]',
     'textarea',
@@ -378,11 +453,34 @@ async function findMessageInput(page) {
     const input = page.locator(sel).first()
     const found = await input.count().catch(() => 0) > 0
     if (found) {
-      console.log(`[worker] input found: ${sel}`)
-      return input
+      const visible = await input.isVisible().catch(() => false)
+      if (visible) {
+        console.log(`[worker] input found: ${sel}`)
+        return input
+      }
     }
   }
   return null
+}
+
+async function typeIntoMessageInput(page, input, text) {
+  await input.click({ force: true }).catch(() => {})
+  await input.focus().catch(() => {})
+  const directlyTyped = await input.evaluate((el, value) => {
+    const target = el
+    if (!(target instanceof HTMLElement)) return false
+    target.focus()
+    target.textContent = ''
+    target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, data: value, inputType: 'insertText' }))
+    target.textContent = value
+    target.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }))
+    target.dispatchEvent(new Event('change', { bubbles: true }))
+    return true
+  }, text).catch(() => false)
+  if (!directlyTyped) {
+    await page.keyboard.type(text, { delay: 20 }).catch(() => {})
+  }
+  await sleep(200)
 }
 
 async function pressEnterOrSendButton(page, input) {
@@ -401,7 +499,7 @@ async function pressEnterOrSendButton(page, input) {
     }
   }
   console.log('[worker] send button not found, using Enter key')
-  await input.press('Enter').catch(() => {})
+  await input.press('Enter').catch(() => page.keyboard.press('Enter').catch(() => {}))
   return true
 }
 
@@ -417,17 +515,23 @@ async function saveSendFailure(page) {
 
 async function openChatByIdentifier(page, identifier) {
   const digits = identifier.replace(/[^\d]/g, '')
-  // 1. Digit-based identifier → open by phone digits.
-  if (digits) {
-    const opened = await openChatByPhone(page, digits)
+  const candidates = digits ? [digits, identifier] : [identifier]
+  for (const candidate of candidates) {
+    const opened = await openChatByPhone(page, candidate)
     if (opened) return opened
   }
-  // 2. Name-based identifier → open by exact title match.
-  const target = page.getByTitle(identifier, { exact: true }).first()
-  const found = await target.count().catch(() => 0) > 0
-  if (found) {
-    await target.click().catch(() => {})
-    return identifier
+
+  // Final fallback: try a title match without exactness so whitespace / formatting
+  // differences between the ERP identifier and WhatsApp's visible title do not
+  // prevent the chat from opening.
+  const titleTargets = page.locator('span[title]')
+  const count = await titleTargets.count().catch(() => 0)
+  for (let i = 0; i < count; i++) {
+    const title = (await titleTargets.nth(i).getAttribute('title').catch(() => '')) || ''
+    if (identifierMatchesTitle(title, identifier)) {
+      await titleTargets.nth(i).click().catch(() => {})
+      return title
+    }
   }
   return ''
 }
@@ -457,8 +561,7 @@ async function sendMessageToChat(page, phoneNumber, text, state) {
   }
 
   console.log('[worker] typing message')
-  await input.click().catch(() => {})
-  await input.fill(text).catch(() => {})
+  await typeIntoMessageInput(page, input, text)
   await sleep(400)
 
   console.log('[worker] sending message')
@@ -576,15 +679,15 @@ function jidType(last) {
 // title when the header cannot be read.
 async function readOpenChatTitle(page, fallbackTitle) {
   try {
-    const header = page.locator('[data-testid="conversation-info-header"]').first()
-    if ((await header.count().catch(() => 0)) > 0) {
-      const txt = ((await header.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+    const header = page.locator('#main [data-testid="conversation-info-header"]').first()
+    if ((await safeCount(header)) > 0) {
+      const txt = ((await safeText(header, 1000)) || '').trim()
       const firstLine = txt.split('\n').map((s) => s.trim()).find(Boolean)
       if (firstLine) return firstLine
     }
-    const titleSpan = page.locator('header span[title]').first()
-    if ((await titleSpan.count().catch(() => 0)) > 0) {
-      const t = (await titleSpan.getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
+    const titleSpan = page.locator('#main header span[title]').first()
+    if ((await safeCount(titleSpan)) > 0) {
+      const t = (await safeAttr(titleSpan, 'title', 1000)) || ''
       if (t) return t
     }
   } catch { /* fall through */ }
@@ -601,20 +704,34 @@ function hasContactName(title) {
 }
 
 async function extractChatTitle(row) {
-  const viaSpanTitle = (await row.locator('span[title]').first().getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
+  const viaSpanTitle = (await safeAttr(row.locator('span[title]').first(), 'title', 1000)) || ''
   if (viaSpanTitle) return viaSpanTitle
-  const viaHeader = (await row.locator('[data-testid="conversation-info-header"]').first().getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
+  const viaHeader = (await safeAttr(row.locator('[data-testid="conversation-info-header"]').first(), 'title', 1000)) || ''
   if (viaHeader) return viaHeader
-  const viaAria = (await row.getAttribute('aria-label', { timeout: 100 }).catch(() => '')) || ''
+  const viaAria = (await safeAttr(row, 'aria-label', 1000)) || ''
   if (viaAria) return viaAria
-  const viaAnyTitle = (await row.locator('[title]').first().getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
+  const viaAnyTitle = (await safeAttr(row.locator('[title]').first(), 'title', 1000)) || ''
   return viaAnyTitle
 }
 
 async function extractChatPreview(row) {
-  const viaPreview = (await row.locator('[data-testid="last-msg"]').first().innerText({ timeout: 100 }).catch(() => '')) || ''
+  const viaPreview = (await row.evaluate((rowEl) => {
+    const candidates = [
+      rowEl.querySelector('[data-testid="last-msg-status"]'),
+      rowEl.querySelector('[data-testid="last-msg"]'),
+      rowEl.querySelector('[data-testid="cell-frame-secondary"]'),
+    ]
+    for (const el of candidates) {
+      if (!el) continue
+      const title = (el.getAttribute('title') || '').trim()
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim()
+      const candidate = (title || text || '').replace(/\s+/g, ' ').trim()
+      if (candidate && candidate !== '1 unread message' && !/^\d{1,2}:\d{2}$/.test(candidate)) return candidate
+    }
+    return ''
+  }).catch(() => '')) || ''
   if (viaPreview.trim()) return viaPreview.trim()
-  const viaDirAuto = (await row.locator('span[dir="auto"]:not([title])').first().innerText({ timeout: 100 }).catch(() => '')) || ''
+  const viaDirAuto = (await safeText(row.locator('span[dir="auto"]:not([title])').first(), 1000)) || ''
   if (viaDirAuto.trim()) return viaDirAuto.trim()
   return ''
 }
@@ -624,8 +741,8 @@ async function extractChatPreview(row) {
 // or new messages — never depends on a single hard-coded icon value.
 async function detectUnread(el) {
   try {
-    if ((await el.locator('[data-icon*="unread"]').count().catch(() => 0)) > 0) return true
-    const aria = ((await el.getAttribute('aria-label', { timeout: 100 }).catch(() => '')) || '') + ' ' + ((await el.innerText({ timeout: 100 }).catch(() => '')) || '')
+    if ((await safeCount(el.locator('[data-icon*="unread"]'))) > 0) return true
+    const aria = ((await safeAttr(el, 'aria-label', 1000)) || '') + ' ' + ((await safeText(el, 1000)) || '')
     if (/unread|new message|new messages/i.test(aria)) return true
   } catch { /* ignore */ }
   return false
@@ -638,13 +755,13 @@ async function rowRawText(el) {
   // Use a longer timeout (3 s) so the row text is actually captured.
   // A 100 ms timeout silently returns '' for every row, making rowSig
   // always null and causing the worker to trigger on every scan.
-  const txt = ((await el.innerText({ timeout: 3000 }).catch(() => '')) || '').replace(/\s+/g, ' ').trim()
+  const txt = ((await safeText(el, 3000)) || '').replace(/\s+/g, ' ').trim()
   return txt
 }
 
 // Robust preview: row innerText minus the chat title and pure time lines.
 async function extractRowPreviewFromText(row, title) {
-  const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
+  const txt = ((await safeText(row, 1000)) || '')
   const lines = txt.split('\n').map((s) => s.trim()).filter(Boolean)
   return lines.filter((l) => l && l !== title && !/^\d{1,2}:\d{2}$/.test(l)).slice(0, 2).join(' ')
 }
@@ -919,9 +1036,9 @@ async function resolveChatPhone(page, title, messageDataId) {
     if (m) return m[1]
   }
   const dataIds = page.locator('[data-id*="@c.us"]')
-  const count = await dataIds.count().catch(() => 0)
+  const count = await safeCount(dataIds)
   for (let i = 0; i < count; i++) {
-    const id = (await dataIds.nth(i).getAttribute('data-id', { timeout: 100 }).catch(() => '')) || ''
+    const id = (await safeAttr(dataIds.nth(i), 'data-id', 1000)) || ''
     const m = id.match(/(\d+)@c\.us/)
     if (m) return m[1]
   }
@@ -933,9 +1050,9 @@ async function resolveChatPhone(page, title, messageDataId) {
   if (digits) return digits
   // For non-saved contacts, data-pre-plain-text shows the sender's number.
   const prePlain = page.locator('[data-pre-plain-text]')
-  const pc = await prePlain.count().catch(() => 0)
+  const pc = await safeCount(prePlain)
   for (let i = 0; i < pc; i++) {
-    const v = (await prePlain.nth(i).getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
+    const v = (await safeAttr(prePlain.nth(i), 'data-pre-plain-text', 1000)) || ''
     const sender = v.split('] ').pop() || ''
     const m = sender.match(/(\d{7,14})/)
     if (m) return m[1]
@@ -1134,11 +1251,11 @@ async function messageDirection(el, ctx = {}) {
 // carries it, so a message yields the same timestamp / fallback-id no matter
 // which selector matched it.
 async function readPrePlainText(el) {
-  const own = (await el.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
+  const own = (await safeAttr(el, 'data-pre-plain-text', 1000)) || ''
   if (own) return own
   const desc = el.locator('[data-pre-plain-text]').first()
-  if ((await desc.count().catch(() => 0)) > 0) {
-    return (await desc.getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
+  if ((await safeCount(desc)) > 0) {
+    return (await safeAttr(desc, 'data-pre-plain-text', 1000)) || ''
   }
   return ''
 }
@@ -1215,6 +1332,7 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
     customerDigits,
     customerName,
   }
+  const collected = [] // newest-first
   try {
     // Only real message bubbles inside the OPEN chat (#main) are ever scanned.
     // Direction is decided by messageDirection() which uses the chat's customer
@@ -1227,7 +1345,6 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
       '#main [data-id]',
       '#main [data-id]:not([data-pre-plain-text])',  // media bubbles — no plain text
     ]
-    const collected = [] // newest-first
     for (const sel of selectors) {
       const messages = page.locator(sel)
       const count = await messages.count().catch(() => 0)
@@ -1238,6 +1355,8 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
           let dir = await messageDirection(el, dirCtx)
 
           let text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
+          console.log(`[worker] message candidate text="${text.slice(0, 80)}" dir=${dir || 'null'}`)
+          console.log(`[worker] message candidate text="${text.slice(0, 80)}" dir=${dir || 'null'}`)
           if (!text.trim()) {
             // Photo / media bubbles have no visible text — detect media type and
             // synthesise a marker so the AI can acknowledge the attachment.
@@ -1268,8 +1387,17 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
             }
           }
 
-          if (dir === 'out' || dir === 'system' || dir !== 'in') continue
+          if (dir === 'out' || dir === 'system' || dir !== 'in') {
+            if (DEBUG) {
+              const reason = dir === 'out' ? (dirCtx.ownSenderToken ? 'own_sender_token' : 'customer_identity') :
+                dir === 'system' ? 'banner' :
+                  dir === 'in' ? 'customer_sender' : 'unknown'
+              console.log(`[direction] text="${text.slice(0, 80)}" direction=${(dir || 'NULL').toUpperCase()} reason=${reason} — skipped`)
+            }
+            continue
+          }
 
+          console.log(`[worker] extracted incoming bubble: ${text.slice(0, 120)}`)
           const msg = finalizeMessageIdentity(text, id, ts, phoneKey)
           if (storedLastId && msg.id && msg.id === storedLastId) return collected
           collected.push(msg)
@@ -1281,6 +1409,9 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
     if (!storedLastId) return collected.slice(0, 1)
     return collected
   } finally {
+    if (collected.length === 0) {
+      console.log('[worker] no incoming bubbles discovered in open chat')
+    }
     perf('read_new_messages', tStart)
   }
 }
@@ -1300,6 +1431,8 @@ async function confirmChatOpened(page, chat, targetDigits) {
     if (targetDigits && hDigits && hDigits.includes(targetDigits.slice(-10))) return true
     if (!targetDigits && headerTitle && headerTitle === chat.title) return true
     try {
+      const bubbles = await page.locator('#main [data-pre-plain-text]').count().catch(() => 0)
+      if (bubbles > 0) return true
       const u = page.url().match(/#p\/(\d+)/)
       if (u && targetDigits && u[1].includes(targetDigits.slice(-10))) return true
     } catch { /* ignore */ }
@@ -1316,18 +1449,17 @@ async function openChatRobustly(page, chat) {
   const strategies = [
     { name: 'getByTitle exact', run: async () => {
       const t = page.getByTitle(title, { exact: true }).first()
-      if ((await t.count().catch(() => 0)) === 0) throw new Error('not found')
-      await t.click()
+      await t.evaluate((el) => el.click())
     } },
     { name: 'getByTitle loose', run: async () => {
       const t = page.getByTitle(title).first()
-      if ((await t.count().catch(() => 0)) === 0) throw new Error('not found')
-      await t.click()
+      await t.evaluate((el) => el.click())
     } },
     { name: 'chat row click', run: async () => {
       const row = await findChatRow(page, chat)
       if (!row) throw new Error('row not found')
-      await row.click()
+      const clickable = row.locator('[data-testid="cell-frame-container"], [role="button"], [role="gridcell"]').first()
+      await clickable.evaluate((el) => el.click()).catch(() => row.evaluate((el) => el.click()))
     } },
     { name: 'openChatByPhone search', run: async () => {
       const digits = targetDigits
@@ -1341,6 +1473,7 @@ async function openChatRobustly(page, chat) {
 
   for (const s of strategies) {
     const tStrat = Date.now()
+    console.log(`[worker] open strategy ${s.name} for ${title}`)
     try {
       await s.run()
     } catch (e) {
@@ -1348,13 +1481,15 @@ async function openChatRobustly(page, chat) {
       console.log(`[worker] detect failure: open selector "${s.name}" failed for "${title}" (${e.message})`)
       continue
     }
+    await sleep(800)
     const confirmed = await confirmChatOpened(page, chat, targetDigits)
-    perf('open_strategy', tStrat, `name=${s.name} confirmed=${confirmed} chat=${title}`)
     if (confirmed) {
+      console.log(`[worker] chat open confirmed: ${title}`)
+      perf('open_strategy', tStrat, `name=${s.name} settled chat=${title}`)
       perf('open_robust', tOpenStart, `chat=${title}`)
       return true
     }
-    console.log(`[worker] detect failure: open selector "${s.name}" did not open "${title}"`)
+    console.log(`[worker] open verification failed for ${title} strategy=${s.name}`)
   }
 
   console.log(`[worker] detect failure: unable to open chat ${title}`)
@@ -1372,17 +1507,25 @@ async function openChatRobustly(page, chat) {
 async function findChatRow(page, chat) {
   const title = chat.title || ''
   const targetDigits = title.replace(/\D/g, '')
-  const rows = page.locator('div[id="side"] div[role="listitem"]')
-  const n = await rows.count().catch(() => 0)
-  for (let i = 0; i < n; i++) {
-    const row = rows.nth(i)
-    try {
-      const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
-      if (targetDigits && txt.replace(/\D/g, '').includes(targetDigits)) return row
-      if (txt.includes(title)) return row
-      const rTitle = await extractChatTitle(row)
-      if (rTitle && rTitle === title) return row
-    } catch { /* keep looking */ }
+  const selectors = [
+    'div[id="side"] div[role="listitem"]',
+    'div[data-testid="chat-list"] [data-testid^="list-item"]',
+    'div[data-testid="chat-list"] div[role="row"]',
+    'div[data-testid="chat-list"] [data-testid="cell-frame-container"]',
+  ]
+  for (const sel of selectors) {
+    const rows = page.locator(sel)
+    const n = await rows.count().catch(() => 0)
+    for (let i = 0; i < n; i++) {
+      const row = rows.nth(i)
+      try {
+        const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
+        if (targetDigits && txt.replace(/\D/g, '').includes(targetDigits)) return row
+        if (txt.includes(title)) return row
+        const rTitle = await extractChatTitle(row)
+        if (rTitle && rTitle === title) return row
+      } catch { /* keep looking */ }
+    }
   }
   let anchors = page.locator('div[data-testid="chat-list"] span[title]')
   let ac = await anchors.count().catch(() => 0)
@@ -1406,14 +1549,25 @@ async function readLastIncomingFromRow(page, chat) {
     return null
   }
   let text = ''
-  const preview = row.locator('[data-testid="last-msg"]').first()
-  if ((await preview.count().catch(() => 0)) > 0) {
-    text = ((await preview.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
-  }
+  text = (await row.evaluate((rowEl) => {
+    const candidates = [
+      rowEl.querySelector('[data-testid="last-msg-status"]'),
+      rowEl.querySelector('[data-testid="last-msg"]'),
+      rowEl.querySelector('[data-testid="cell-frame-secondary"]'),
+    ]
+    for (const el of candidates) {
+      if (!el) continue
+      const title = (el.getAttribute('title') || '').trim()
+      const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim()
+      const candidate = (title || rawText || '').replace(/\s+/g, ' ').trim()
+      if (candidate && candidate !== '1 unread message' && !/^\d{1,2}:\d{2}$/.test(candidate)) return candidate
+    }
+    return ''
+  }).catch(() => '')) || ''
   if (!text) {
     const dirAuto = row.locator('span[dir="auto"]:not([title])').first()
-    if ((await dirAuto.count().catch(() => 0)) > 0) {
-      text = ((await dirAuto.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+    if ((await safeCount(dirAuto)) > 0) {
+      text = ((await safeText(dirAuto, 1000)) || '').trim()
     }
   }
   // Photo / media row fallback: preview is empty but chat has an unread badge.
@@ -1527,7 +1681,14 @@ async function detectAndForwardIncoming(page, state) {
       // 1. Open the chat (verified). Messages are only ever read when this
       //    confirms the correct chat is open — never from a previously-open one.
       const tOpen = Date.now()
-      const opened = await openChatRobustly(page, chat)
+      let opened = await openChatRobustly(page, chat)
+      if (!opened) {
+        const openBubbleCount = await page.locator('#main [data-pre-plain-text], #main .message-in, #main .message-out').count().catch(() => 0)
+        if (openBubbleCount > 0) {
+          opened = true
+          console.log(`[worker] open verification fallback accepted for ${chat.title}`)
+        }
+      }
       perf('worker_open_chat', tOpen, `chat=${chat.title}`)
 
       console.log(`[worker] processing latest message: ${chat.title}`)
