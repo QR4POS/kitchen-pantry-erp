@@ -51,8 +51,16 @@ dotenv.config({ path: path.join(ROOT, '.env.local'), quiet: true })
 console.log('[whatsapp-worker] Environment loaded')
 
 const SESSION_DIR = process.env.WHATSAPP_SESSION_DIR || path.join(ROOT, 'storage', 'whatsapp-session')
+const SESSION_BACKUP_DIR = process.env.WHATSAPP_SESSION_BACKUP_DIR || path.join(ROOT, 'storage', 'whatsapp-session.bak')
 const STATUS_FILE = process.env.WHATSAPP_STATUS_FILE || path.join(ROOT, 'storage', 'worker-status.json')
 const LAST_MESSAGES_FILE = process.env.WHATSAPP_LAST_MESSAGES_FILE || path.join(ROOT, 'storage', 'whatsapp-last-messages.json')
+const WORKER_LOCK_FILE = process.env.WHATSAPP_WORKER_LOCK_FILE || path.join(ROOT, 'storage', 'whatsapp-worker.lock')
+
+// Grace periods and thresholds around session health so transient slowness is
+// never mistaken for a lost session (a false drop tears the browser down and
+// can wipe the saved login, forcing a QR re-scan).
+const LIVENESS_SOFT_RETRY_MS = parseInt(process.env.WHATSAPP_LIVENESS_RETRY_MS || '30000', 10)
+const STUCK_WIPE_TIMEOUT_MS = parseInt(process.env.WHATSAPP_STUCK_WIPE_MS || '180000', 10)
 
 const BASE_URL = (process.env.WHATSAPP_APP_URL || 'http://localhost:3000').replace(/\/$/, '')
 const SECRET = process.env.WHATSAPP_WORKER_SECRET
@@ -90,6 +98,40 @@ if (!SECRET) {
 fs.mkdirSync(SESSION_DIR, { recursive: true })
 fs.mkdirSync(path.dirname(STATUS_FILE), { recursive: true })
 fs.mkdirSync(path.dirname(LAST_MESSAGES_FILE), { recursive: true })
+
+// Single-instance guard. Two workers sharing one persistent WhatsApp profile
+// corrupt each other's session and cause repeated logouts. If another worker is
+// already holding the lock, refuse to start instead of trashing the session.
+function acquireSingletonLock() {
+  try {
+    const existing = JSON.parse(fs.readFileSync(WORKER_LOCK_FILE, 'utf-8'))
+    if (existing && typeof existing.pid === 'number' && existing.pid !== process.pid) {
+      let alive = true
+      try { process.kill(existing.pid, 0) } catch { alive = false }
+      if (alive) {
+        console.error(
+          `[whatsapp-worker] FATAL: another instance is already running (pid ${existing.pid}). ` +
+          'Refusing to start so the shared WhatsApp session is not corrupted.'
+        )
+        return false
+      }
+    }
+  } catch { /* no lock file yet — proceed */ }
+  fs.writeFileSync(WORKER_LOCK_FILE, JSON.stringify({ pid: process.pid, started: new Date().toISOString() }))
+  return true
+}
+
+function releaseSingletonLock() {
+  try {
+    const existing = JSON.parse(fs.readFileSync(WORKER_LOCK_FILE, 'utf-8'))
+    if (existing.pid === process.pid) fs.rmSync(WORKER_LOCK_FILE, { force: true })
+  } catch { /* noop */ }
+}
+
+if (!acquireSingletonLock()) process.exit(1)
+process.on('exit', () => releaseSingletonLock())
+process.on('SIGINT', () => { releaseSingletonLock(); process.exit(0) })
+process.on('SIGTERM', () => { releaseSingletonLock(); process.exit(0) })
 
 // ── Helpers ──
 const headers = { 'x-whatsapp-worker-secret': SECRET, 'Content-Type': 'application/json' }
@@ -155,10 +197,29 @@ function ensureMessageStateMeta(state) {
   return meta
 }
 
+// Regex that strips every invisible Unicode formatting character WhatsApp may
+// inject into message text: zero-width space / ZWNJ / ZWJ (\u200B-\u200D), LRM /
+// RLM directional marks (\u200E-\u200F), bidi embeddings (\u202A-\u202E), bidi
+// isolates (\u2066-\u2069), BOM / zero-width no-break space (\uFEFF), and the
+// soft hyphen (\u00AD). These invisible characters silently break string
+// comparisons like `msg === 'Hello'`, so EVERY incoming message text is routed
+// through cleanText() before matching or ingest.
+const INVISIBLE_UNICODE_RE = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF\u00AD]/g
+
+// Robust text cleaner: strips invisible formatting characters, normalizes
+// Unicode (NFKC folds full-width/half-width forms and compatibility glyphs),
+// and trims surrounding whitespace. Call this BEFORE any comparison, hashing,
+// or AI ingest so hidden LRM/RLM marks can never break matching.
+function cleanText(raw) {
+  return String(raw ?? '').replace(INVISIBLE_UNICODE_RE, '').normalize('NFKC').trim()
+}
+
 // Normalized message text used to match outgoing evidence against DOM text
-// (WhatsApp may line-wrap the same text differently).
+// (WhatsApp may line-wrap the same text differently). Cleaning first ensures
+// both sides of a comparison (ERP outbox text and DOM-extracted text) are free
+// of invisible Unicode marks before whitespace is collapsed.
 function normalizeMessageText(text) {
-  return String(text || '').replace(/\s+/g, ' ').trim()
+  return cleanText(text).replace(/\s+/g, ' ').trim()
 }
 
 // Deterministic fallback identity for a message whose data-id the current
@@ -256,6 +317,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// Watchdog: never let a hung Playwright call freeze the main loop. Resolves
+// with the given value when the promise succeeds; otherwise resolves with the
+// fallback after `ms`. The underlying promise is left to settle — Playwright
+// cancels in-flight protocol calls when the page navigates — but the worker
+// keeps polling instead of blocking forever.
+async function withTimeout(promise, ms, fallback, label) {
+  let timer
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`[worker] WATCHDOG timeout ${label || ''} (${ms}ms)`)
+      resolve(fallback)
+    }, ms)
+  })
+  try {
+    return await Promise.race([Promise.resolve(promise), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // ── WhatsApp Web session helpers ──
 async function ensureLoggedIn(page, timeout = 8000) {
   try {
@@ -287,11 +368,27 @@ async function isStuckSyncing(page) {
   }
 }
 
+// True only when the page is genuinely unusable. Gives WhatsApp a patient soft
+// window to render #side so a transient slow frame never tears a healthy
+// browser down (which would force an unwanted QR re-scan).
+async function checkSessionHealthy(page, timeoutMs = LIVENESS_SOFT_RETRY_MS) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() <= deadline) {
+    if (page.isClosed()) return false
+    let ok = false
+    try { ok = await ensureLoggedIn(page, 4000) } catch { return false }
+    if (ok) return true
+    if (await isQrVisible(page)) return false
+    await sleep(2000)
+  }
+  return false
+}
+
 async function waitForLogin(page, onBrokenSession) {
   console.log('[whatsapp-worker] Waiting for WhatsApp Web login... scan the QR code.')
   writeStatus({ connected: false, qrPending: true })
   let attempts = 0
-  let stuckCount = 0
+  let stuckSince = 0
   while (attempts < 60 * 12) {
     // 12 minutes max
     if (await ensureLoggedIn(page, 5000)) {
@@ -301,18 +398,19 @@ async function waitForLogin(page, onBrokenSession) {
     }
 
     // A saved session that cannot finish syncing leaves the page on a permanent
-    // "Loading your chats" screen — the QR never shows. Detect it and start
-    // fresh (close browser, wipe session, relaunch) so the QR appears again.
+    // "Loading your chats" screen — the QR never shows. Require it to stay stuck
+    // for a long, continuous stretch (default 3 min) before wiping the profile;
+    // transient sync lag during a slow restore must never nuke the saved login.
     if (await isStuckSyncing(page)) {
-      stuckCount += 1
-      if (onBrokenSession && stuckCount >= 3) {
+      stuckSince = stuckSince || Date.now()
+      if (onBrokenSession && Date.now() - stuckSince >= STUCK_WIPE_TIMEOUT_MS) {
         console.log('[whatsapp-worker] WhatsApp session is stuck syncing - clearing it for a fresh QR login.')
         writeStatus({ connected: false, qrPending: true, lastError: 'Stuck session detected - clearing and re-requesting QR' })
         page = await onBrokenSession()
-        stuckCount = 0
+        stuckSince = 0
       }
     } else {
-      stuckCount = 0
+      stuckSince = 0
     }
 
     await sleep(5000)
@@ -329,6 +427,17 @@ async function waitForLogin(page, onBrokenSession) {
 // DOM changes never crash the worker.
 
 async function openChatByPhone(page, digits) {
+  const normalized = String(digits || '').replace(/[^\d]/g, '')
+  if (normalized) {
+    // 0. Direct URL navigation — the most reliable way to open a chat by phone
+    //    number. Works for saved contacts (name titles) and unsaved numbers
+    //    alike because the NUMBER, not a DOM title, drives the navigation. Tries
+    //    a pure-SPA hash change first (no reload), then a full deep-link
+    //    navigation as fallback.
+    const openedViaUrl = await openChatByPhoneViaUrl(page, normalized)
+    if (openedViaUrl) return openedViaUrl
+  }
+
   // 1. Primary: find a chat title span whose digits match the target number
   //    and click it directly — works for phone-number and contact-name titles.
   const anchors = page.locator('span[title]')
@@ -352,7 +461,7 @@ async function openChatByPhone(page, digits) {
     const found = await box.count().catch(() => 0) > 0
     if (!found) continue
     await box.click().catch(() => {})
-    await box.fill(digits).catch(() => {})
+    await insertTextViaExecCommand(box, digits).catch(() => {})
     await sleep(1500)
     const results = page.locator('span[title]')
     const rcount = await results.count().catch(() => 0)
@@ -367,9 +476,53 @@ async function openChatByPhone(page, digits) {
   return ''
 }
 
+// Open a chat via WhatsApp's phone deep links. First tries a pure-SPA hash
+// change (#p/+<number>), which avoids a full page reload; if the chat does not
+// confirm open, falls back to the classic /send?phone= deep link (full
+// navigation). Returns the resolved chat title on success, or '' so the caller
+// can fall back to the DOM strategies above.
+async function openChatByPhoneViaUrl(page, digits) {
+  try {
+    await page.evaluate((h) => { location.hash = h }, '#p/+' + digits).catch(() => {})
+    await sleep(1500)
+    const viaHash = await confirmChatOpenedByUrl(page, digits)
+    if (viaHash) return viaHash
+  } catch { /* fall through to full navigation */ }
+
+  try {
+    await page.goto(`${WHATSAPP_WEB}/send?phone=${digits}`, { waitUntil: 'domcontentloaded' }).catch(() => {})
+    await sleep(2500)
+    const viaGoto = await confirmChatOpenedByUrl(page, digits)
+    if (viaGoto) return viaGoto
+  } catch { /* fall through to DOM strategies */ }
+
+  return ''
+}
+
+// Confirm the target chat is actually open after a URL navigation: the URL hash
+// must carry the target digits AND the open-chat header must resolve to a real
+// title. Polls briefly because WhatsApp renders the chat asynchronously.
+async function confirmChatOpenedByUrl(page, digits) {
+  const tail = digits.slice(-10)
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    try {
+      const u = page.url().match(/#p\/\+?(\d+)/)
+      if (u && tail && u[1].includes(tail)) {
+        const title = await readOpenChatTitle(page, '')
+        if (title) return title
+      }
+    } catch { /* keep polling */ }
+    await sleep(500)
+  }
+  return ''
+}
+
 async function findMessageInput(page) {
   const selectors = [
     'div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"][data-tab="10"]',
+    'div[contenteditable="true"][aria-placeholder]',
     'div[contenteditable="true"]',
     'footer div[contenteditable="true"]',
     'textarea',
@@ -383,6 +536,30 @@ async function findMessageInput(page) {
     }
   }
   return null
+}
+
+// React-safe text insertion for WhatsApp's contenteditable boxes. Setting
+// .innerText or using Playwright fill() does not always fire the native
+// beforeinput/input events React's synthetic event system listens for, so the
+// message never registers in the composer. document.execCommand('insertText')
+// runs the browser's native editing path, which DOES dispatch those events.
+// selectAll first guarantees any pre-existing composer content is replaced,
+// not appended to. Falls back to Playwright fill() if execCommand is
+// unavailable.
+async function insertTextViaExecCommand(locator, text) {
+  const ok = await locator.evaluate((el, value) => {
+    el.focus()
+    if (typeof document.execCommand === 'function') {
+      document.execCommand('selectAll')
+      if (document.execCommand('insertText', false, value)) return true
+    }
+    return false
+  }, text).catch(() => false)
+  if (!ok) {
+    await locator.fill(text).catch(() => {})
+    return false
+  }
+  return true
 }
 
 async function pressEnterOrSendButton(page, input) {
@@ -437,7 +614,7 @@ async function sendMessageToChat(page, phoneNumber, text, state) {
   const identifier = (phoneNumber || '').trim()
   if (!identifier) {
     console.error('[worker] opening chat: empty chat identifier')
-    return false
+    return { ok: false, error: 'empty chat identifier' }
   }
 
   console.log(`[worker] opening chat: ${identifier}`)
@@ -445,7 +622,7 @@ async function sendMessageToChat(page, phoneNumber, text, state) {
   if (!opened) {
     console.error(`[worker] opening chat: chat not locatable (${identifier}), giving up`)
     await saveSendFailure(page)
-    return false
+    return { ok: false, error: `chat not locatable (${identifier})` }
   }
   await sleep(1200)
 
@@ -453,17 +630,30 @@ async function sendMessageToChat(page, phoneNumber, text, state) {
   if (!input) {
     console.error('[worker] message input not found (WhatsApp DOM changed)')
     await saveSendFailure(page)
-    return false
+    return { ok: false, error: 'message input not found' }
   }
 
   console.log('[worker] typing message')
   await input.click().catch(() => {})
-  await input.fill(text).catch(() => {})
+  await insertTextViaExecCommand(input, text).catch(() => {})
   await sleep(400)
 
   console.log('[worker] sending message')
   await pressEnterOrSendButton(page, input)
   await sleep(1200)
+
+  // Verify the message actually left the composer before declaring success.
+  // WhatsApp keeps the text in the composer when a send does not fire (e.g.
+  // multiline replies where Enter only inserts a newline, or over-length
+  // messages), so an emptied composer is the strongest cheap signal the message
+  // was dispatched. Without this check a failed send could be ACKed as 'sent'
+  // and the customer would never receive the reply.
+  const verified = await verifyComposerCleared(input)
+  if (!verified) {
+    console.error('[worker] send verification failed: composer still holds text')
+    await saveSendFailure(page)
+    return { ok: false, error: 'send not verified (composer not cleared)' }
+  }
 
   // Persistent outgoing evidence: remember exactly what this account sent and
   // learn the account's own sender token from the sent bubble, so future polls
@@ -483,7 +673,22 @@ async function sendMessageToChat(page, phoneNumber, text, state) {
 
   perf('whatsapp_send', tSend, `chat=${identifier}`)
   console.log('[worker] message sent successfully')
-  return true
+  return { ok: true }
+}
+
+// Poll the composer after a send attempt until its text is cleared — the
+// reliable indicator that WhatsApp dispatched the message. Returns true once
+// emptied, false if the text persists (the send did not fire).
+async function verifyComposerCleared(input) {
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline) {
+    try {
+      const current = ((await input.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+      if (!current) return true
+    } catch { /* keep polling */ }
+    await sleep(400)
+  }
+  return false
 }
 
 // Learn this account's own sender token from the just-sent message's
@@ -536,6 +741,82 @@ async function learnOwnSenderToken(page, state, sentText) {
       return
     }
   } catch { /* ignore — token will be learned on a later send */ }
+}
+
+// ── Outbox polling and dispatch ──
+// Claims pending outgoing messages from the ERP queue, dispatches each one to
+// WhatsApp, and ACKs the result back to the backend so a message is never
+// processed twice. Runs every loop, UNCONDITIONALLY: the backend itself refuses
+// to claim anything while the agent is OFF (returns disabled:true), so a stale
+// status-file agentEnabled flag can never starve the outbox — the returned
+// disabled flag is the live, authoritative agent gate. Every per-message send is
+// isolated — a failure on one chat never blocks the rest of the batch — and the
+// batch ACK is best-effort (un-acked 'processing' rows are re-queued by the
+// recover_stale_outgoing RPC on the next poll).
+async function processOutbox(page, messageState) {
+  const result = { disabled: false, claimed: 0, sent: 0, failed: 0 }
+
+  let messages = []
+  try {
+    const res = await apiGet('/api/whatsapp/outbox')
+    if (res?.disabled) {
+      result.disabled = true
+      writeStatus({ connected: true, lastError: null, agentEnabled: false })
+      return result
+    }
+    messages = res?.messages ?? []
+  } catch (e) {
+    console.error('[whatsapp-worker] outbox poll failed:', e.message)
+    writeStatus({ lastError: `Outbox poll failed: ${e.message}` })
+    return result
+  }
+
+  if (messages.length === 0) {
+    writeStatus({ connected: true, lastError: null, agentEnabled: true, pendingOutgoing: 0 })
+    return result
+  }
+
+  result.claimed = messages.length
+  const results = []
+  for (const msg of messages) {
+    console.log(`[OUTBOX_SEND_START] id=${msg.id} phone=${msg.phone_number}`)
+    try {
+      const outcome = await sendMessageToChat(page, msg.phone_number, msg.message, messageState)
+      if (outcome.ok) {
+        result.sent += 1
+        results.push({ id: msg.id, status: 'sent' })
+        console.log(`[OUTBOX_SEND_DONE] id=${msg.id}`)
+      } else {
+        result.failed += 1
+        results.push({ id: msg.id, status: 'failed', error_message: outcome.error || 'send failed' })
+        console.log(`[OUTBOX_SEND_FAILED] id=${msg.id} reason=${outcome.error || 'send failed'}`)
+      }
+    } catch (e) {
+      result.failed += 1
+      results.push({ id: msg.id, status: 'failed', error_message: e.message })
+      console.log(`[OUTBOX_SEND_FAILED] id=${msg.id} reason=${e.message}`)
+    }
+  }
+
+  if (results.length > 0) {
+    try {
+      await apiPost('/api/whatsapp/outbox', { results })
+    } catch (e) {
+      // Transport failure — never crash the loop. The claimed rows stay in
+      // 'processing' and recover_stale_outgoing re-queues them on a later poll.
+      console.error('[whatsapp-worker] outbox ACK failed:', e.message)
+      writeStatus({ lastError: `Outbox ACK failed: ${e.message}` })
+    }
+  }
+
+  writeStatus({
+    connected: true,
+    lastError: null,
+    agentEnabled: true,
+    pendingOutgoing: messages.length,
+    lastOutbox: { at: new Date().toISOString(), claimed: result.claimed, sent: result.sent, failed: result.failed },
+  })
+  return result
 }
 
 // ── Detect and forward genuinely new incoming messages ──
@@ -614,6 +895,10 @@ async function extractChatTitle(row) {
 async function extractChatPreview(row) {
   const viaPreview = (await row.locator('[data-testid="last-msg"]').first().innerText({ timeout: 100 }).catch(() => '')) || ''
   if (viaPreview.trim()) return viaPreview.trim()
+  // Current WhatsApp Web DOM (2026-08+) puts the preview inside
+  // [data-testid="last-msg-status"] with a nested dir="ltr"/dir="auto" span.
+  const viaStatus = (await row.locator('[data-testid="last-msg-status"]').first().innerText({ timeout: 100 }).catch(() => '')) || ''
+  if (viaStatus.trim()) return viaStatus.trim()
   const viaDirAuto = (await row.locator('span[dir="auto"]:not([title])').first().innerText({ timeout: 100 }).catch(() => '')) || ''
   if (viaDirAuto.trim()) return viaDirAuto.trim()
   return ''
@@ -662,7 +947,7 @@ async function findRowAncestor(anchor) {
       if (lines.length > 1) return node
     }
     return null
-  }).catch(() => null)
+  }, { timeout: 2000 }).catch(() => null)
 }
 
 async function probeChatDom(page) {
@@ -674,6 +959,7 @@ async function probeChatDom(page) {
       listitemsSide: await page.locator('div[id="side"] div[role="listitem"]').count(),
       spanTitleInSide: await page.locator('div[id="side"] span[title]').count(),
       lastMsgTestid: await page.locator('[data-testid="last-msg"]').count(),
+      lastMsgStatusTestid: await page.locator('[data-testid="last-msg-status"]').count(),
       convTitleTestid: await page.locator('[data-testid="conversation-title"]').count(),
       roleButtonInChatList: await page.locator('[data-testid="chat-list"] div[role="button"]').count(),
       cellFrameTestid: await page.locator('[data-testid="cell-frame-container"]').count(),
@@ -687,112 +973,6 @@ async function probeChatDom(page) {
   } catch (e) {
     console.error('[whatsapp-worker] DOM probe error:', e.message)
   }
-}
-
-// TEMP DIAGNOSTIC — captures the current WhatsApp Web DOM (chat-list rows,
-// chat-list container, message bubbles, selector probe) to a log file so the
-// incoming-detection selectors can be updated to match this DOM build. This is
-// temporary and is removed after the selector fix.
-let domListCaptured = false
-let domBubblesCaptured = false
-async function captureDomSnapshot(page, opts = {}) {
-  const out = []
-  const push = (s) => out.push(String(s || ''))
-  if (opts.list && domListCaptured) return
-  if (opts.bubbles && domBubblesCaptured) return
-  if (opts.list) domListCaptured = true
-  if (opts.bubbles) domBubblesCaptured = true
-  push('=== DOM SNAPSHOT ' + (opts.bubbles ? 'BUBBLES' : 'LIST') + ' ' + new Date().toISOString() + ' ===')
-
-  // 1. Selector probe results.
-  try {
-    const probeSelectors = {
-      'div[id="side"] div[role="listitem"]': 'listitemSide',
-      'div[id="side"] div[role="button"]': 'roleButtonSide',
-      '[data-testid="chat-list"]': 'chatList',
-      '[data-testid="chat-list"] div[role="listitem"]': 'chatListListitem',
-      '[data-testid="chat-list"] div[role="button"]': 'chatListButton',
-      '[data-testid="last-msg"]': 'lastMsg',
-      '[data-testid="cell-frame-container"]': 'cellFrame',
-      '[data-testid="conversation-title"]': 'convTitle',
-      '[data-icon*="unread"]': 'unreadIcon',
-      'div[id="side"] span[title]': 'spanTitleSide',
-      'div[data-id*="_msg"]': 'msgContainers',
-      '#main .message-in': 'msgIn',
-      '#main .message-out': 'msgOut',
-      '#main [data-pre-plain-text]': 'prePlain',
-    }
-    const counts = {}
-    for (const [s, k] of Object.entries(probeSelectors)) {
-      counts[k] = await page.locator(s).count().catch(() => -1)
-    }
-    push('PROBE ' + JSON.stringify(counts))
-  } catch (e) { push('PROBE_ERR ' + e.message) }
-
-  if (opts.list) {
-    // 2. Chat-list container HTML.
-    try {
-      const chatList = page.locator('[data-testid="chat-list"]').first()
-      if ((await chatList.count().catch(() => 0)) > 0) {
-        const html = (await chatList.evaluate((el) => el.outerHTML || '').catch(() => '')) || ''
-        push('CHAT_LIST_BEGIN\n' + html.slice(0, 8000) + '\nCHAT_LIST_END')
-      } else {
-        push('CHAT_LIST (no [data-testid="chat-list"])')
-      }
-    } catch (e) { push('CHAT_LIST_ERR ' + e.message) }
-
-    // 3. A real chat row: walk up from the first title span to a DIV container.
-    try {
-      const anchor = page.locator('div[id="side"] span[title]').first()
-      if ((await anchor.count().catch(() => 0)) > 0) {
-        const html = (await anchor.evaluate((el) => {
-          let node = el
-          let best = el
-          for (let i = 0; i < 14 && node; i++) {
-            node = node.parentElement
-            if (!node) break
-            if (node.tagName === 'DIV' && (node.innerText || '').trim().length > 5) best = node
-          }
-          return best.outerHTML || ''
-        }).catch(() => '')) || ''
-        push('ROW_BEGIN\n' + html.slice(0, 5000) + '\nROW_END')
-      } else {
-        push('ROW (no span[title] anchor)')
-      }
-    } catch (e) { push('ROW_ERR ' + e.message) }
-  }
-
-  if (opts.bubbles) {
-    // 4. Message bubbles (chat must be open).
-    for (const cls of ['#main .message-in', '#main .message-out']) {
-      try {
-        const loc = page.locator(cls).first()
-        if ((await loc.count().catch(() => 0)) > 0) {
-          const html = (await loc.evaluate((el) => el.outerHTML || '').catch(() => '')) || ''
-          push(cls + '_BEGIN\n' + html.slice(0, 3000) + '\n' + cls + '_END')
-        } else {
-          push(cls + ' (none)')
-        }
-      } catch (e) { push(cls + '_ERR ' + e.message) }
-    }
-    // 5. First data-pre-plain-text element outerHTML (bubble structure fallback).
-    try {
-      const loc = page.locator('#main [data-pre-plain-text]').first()
-      if ((await loc.count().catch(() => 0)) > 0) {
-        const html = (await loc.evaluate((el) => el.outerHTML || '').catch(() => '')) || ''
-        push('#main [data-pre-plain-text]_BEGIN\n' + html.slice(0, 3000) + '\n_END')
-      }
-    } catch { /* ignore */ }
-  }
-
-  try {
-    const file = path.join(ROOT, 'storage', 'dom-snapshot.log')
-    fs.appendFileSync(file, out.join('\n') + '\n\n')
-    console.log('[domcapture] DOM snapshot (' + (opts.bubbles ? 'bubbles' : 'list') + ') saved to ' + file)
-  } catch (e) {
-    console.error('[domcapture] failed to write snapshot: ' + e.message)
-  }
-  console.log('[domcapture] ' + (out[0] || ''))
 }
 
 // Dynamic chat-row discovery. WhatsApp's DOM changes between versions, so rows
@@ -881,9 +1061,6 @@ async function scanChatRows(page) {
 
   const candidates = await discoverChatCandidates(page)
 
-  // TEMP DIAGNOSTIC — capture the chat-list DOM once candidates are found.
-  if (candidates.length > 0) await captureDomSnapshot(page, { list: true })
-
   if (candidates.length === 0 && Date.now() - lastProbeTs > 60000) {
     lastProbeTs = Date.now()
     await probeChatDom(page)
@@ -896,7 +1073,7 @@ async function scanChatRows(page) {
     if (candidates.length > 0) {
       const row = await findChatRow(page, candidates[0])
       const html = row
-        ? ((await row.evaluate((el) => el.outerHTML || '').catch(() => '')) || '').slice(0, 2000)
+        ? ((await row.evaluate((el) => el.outerHTML || '', { timeout: 2000 }).catch(() => '')) || '').slice(0, 2000)
         : '(row not found)'
       console.log(`[worker] debug first chat row html:\n${html}`)
     }
@@ -926,7 +1103,8 @@ async function resolveChatPhone(page, title, messageDataId) {
     if (m) return m[1]
   }
   try {
-    const u = page.url().match(/#p\/(\d+)/)
+    // WhatsApp URL hash is #p/+94760544773 (leading '+' before digits).
+    const u = page.url().match(/#p\/\+?(\d+)/)
     if (u) return u[1]
   } catch { /* ignore */ }
   const digits = title.replace(/\D/g, '')
@@ -954,7 +1132,7 @@ function chatStateKey(title) {
 // Strips trailing timestamp lines ("00:15") that WhatsApp merges into the
 // message text so stored messages stay clean.
 function cleanMessageText(text) {
-  const lines = text.trim().split('\n').map((s) => s.trim())
+  const lines = cleanText(text).split('\n').map((s) => s.trim())
   while (lines.length > 0 && /^\d{1,2}:\d{2}$/.test(lines[lines.length - 1])) {
     lines.pop()
   }
@@ -998,7 +1176,7 @@ async function detectMediaType(el) {
         if (icon.includes('doc'))     return '[document]'
       }
       return null
-    })
+    }, { timeout: 2000 })
   } catch {
     return null
   }
@@ -1122,7 +1300,7 @@ async function messageDirection(el, ctx = {}) {
       ownSenderToken: (ctx && ctx.ownSenderToken) || '',
       customerDigits: (ctx && ctx.customerDigits) || '',
       customerName: (ctx && ctx.customerName) || '',
-    })
+    }, { timeout: 2000 })
 
     return dir
   } catch {
@@ -1143,6 +1321,20 @@ async function readPrePlainText(el) {
   return ''
 }
 
+// Read the visible message body from a bubble. span.selectable-text is the
+// stable container for message text across WhatsApp Web versions — it holds
+// ONLY the message body (no sender name, timestamp, or "read more" truncation
+// suffix that innerText on the whole bubble would pick up). Falls back to the
+// element's innerText when the class is absent in a future DOM build.
+async function extractBubbleText(el) {
+  const selectable = el.locator('span.selectable-text').first()
+  if ((await selectable.count().catch(() => 0)) > 0) {
+    const txt = ((await selectable.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+    if (txt) return txt
+  }
+  return ((await el.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+}
+
 async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
   // Only real message bubbles inside the OPEN chat (#main) are ever considered.
   // Direction is decided by messageDirection() — only 'in' is ever returned.
@@ -1154,10 +1346,12 @@ async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
     customerDigits,
     customerName,
   }
+  // Prioritize the STABLE [data-pre-plain-text] container over class names —
+  // .message-in / .message-out are hashed and change between WhatsApp builds.
   const selectors = [
+    '#main [data-pre-plain-text]',
     '#main .message-in',
     '#main .message-out',
-    '#main [data-pre-plain-text]',
     '#main [data-id]',
     '#main [data-id]:not([data-pre-plain-text])',  // media bubbles — no plain text
   ]
@@ -1170,7 +1364,7 @@ async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
       try {
         let dir = await messageDirection(el, dirCtx)
 
-        let text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
+        let text = await extractBubbleText(el)
         if (!text.trim()) {
           // Photo / media bubbles have no visible text — detect media type and
           // synthesise a marker so the AI can acknowledge the attachment.
@@ -1201,12 +1395,26 @@ async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
   return null
 }
 
+// Dedup boundary: stop scanning when a message equals the last one already
+// processed. Matches on the authoritative WhatsApp data-id when present. For
+// data-id-less messages (fallback ids) the normalized text is compared against
+// the stored lastIncomingText too, so the cleanText upgrade never re-ingests a
+// message that was already handled under a different fallback hash.
+function isAlreadyProcessedBoundary(msg, storedLastId, storedLastText) {
+  if (storedLastId && msg.id && msg.id === storedLastId) return true
+  if (!storedLastId || !storedLastText) return false
+  const storedIsFallback = String(storedLastId).startsWith('msg_fallback_')
+  const msgIsFallback = !msg.id || String(msg.id).startsWith('msg_fallback_')
+  if (!storedIsFallback && !msgIsFallback) return false
+  return normalizeMessageText(msg.text) === normalizeMessageText(storedLastText)
+}
+
 // Read incoming messages that are NEWER than the last processed message.
 // Returns newest-first; scanning stops at the already-processed message id
 // boundary. When storedLastId is null (an untracked chat) only the newest
 // message is kept so pre-existing history is never replayed. A cap bounds the
 // work for chats with very long unread runs.
-async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, customerTitle, cap = MAX_NEW_MESSAGES) {
+async function readNewIncomingMessages(page, storedLastId, storedLastText, meta, phoneKey, customerTitle, cap = MAX_NEW_MESSAGES) {
   const tStart = Date.now()
   const customerDigits = String(customerTitle || '').replace(/\D/g, '')
   const customerName = String(customerTitle || '').trim().toLowerCase()
@@ -1220,10 +1428,12 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
     // Direction is decided by messageDirection() which uses the chat's customer
     // identity to distinguish incoming (customer) from outgoing (this account).
     // Only 'in' is accepted; 'out', 'system', and null are always skipped.
+    // Prioritize the STABLE [data-pre-plain-text] container over hashed class
+    // names (.message-in/.message-out) that change between WhatsApp builds.
     const selectors = [
+      '#main [data-pre-plain-text]',
       '#main .message-in',
       '#main .message-out',
-      '#main [data-pre-plain-text]',
       '#main [data-id]',
       '#main [data-id]:not([data-pre-plain-text])',  // media bubbles — no plain text
     ]
@@ -1237,7 +1447,7 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
         try {
           let dir = await messageDirection(el, dirCtx)
 
-          let text = (await el.innerText({ timeout: 100 }).catch(() => '')) || ''
+          let text = await extractBubbleText(el)
           if (!text.trim()) {
             // Photo / media bubbles have no visible text — detect media type and
             // synthesise a marker so the AI can acknowledge the attachment.
@@ -1271,7 +1481,7 @@ async function readNewIncomingMessages(page, storedLastId, meta, phoneKey, custo
           if (dir === 'out' || dir === 'system' || dir !== 'in') continue
 
           const msg = finalizeMessageIdentity(text, id, ts, phoneKey)
-          if (storedLastId && msg.id && msg.id === storedLastId) return collected
+          if (isAlreadyProcessedBoundary(msg, storedLastId, storedLastText)) return collected
           collected.push(msg)
           if (collected.length >= cap) return collected
         } catch { /* keep scanning up */ }
@@ -1300,7 +1510,8 @@ async function confirmChatOpened(page, chat, targetDigits) {
     if (targetDigits && hDigits && hDigits.includes(targetDigits.slice(-10))) return true
     if (!targetDigits && headerTitle && headerTitle === chat.title) return true
     try {
-      const u = page.url().match(/#p\/(\d+)/)
+      // WhatsApp URL hash is #p/+94760544773 (leading '+' before digits).
+      const u = page.url().match(/#p\/\+?(\d+)/)
       if (u && targetDigits && u[1].includes(targetDigits.slice(-10))) return true
     } catch { /* ignore */ }
     await sleep(500)
@@ -1372,18 +1583,33 @@ async function openChatRobustly(page, chat) {
 async function findChatRow(page, chat) {
   const title = chat.title || ''
   const targetDigits = title.replace(/\D/g, '')
-  const rows = page.locator('div[id="side"] div[role="listitem"]')
-  const n = await rows.count().catch(() => 0)
-  for (let i = 0; i < n; i++) {
-    const row = rows.nth(i)
-    try {
-      const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
-      if (targetDigits && txt.replace(/\D/g, '').includes(targetDigits)) return row
-      if (txt.includes(title)) return row
-      const rTitle = await extractChatTitle(row)
-      if (rTitle && rTitle === title) return row
-    } catch { /* keep looking */ }
+
+  // Row-container strategies, stable-first. WhatsApp changes the chat-list row
+  // markup between builds, so several container selectors are tried in order and
+  // the first that yields a matching row wins. Selection is by stable identity
+  // (title digits / title text), never by hashed class names.
+  const rowSelectors = [
+    'div[id="side"] div[role="listitem"]',
+    'div[id="side"] [data-testid="cell-frame-container"]',
+    'div[id="side"] div[role="button"]',
+    'div[id="side"] [data-testid="chat-list"] div',
+  ]
+  for (const sel of rowSelectors) {
+    const rows = page.locator(sel)
+    const n = await rows.count().catch(() => 0)
+    for (let i = 0; i < n; i++) {
+      const row = rows.nth(i)
+      try {
+        const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
+        if (targetDigits && txt.replace(/\D/g, '').includes(targetDigits)) return row
+        if (txt.includes(title)) return row
+        const rTitle = await extractChatTitle(row)
+        if (rTitle && rTitle === title) return row
+      } catch { /* keep looking */ }
+    }
   }
+
+  // Span-title fallback: some builds only expose chat titles on span[title].
   let anchors = page.locator('div[data-testid="chat-list"] span[title]')
   let ac = await anchors.count().catch(() => 0)
   if (ac === 0) {
@@ -1409,6 +1635,14 @@ async function readLastIncomingFromRow(page, chat) {
   const preview = row.locator('[data-testid="last-msg"]').first()
   if ((await preview.count().catch(() => 0)) > 0) {
     text = ((await preview.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+  }
+  if (!text) {
+    // Current WhatsApp Web DOM (2026-08+): preview text lives inside
+    // [data-testid="last-msg-status"] (nested dir="ltr"/dir="auto" span).
+    const status = row.locator('[data-testid="last-msg-status"]').first()
+    if ((await status.count().catch(() => 0)) > 0) {
+      text = ((await status.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+    }
   }
   if (!text) {
     const dirAuto = row.locator('span[dir="auto"]:not([title])').first()
@@ -1449,7 +1683,7 @@ async function readLastIncomingFromRow(page, chat) {
           }
         }
         return null
-      }).catch(() => null)
+      }, { timeout: 2000 }).catch(() => null)
       if (mediaLabel) {
         console.log(`[worker] detected media icon in row preview for "${chat.title}": ${mediaLabel}`)
         text = mediaLabel
@@ -1475,7 +1709,7 @@ async function dumpChatRowHtml(page, chat) {
       console.log(`[worker] chat row dump: (row not found for "${chat.title}")`)
       return
     }
-    const html = ((await row.evaluate((el) => el.outerHTML || '').catch(() => '')) || '').slice(0, 2000)
+    const html = ((await row.evaluate((el) => el.outerHTML || '', { timeout: 2000 }).catch(() => '')) || '').slice(0, 2000)
     console.log(`[worker] chat row dump:\n${html}`)
   } catch (e) {
     console.log(`[worker] chat row dump failed: ${e.message}`)
@@ -1527,29 +1761,30 @@ async function detectAndForwardIncoming(page, state) {
       // 1. Open the chat (verified). Messages are only ever read when this
       //    confirms the correct chat is open — never from a previously-open one.
       const tOpen = Date.now()
-      const opened = await openChatRobustly(page, chat)
+      const opened = await withTimeout(openChatRobustly(page, chat), 15000, false, `openChatRobustly ${chat.title}`)
       perf('worker_open_chat', tOpen, `chat=${chat.title}`)
+      console.log(`[worker] open result: opened=${opened} chat=${chat.title}`)
 
       console.log(`[worker] processing latest message: ${chat.title}`)
-
-      // TEMP DIAGNOSTIC — capture the current WhatsApp DOM (chat open).
-      if (opened) await captureDomSnapshot(page, { bubbles: true })
 
       // 2. Read the messages NEWER than the last processed one. Multiple new
       //    messages (e.g. received while the worker was offline) are collected
       //    newest-first and later combined chronologically into a single ingest,
       //    preserving the turn-based one-reply model. Old history is never read.
       const tExtract = Date.now()
-      let newMessages = opened ? await readNewIncomingMessages(page, stored?.lastIncomingId || null, state.meta, key, chat.title) : []
+      let newMessages = opened
+        ? await withTimeout(readNewIncomingMessages(page, stored?.lastIncomingId || null, stored?.lastIncomingText || null, state.meta, key, chat.title), 15000, [], 'readNewIncomingMessages')
+        : []
       let last = newMessages.length > 0 ? newMessages[0] : null
       let phone = ''
       if (!last) {
         // Fallback: the chat could not be opened (or has no newer messages) but
         // the row has an unread badge → read the preview directly from the list.
-        last = await readLastIncomingFromRow(page, chat)
+        last = await withTimeout(readLastIncomingFromRow(page, chat), 10000, null, 'readLastIncomingFromRow')
         if (last) phone = last.phone
       }
       perf('worker_extract', tExtract, `chat=${chat.title}`)
+      console.log(`[worker] extract result: found=${Boolean(last)} chat=${chat.title}`)
 
       if (!last) {
         if (!opened) {
@@ -1563,7 +1798,7 @@ async function detectAndForwardIncoming(page, state) {
         // the row signature (preview/time) actually changed since last poll.
         const previewChanged = stored && chat.raw && stored.rowSig !== chat.raw
         if (chat.hasUnread || previewChanged) {
-          last = await readLastIncomingMessage(page, state.meta, key, chat.title)
+          last = await withTimeout(readLastIncomingMessage(page, state.meta, key, chat.title), 15000, null, 'readLastIncomingMessage')
           if (last) {
             console.log(`[worker] re-read ok, found message in ${chat.title}`)
           }
@@ -1797,10 +2032,19 @@ async function run() {
   }
 
   // Recovery from a corrupt saved session: close the browser, wipe the profile
-  // so WhatsApp asks for a brand-new QR login, and relaunch.
+  // so WhatsApp asks for a brand-new QR login, and relaunch. The previous
+  // profile is preserved at SESSION_BACKUP_DIR first, so a false "stuck" verdict
+  // never permanently destroys a valid login.
   async function forceFreshLogin() {
     try { await context.close() } catch { /* noop */ }
     await sleep(2000)
+    try {
+      fs.rmSync(SESSION_BACKUP_DIR, { recursive: true, force: true })
+      fs.cpSync(SESSION_DIR, SESSION_BACKUP_DIR, { recursive: true })
+      console.log(`[whatsapp-worker] saved previous session backup to ${SESSION_BACKUP_DIR}`)
+    } catch (e) {
+      console.error('[whatsapp-worker] failed to back up session directory:', e.message)
+    }
     try {
       fs.rmSync(SESSION_DIR, { recursive: true, force: true })
     } catch (e) {
@@ -1839,7 +2083,7 @@ async function run() {
   setInterval(() => {
     try {
       apiGet('/api/whatsapp/health').then((h) => {
-        writeStatus({ connected: true, agentEnabled: h.agent_enabled ?? false })
+        writeStatus({ connected: true, lastError: null, agentEnabled: h.agent_enabled ?? false })
       }).catch((e) => {
         writeStatus({ lastError: `Health check failed: ${e.message}` })
       })
@@ -1849,12 +2093,12 @@ async function run() {
   while (true) {
     const tLoop = Date.now()
     if (PERF) console.log(`[PERF] loop_start=${new Date().toISOString()}`)
-    // Prevent the same outbox message from being sent twice within this process.
-    const finalizedSendIds = new Set()
     try {
-      // Reconnect if the session was lost (logged out / page crashed / network)
-      const alive = await ensureLoggedIn(page, 3000).catch(() => false)
-      if (!alive || page.isClosed()) {
+      // Reconnect if the session was really lost (logged out / page crashed).
+      // checkSessionHealthy waits through transient slowness instead of tearing
+      // down the browser on a single slow frame.
+      const alive = await checkSessionHealthy(page)
+      if (!alive) {
         console.log('[whatsapp-worker] Session lost - reconnecting.')
         try { await context.close() } catch { /* noop */ }
         await launch()
@@ -1866,45 +2110,21 @@ async function run() {
         }
       }
 
-      const health = readStatus()
+      // 1. Dispatch queued outgoing messages. Polled UNCONDITIONALLY each loop —
+      //    the backend refuses to claim anything while the agent is OFF
+      //    (disabled:true), so a stale status-file agentEnabled flag can never
+      //    starve the outbox. The returned disabled flag is the live gate.
+      const tPoll = Date.now()
+      const outbox = await processOutbox(page, messageState)
+      perf('outbox_poll', tPoll, `disabled=${outbox.disabled} claimed=${outbox.claimed} sent=${outbox.sent} failed=${outbox.failed}`)
 
-      // 1. Send queued outgoing messages (only when agent enabled)
-      if (health.agentEnabled) {
-        const tPoll = Date.now()
-        const { messages } = await apiGet('/api/whatsapp/outbox')
-        perf('outbox_poll', tPoll, `n=${messages?.length ?? 0}`)
-        if (messages && messages.length > 0) {
-          for (const msg of messages) {
-            try {
-              // Skip any message id that was already finalized in this process
-              if (finalizedSendIds.has(msg.id)) {
-                console.log(`[OUTBOX_SEND_SKIP] id=${msg.id} reason=already_finalized`)
-                continue
-              }
-              console.log(`[OUTBOX_SEND_START] id=${msg.id}`)
-              const sent = await sendMessageToChat(page, msg.phone_number, msg.message, messageState)
-              if (sent) {
-                console.log('[worker] reply sent')
-                await apiPost('/api/whatsapp/outbox', { results: [{ id: msg.id, status: 'sent' }] })
-                console.log(`[OUTBOX_SEND_DONE] id=${msg.id}`)
-                finalizedSendIds.add(msg.id)
-              } else {
-                await apiPost('/api/whatsapp/outbox', { results: [{ id: msg.id, status: 'failed', error_message: 'chat not found' }] })
-              }
-            } catch (e) {
-              await apiPost('/api/whatsapp/outbox', { results: [{ id: msg.id, status: 'failed', error_message: e.message }] })
-            }
-          }
-        }
-
-        // 2. Detect and forward incoming messages (only when agent enabled)
+      // 2. Detect and forward incoming messages (only when agent enabled —
+      //    live-gated by the backend's own agent switch).
+      if (!outbox.disabled) {
         await detectAndForwardIncoming(page, messageState)
-      } else {
-        // Idle — keep session alive, mark as disabled
-        writeStatus({ agentEnabled: false })
       }
 
-      writeStatus({ connected: true })
+      writeStatus({ connected: true, lastError: null })
       perf('loop_work', tLoop)
     } catch (e) {
       writeStatus({ lastError: e.message })
