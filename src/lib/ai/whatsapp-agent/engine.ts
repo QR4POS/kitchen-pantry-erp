@@ -13,6 +13,9 @@
 
 import { createAdminClient } from '@/lib/supabase/admin'
 import { logAgent } from '@/lib/ai/agent-provider'
+import { BRAND_NAME } from './brand'
+import { isEstimateTrigger } from '@/lib/estimation/luxus/trigger'
+import { runLuxusEstimation } from '@/lib/estimation/luxus/run'
 import { queueOutgoingMessage } from './tools'
 import { searchCustomerByPhone } from './tools'
 import { isKitchenRelatedMessage, NON_KITCHEN_REPLY } from './intent-filter'
@@ -182,8 +185,10 @@ function isAnswerToPreviousQuestion(
 export async function processWhatsAppMessage(
   phone: string,
   incomingText: string,
-  providerMessageId?: string | null
+  meta?: { providerMessageId?: string | null; mediaUrl?: string | null }
 ): Promise<ProcessWhatsAppResult> {
+  const providerMessageId = meta?.providerMessageId ?? null
+  const mediaUrl = meta?.mediaUrl ?? null
   const settings = await getAgentSettings()
   if (!settings?.whatsapp_agent_enabled) {
     await logAgent('skip_message', null, 'info', { phone, reason: 'agent_disabled' })
@@ -221,7 +226,7 @@ export async function processWhatsAppMessage(
 
       if (conversation.last_question) {
         nonKitchenConvId = conversation.id
-        redirectReply = `I can help only with Kitchen Pantry products, quotations, materials, and kitchen projects.\n\n${conversation.last_question}`
+        redirectReply = `I can help only with ${BRAND_NAME} products, quotations, materials, and kitchen projects.\n\n${conversation.last_question}`
       }
 
       await queueOutgoingMessage(phone, redirectReply, true, {
@@ -285,6 +290,24 @@ export async function processWhatsAppMessage(
       console.log(`[engine] conversation locked conversation_id=${conversation.id}`)
       return { action: 'wait', state: conversation.conversation_status, replyQueued: false, conversationId: conversation.id }
     }
+  }
+
+  // ── LUXUS estimation trigger ──
+  // Runs BEFORE routing to onboarding/support so a customer who provides room
+  // photos, dimensions, or asks for a final quote gets an estimate regardless of
+  // conversation state. Skipped when the customer is simply answering the AI's
+  // previous question (e.g. the onboarding "kitchen size" prompt).
+  if (!isAnswering && (await isEstimateTrigger(incomingText))) {
+    const estimation = await runLuxusEstimation({
+      conversation,
+      phone: normalizedPhone,
+      incomingText,
+      settings,
+      providerMessageId,
+      mediaUrl,
+    })
+    perf('engine_total', tEngine, `phone=${phone} estimate`)
+    return estimation
   }
 
   // ── Route to the right conversation module ──

@@ -38,6 +38,7 @@ function chunk(
 const INTENT_TO_CATEGORIES: Record<SubIntent, string[]> = {
   price_inquiry: ['pricing', 'materials'],
   quotation: ['pricing', 'installation'],
+  estimate_request: ['pricing', 'design'],
   complaint: [],
   appointment: ['installation'],
   material_question: ['materials'],

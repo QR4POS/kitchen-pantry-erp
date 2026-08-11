@@ -21,13 +21,14 @@
 
 import { callAgentAI, logAgent } from '@/lib/ai/agent-provider'
 import type { AgentAIProviderConfig } from '@/lib/ai/agent-provider'
+import { BRAND_NAME, BRAND_KITCHEN_SCOPE } from './brand'
 
 // Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
 // only — when unset there is no behavior change and no extra logs.
 const PERF = process.env.WHATSAPP_PERF === '1'
 
 export const NON_KITCHEN_REPLY =
-  'Sorry, mama Kitchen Pantry kitchen designs, quotations, prices, materials saha kitchen related questions walata witharak help karanna puluwan.\n\nKitchen ekak sambandhawa danaganna deyak thiyenawanam ahanna.'
+  `Sorry, mama ${BRAND_NAME} ${BRAND_KITCHEN_SCOPE} walata witharak help karanna puluwan.\n\nKitchen ekak sambandhawa danaganna deyak thiyenawanam ahanna.`
 
 // ── Fast keyword allow-lists ──
 // Latin (English + Singlish) tokens are matched with word
@@ -145,7 +146,7 @@ export function hasKitchenIntent(message: string): boolean {
 }
 
 // ── AI classifier fallback ──
-const CLASSIFIER_SYSTEM_PROMPT = `You are an intent classifier for Kitchen Pantry showroom WhatsApp sales.
+const CLASSIFIER_SYSTEM_PROMPT = `You are an intent classifier for ${BRAND_NAME} showroom WhatsApp sales.
 
 Your job:
 Decide whether the customer message is related to kitchen showroom business.
@@ -258,6 +259,7 @@ export async function isKitchenRelatedMessage(
 export const SUB_INTENTS = [
   'price_inquiry',
   'quotation',
+  'estimate_request',
   'complaint',
   'appointment',
   'material_question',
@@ -298,6 +300,7 @@ function keywordSubIntent(message: string): SubIntentResult | null {
     { intent: 'complaint', regex: /\b(complaint|complain|problem|issue|broken|damaged|wrong|mistake|bad|poor|not good|disappointed|unhappy)\b/ },
     { intent: 'faq', regex: /\b(how (do|does|long|much|many|can)|what (is|are)|where (is|are)|when (will|can|does)|can (i|you|we)|do you|tell me|explain)\b/ },
     { intent: 'material_question', regex: /\b(material|materials|mdf|plywood|acrylic|melamine|hpl|pvc|wood|board|boards|laminat|granite|quartz|marble|corian)\b/ },
+    { intent: 'estimate_request', regex: /\b(final quote|final price|full estimate|estimate the|price the kitchen|how much (for|would)|give (me )?(a )?(quote|price|estimate)|send (the )?(quote|estimate|quotation)|quote (me|for|my)|kitchen quotation)\b|\d+\s*(x|by|×)\s*\d+|\d+(\.\d+)?\s*(ft|feet|foot)(\s*(long|wide|high|tall))?/ },
     { intent: 'price_inquiry', regex: /\b(price|prices|cost|costs|rate|rates|budget|how much|estimate|quotation|quote|pricing)\b/ },
     { intent: 'greeting', regex: /\b(hello|hi|hey|good morning|good afternoon|good evening|good day|greetings|ayubowan|helo|hayi)\b/ },
     { intent: 'human_request', regex: /\b(human|staff|manager|real person|call me|phone call|speak to|talk to)\b/ },
@@ -312,7 +315,7 @@ function keywordSubIntent(message: string): SubIntentResult | null {
   return null
 }
 
-const SUB_INTENT_CLASSIFIER_PROMPT = `You are a customer intent classifier for a Sri Lankan kitchen showroom.
+const SUB_INTENT_CLASSIFIER_PROMPT = `You are a customer intent classifier for a Sri Lankan kitchen showroom (${BRAND_NAME}).
 Classify the WhatsApp message into exactly ONE intent.
 
 Return ONLY a JSON object with no markdown:
@@ -321,6 +324,7 @@ Return ONLY a JSON object with no markdown:
 INTENT TYPES:
 - price_inquiry      Asking about cost, rates, budget, pricing
 - quotation          Requesting a formal quotation
+- estimate_request   Providing room photos/dimensions, or explicitly asking for a final quote/estimate of a kitchen
 - complaint          Unhappy, reporting a problem or issue
 - appointment        Wanting a visit, meeting, or to see the showroom
 - material_question  Asking about materials, MDF, plywood, acrylic etc.

@@ -40,7 +40,7 @@ We have successfully received all the information required for your kitchen proj
 
 Our team will review your requirements and contact you soon with the best design and quotation.
 
-Meanwhile, if you have any questions about kitchen designs, materials, pricing, accessories, warranties, installation, quotations, maintenance or anything related to Kitchen Pantry, feel free to ask me anytime.`
+Meanwhile, if you have any questions about kitchen designs, materials, pricing, accessories, warranties, installation, quotations, maintenance or anything related to LUXUS ELEMENTE, feel free to ask me anytime.`
 
 export type ConversationMode = 'onboarding' | 'support'
 

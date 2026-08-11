@@ -1,7 +1,7 @@
 // ============================================================
 // ONBOARDING MODE
 // Collects the 8 required customer details while behaving like a
-// real Kitchen Pantry consultant: it answers kitchen questions
+// real LUXUS ELEMENTE consultant: it answers kitchen questions
 // naturally (via the conversation controller) and then resumes
 // collecting the missing fields. When every field is collected it
 // returns complete=true so the engine runs completion.ts.
@@ -44,7 +44,7 @@ const admin = () => createAdminClient()
 // ── Emergency fallback prompts (legacy form flow) ──
 function buildSystemPrompt(collected: Record<string, unknown>): string {
   const missing = REQUIRED_FIELDS.filter((f) => !collected[f])
-  return `You are the Kitchen Pantry Sales Assistant — a polite, professional kitchen showroom sales representative talking to a customer over WhatsApp.
+  return `You are the LUXUS ELEMENTE Sales Assistant — a polite, professional kitchen showroom sales representative talking to a customer over WhatsApp.
 
 Your ONLY job right now is to collect these customer details (do NOT answer unrelated questions, do NOT discuss internal pricing, contractor costs, or company profit):
 1. name (full name)
@@ -156,7 +156,9 @@ async function buildControllerContext(params: {
   const subIntent = await classifySubIntent(params.incomingText, {
     primary: params.settings.primary_provider,
     fallback: params.settings.fallback_provider,
-    hasActiveConversation: true,
+    // A genuinely new contact is NOT mid-conversation, so its greeting stays
+    // classified as 'greeting' rather than being mislabelled as a 'follow_up'.
+    hasActiveConversation: !params.isNewConversation,
     isReturning: params.isReturning,
   })
 
@@ -557,14 +559,24 @@ async function runLegacyFallbackTurn(input: {
 
   // 3. Ask the next question
   if (settings.auto_reply_enabled && missing.length > 0) {
-    const next = await callAgentAI(
-      [
-        { role: 'system', content: buildSystemPrompt(collected) },
-        { role: 'user', content: incomingText },
-      ],
-      { primary: settings.primary_provider, fallback: settings.fallback_provider }
-    )
-    const reply = next.content
+    let reply = ''
+    try {
+      const next = await callAgentAI(
+        [
+          { role: 'system', content: buildSystemPrompt(collected) },
+          { role: 'user', content: incomingText },
+        ],
+        { primary: settings.primary_provider, fallback: settings.fallback_provider }
+      )
+      reply = (next.content || '').trim()
+    } catch (e) {
+      await logAgent('fallback_ai_error', null, 'error', { phone }, (e as Error).message)
+    }
+    // Provider outage or empty output must never crash the turn or queue a
+    // blank message — send a graceful retry prompt instead.
+    if (!reply) {
+      reply = 'Sorry, I am having trouble connecting to my assistant right now. Please try again in a moment.'
+    }
     const nextField = missing[0]
     await queueOutgoingMessage(phone, reply, true, {
       conversationId: conversation.id,

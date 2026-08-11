@@ -124,7 +124,7 @@ cp .env.example .env.local
 | `NEXT_PUBLIC_SUPABASE_URL`   | yes      | Supabase project URL.                             |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes   | Supabase anon (public) key.                       |
 | `SUPABASE_SERVICE_ROLE_KEY`  | yes      | Service-role key (server-side admin client).      |
-| `GEMINI_API_KEY`             | for AI   | Primary AI provider.                              |
+| `GEMINI_API_KEY`             | for AI   | Primary AI provider + WhatsApp voice-note transcription (`/api/whatsapp/transcribe`). |
 | `DEEPSEEK_API_KEY`           | for AI   | Fallback AI provider.                             |
 | `AI_PRIMARY_PROVIDER`        | no       | `gemini` (default).                               |
 | `AI_FALLBACK_PROVIDER`       | no       | `deepseek` (default).                             |

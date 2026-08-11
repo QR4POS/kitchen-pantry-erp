@@ -15,10 +15,11 @@ import { logAgent } from '@/lib/ai/agent-provider'
 export async function handleIncomingMessage(
   phone: string,
   message: string,
-  meta?: { providerMessageId?: string | null }
+  meta?: { providerMessageId?: string | null; mediaUrl?: string | null }
 ): Promise<{
   processed: boolean
   reason?: string
+  skipReason?: 'agent_disabled' | 'duplicate' | 'matches_outgoing' | 'already_replied'
   action?: 'reply' | 'wait' | 'handoff' | 'close'
   state?: string
   replyQueued?: boolean
@@ -34,9 +35,10 @@ export async function handleIncomingMessage(
       await logAgent('ingest_outgoing_rejected', null, 'info', {
         phone: normalized,
         providerMessageId: meta.providerMessageId,
+        skipReason: 'matches_outgoing',
       })
       console.log(`[worker] ignored outgoing message reason=provider_id_match id=${meta.providerMessageId}`)
-      return { processed: false, reason: 'matches_outgoing' }
+      return { processed: false, reason: 'matches_outgoing', skipReason: 'matches_outgoing' }
     }
   }
 
@@ -47,10 +49,11 @@ export async function handleIncomingMessage(
     await logAgent('ingest_outgoing_rejected', null, 'info', {
       phone: normalized,
       reason: 'text_match',
-      matchedId: (matchedOutgoing as any).id,
+      matchedId: (matchedOutgoing as { id: string }).id,
+      skipReason: 'matches_outgoing',
     })
     console.log(`[worker] ignored outgoing message reason=text_match text="${message.slice(0,80)}"`)
-    return { processed: false, reason: 'matches_outgoing' }
+    return { processed: false, reason: 'matches_outgoing', skipReason: 'matches_outgoing' }
   }
 
   // ── Persist raw incoming message ──
@@ -59,16 +62,16 @@ export async function handleIncomingMessage(
   } catch (e) {
     const err = e as { code?: string; message: string }
     if (err.code === '23505') {
-      await logAgent('message_duplicate', null, 'info', { phone: normalized })
-      return { processed: false, reason: 'duplicate' }
+      await logAgent('message_duplicate', null, 'info', { phone: normalized, skipReason: 'duplicate' })
+      return { processed: false, reason: 'duplicate', skipReason: 'duplicate' }
     }
     await logAgent('persist_incoming', null, 'error', { phone: normalized }, err.message)
   }
 
   const settings = await getAgentSettings()
   if (!settings?.whatsapp_agent_enabled) {
-    await logAgent('message_ignored', null, 'info', { phone: normalized, reason: 'agent_disabled' })
-    return { processed: false, reason: 'agent_disabled' }
+    await logAgent('message_ignored', null, 'info', { phone: normalized, reason: 'agent_disabled', skipReason: 'agent_disabled' })
+    return { processed: false, reason: 'agent_disabled', skipReason: 'agent_disabled' }
   }
 
   // ── PART 2: One customer message = one AI reply ──
@@ -78,17 +81,18 @@ export async function handleIncomingMessage(
       await logAgent('duplicate_reply_blocked', null, 'info', {
         phone: normalized,
         incomingId: meta.providerMessageId,
-        existingReply: (existingReply as any).id,
+        existingReply: (existingReply as { id: string }).id,
+        skipReason: 'already_replied',
       })
-      console.log(`[engine] duplicate reply blocked incoming_id=${meta.providerMessageId} existing_reply=${(existingReply as any).id}`)
-      return { processed: false, reason: 'already_replied' }
+      console.log(`[engine] duplicate reply blocked incoming_id=${meta.providerMessageId} existing_reply=${(existingReply as { id: string }).id}`)
+      return { processed: false, reason: 'already_replied', skipReason: 'already_replied' }
     }
   }
 
   const result = await processWhatsAppMessage(
     normalized,
     message,
-    meta?.providerMessageId
+    { providerMessageId: meta?.providerMessageId ?? null, mediaUrl: meta?.mediaUrl ?? null }
   )
   return { processed: true, ...result }
 }

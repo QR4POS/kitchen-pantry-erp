@@ -6,7 +6,7 @@ import { handleIncomingMessage } from '@/lib/ai/whatsapp-agent/process-incoming'
 // only — when unset there is no behavior change and no extra logs.
 const PERF = process.env.WHATSAPP_PERF === '1'
 
-export const maxDuration = 60
+export const maxDuration = 120
 
 // Worker → ERP: report an incoming WhatsApp message
 export async function POST(request: Request) {
@@ -18,18 +18,19 @@ export async function POST(request: Request) {
     const body = await request.json()
     const phone = body?.phone_number
     const message = body?.message
+    const mediaUrl = body?.media_url ?? null
 
     if (!phone || !message) {
       return NextResponse.json({ error: 'phone_number and message are required' }, { status: 400 })
     }
 
-    console.log(`[INGEST] provider_message_id=${body?.provider_message_id ?? 'none'} phone=${phone} message="${String(message).slice(0, 80)}"`)
+    console.log(`[INGEST] provider_message_id=${body?.provider_message_id ?? 'none'} phone=${phone} message="${String(message).slice(0, 80)}"${mediaUrl ? ` media_url=${mediaUrl}` : ''}`)
 
     // Awaited — the worker's per-chat lock stays alive until processing completes
     const result = await handleIncomingMessage(
       String(phone),
       String(message),
-      { providerMessageId: body?.provider_message_id ?? null }
+      { providerMessageId: body?.provider_message_id ?? null, mediaUrl: mediaUrl ? String(mediaUrl) : null }
     )
 
     if (PERF) console.log(`[PERF] ingest_total_ms=${Date.now() - tStart} phone=${phone}`)

@@ -196,7 +196,9 @@ export async function findOutgoingBySourceInbound(sourceInboundId: string) {
 // even when the DOM-extracted provider_id differs from the DB-stored one.
 export async function findOutgoingByText(phone: string, text: string) {
   const norm = text.replace(/\s+/g, ' ').trim().toLowerCase()
-  if (!norm) return null
+  // Short fragments (e.g. "hi", "ok", "hello") are far too ambiguous to be bot
+  // echoes — a customer's short greeting must never be rejected as outbound.
+  if (!norm || norm.length < 4) return null
   const { data } = await admin()
     .from('whatsapp_messages')
     .select('id,message,created_at')
@@ -210,7 +212,9 @@ export async function findOutgoingByText(phone: string, text: string) {
     const rowNorm = String(row.message || '').replace(/\s+/g, ' ').trim().toLowerCase()
     if (rowNorm === norm) return row
     const lenRatio = Math.min(rowNorm.length, norm.length) / Math.max(rowNorm.length, norm.length)
-    if (lenRatio < 0.5) continue
+    // High-confidence prefix overlap only — a short greeting must never be
+    // swallowed by a longer bot message (e.g. "hello" vs "hello there").
+    if (lenRatio < 0.85) continue
     if (rowNorm.startsWith(norm) || norm.startsWith(rowNorm)) return row
   }
   return null
@@ -237,8 +241,14 @@ export async function queueOutgoingMessage(
     sourceInboundMessageId?: string | null
     decisionAction?: 'reply' | 'wait' | 'handoff' | 'close' | null
     postSendState?: string | null
+    messageType?: 'text' | 'image'
+    mediaUrl?: string | null
   }
 ): Promise<WhatsappMessageRow | null> {
+  const dedupKey = options?.sourceInboundMessageId && options?.conversationId
+    ? `outgoing-turn:${options.conversationId}:${options.sourceInboundMessageId}`
+    : outgoingDedupKey(phone, message)
+
   const { data, error } = await admin()
     .from('whatsapp_messages')
     .insert({
@@ -247,10 +257,10 @@ export async function queueOutgoingMessage(
       message,
       status: 'pending',
       ai_generated: aiGenerated,
+      message_type: options?.messageType ?? 'text',
+      media_url: options?.mediaUrl ?? null,
       provider_message_id: `out:${createHash('sha256').update(`${phone}\u0000${message}`).digest('hex').slice(0, 12)}`,
-      dedup_key: options?.sourceInboundMessageId && options?.conversationId
-        ? `outgoing-turn:${options.conversationId}:${options.sourceInboundMessageId}`
-        : outgoingDedupKey(phone, message),
+      dedup_key: dedupKey,
       conversation_id: options?.conversationId ?? null,
       source_inbound_message_id: options?.sourceInboundMessageId ?? null,
       decision_action: options?.decisionAction ?? null,
@@ -260,8 +270,19 @@ export async function queueOutgoingMessage(
     .single()
   if (error) {
     if (error.code === '23505') {
-      await logAgent('queue_outgoing_duplicate', null, 'info', { phone })
-      return null
+      await logAgent('queue_outgoing_duplicate', null, 'info', {
+        phone,
+        conversationId: options?.conversationId ?? null,
+        sourceInboundMessageId: options?.sourceInboundMessageId ?? null,
+        dedupKey,
+      })
+      const { data: existing } = await admin()
+        .from('whatsapp_messages')
+        .select('*')
+        .eq('dedup_key', dedupKey)
+        .limit(1)
+        .maybeSingle()
+      return (existing as WhatsappMessageRow | null) ?? null
     }
     await logAgent('queue_outgoing', null, 'error', { phone }, error.message)
     return null

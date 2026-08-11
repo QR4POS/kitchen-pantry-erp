@@ -6,6 +6,7 @@
 // ============================================================
 
 import { createAdminClient } from '@/lib/supabase/admin'
+import { GoogleGenAI, Modality } from '@google/genai'
 
 // Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
 // only — when unset there is no behavior change and no extra logs.
@@ -190,5 +191,134 @@ export async function logAgent(
   } catch {
     // Logging must never break the agent flow
     console.error('[ai-agent] failed to write log:', action)
+  }
+}
+
+// ── Lazy GoogleGenAI client (SDK) ──
+// Constructed only on first use so a missing GEMINI_API_KEY can never break
+// module load for text-only flows.
+let genaiClient: GoogleGenAI | null = null
+function getGenaiClient(): GoogleGenAI {
+  genaiClient ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY ?? '' })
+  return genaiClient
+}
+
+export interface VisionImageInput {
+  base64: string
+  mimeType: string
+}
+
+export interface AgentVisionResponse {
+  content: string
+  provider: string
+  model: string
+}
+
+interface GeminiInlinePart { text?: string; inlineData?: { data?: string; mimeType?: string } }
+
+function visionModel(): string {
+  return String(process.env.AI_VISION_MODEL || 'gemini-2.5-flash').replace(/^models\//, '')
+}
+
+function imageModel(): string {
+  return String(process.env.AI_IMAGE_MODEL || 'gemini-2.5-flash-image').replace(/^models\//, '')
+}
+
+// ── Gemini Vision (image + text → text) ──
+// Uses the SDK with an inlineData image part. Returns empty content on failure
+// so callers can fall back to the text-only path.
+export async function callVisionAI(
+  text: string,
+  image: VisionImageInput
+): Promise<AgentVisionResponse> {
+  const model = visionModel()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 45000)
+  const tStart = Date.now()
+
+  try {
+    const response = await getGenaiClient().models.generateContent({
+      model,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text },
+            { inlineData: { mimeType: image.mimeType, data: image.base64 } },
+          ],
+        },
+      ],
+      config: { abortSignal: controller.signal, maxOutputTokens: 4096 },
+    })
+    const content = response?.text ?? ''
+    if (content) {
+      await logAgent('ai_vision', 'gemini', 'success', { model })
+      return { content, provider: 'gemini', model }
+    }
+    throw new Error('Gemini vision returned empty content')
+  } catch (e) {
+    const msg = (e as Error).message
+    await logAgent('ai_vision', 'gemini', 'error', { model }, msg)
+    return { content: '', provider: 'gemini', model }
+  } finally {
+    clearTimeout(timer)
+    perf('ai_vision', tStart, `model=${model}`)
+  }
+}
+
+export interface GeneratedImage {
+  base64: string
+  mimeType: string
+}
+
+// ── Gemini image generation / edit (text + reference image → image) ──
+// Edits a reference photo (inlineData) via a native-image model. Extracts the
+// first image part from the candidate. Returns null on failure/filter.
+export async function generateEditedImage(
+  prompt: string,
+  referenceImage: VisionImageInput
+): Promise<GeneratedImage | null> {
+  const model = imageModel()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 60000)
+  const tStart = Date.now()
+
+  try {
+    const response = await getGenaiClient().models.generateContent({
+      model,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType: referenceImage.mimeType, data: referenceImage.base64 } },
+          ],
+        },
+      ],
+      config: {
+        abortSignal: controller.signal,
+        responseModalities: [Modality.IMAGE],
+      },
+    })
+
+    const parts: GeminiInlinePart[] =
+      response?.candidates?.[0]?.content?.parts ?? []
+    const imagePart = parts.find((p) => p.inlineData?.data)
+    if (!imagePart?.inlineData?.data) {
+      throw new Error('image model returned no image part')
+    }
+
+    await logAgent('ai_image_edit', 'gemini', 'success', { model })
+    return {
+      base64: imagePart.inlineData.data,
+      mimeType: imagePart.inlineData.mimeType || 'image/png',
+    }
+  } catch (e) {
+    const msg = (e as Error).message
+    await logAgent('ai_image_edit', 'gemini', 'error', { model }, msg)
+    return null
+  } finally {
+    clearTimeout(timer)
+    perf('ai_image_edit', tStart, `model=${model}`)
   }
 }
