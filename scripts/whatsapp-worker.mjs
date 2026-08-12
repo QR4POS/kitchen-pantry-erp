@@ -96,7 +96,10 @@ const OPEN_CHAT_TIMEOUT_MS = parseInt(process.env.WHATSAPP_OPEN_CHAT_MS || '2000
 // 40-bubble cap). A timeout here means the page main thread is busy — the
 // worker detects it and reloads, so keep this short enough that a stuck page is
 // recovered quickly rather than burning the whole read budget.
-const EXTRACT_EVALUATE_TIMEOUT_MS = parseInt(process.env.WHATSAPP_EXTRACT_EVALUATE_MS || '10000', 10)
+// Strict short execution budget for the message-bubble extraction evaluate.
+// The extraction must never block the worker for tens of seconds — a slow or
+// stuck WhatsApp render returns/aborts within this window.
+const EXTRACT_EVALUATE_TIMEOUT_MS = parseInt(process.env.WHATSAPP_EXTRACT_EVALUATE_MS || '5000', 10)
 
 // After this many CONSECUTIVE watchdog timeouts the worker auto-refreshes the
 // WhatsApp Web page instead of letting the reconnect logic tear the browser
@@ -1932,13 +1935,14 @@ async function extractIncomingBubblesInPage(page) {
       const out = []
       const seen = new Set()
 
-      // Dynamic bubble discovery. WhatsApp swaps its message markup between
-      // builds (class names, testids, data-id suffixes), so no single selector
-      // is ever trusted. Strategies are tried in priority order and the first
-      // one that yields candidates wins. Every candidate is collapsed to its
-      // nearest [data-id] ancestor and deduped by that identity, so nested
-      // meta/sender elements (msg-meta, msg-sender, …) never become separate —
-      // or worse, the boundary — messages.
+      // Lightweight bubble discovery. WhatsApp renders each message with a
+      // data-id, data-pre-plain-text (timestamp + sender) and the text inside
+      // span.selectable-text / span.copyable-text. Cheap, precise selectors are
+      // tried in priority order. Broad substring attribute scans
+      // ([data-testid*="msg-"], [data-testid*="message"]) and unscoped
+      // [role="row"] scans are intentionally NOT used: they force the browser to
+      // walk every node (and every attribute) in a potentially huge virtualized
+      // panel, which is what made extraction heavy and slow.
       const collectBubbleCandidates = () => {
         const candidates = new Map()
         const push = (n, key) => { if (key && !candidates.has(key)) candidates.set(key, n) }
@@ -1960,16 +1964,20 @@ async function extractIncomingBubblesInPage(page) {
           }
         }
 
-        // Strategy 1 — precise container testids + legacy message classes.
+        // 1) data-pre-plain-text rows — the stable WhatsApp message marker
+        //    (attribute-presence scan, cheap).
+        let direct = []
+        try { direct = root.querySelectorAll('div[data-pre-plain-text]') } catch { direct = [] }
+        collect(direct)
+        if (candidates.size > 0) return [...candidates.values()]
+
+        // 2) Exact message testids.
         for (const sel of [
           '[data-testid="message-in"]',
           '[data-testid="message-out"]',
           '[data-testid="msg-container"]',
           '[data-testid="msg-in"]',
           '[data-testid="msg-out"]',
-          '[data-testid*="message"]',
-          '[data-testid*="msg-"]',
-          '.message-in, .message-out, .tail-in, .tail-out',
         ]) {
           let els = []
           try { els = root.querySelectorAll(sel) } catch { continue }
@@ -1977,30 +1985,13 @@ async function extractIncomingBubblesInPage(page) {
         }
         if (candidates.size > 0) return [...candidates.values()]
 
-        // Strategy 2 — direct message markers by data-pre-plain-text or data-id.
-        let direct = []
-        try { direct = root.querySelectorAll('[data-pre-plain-text], div[data-id]') } catch { direct = [] }
-        for (const n of direct) {
-          const key = n.getAttribute('data-id') || n.getAttribute('data-pre-plain-text') || ''
-          if (key) push(n, `direct:${key}`)
-        }
+        // 3) data-id rows (some builds omit data-pre-plain-text).
+        let ids = []
+        try { ids = root.querySelectorAll('div[data-id]') } catch { ids = [] }
+        collect(ids)
         if (candidates.size > 0) return [...candidates.values()]
 
-        // Strategy 3 — generic role/panel-scoped rows when the build uses an
-        // explicit message row structure rather than distinct data-id markers.
-        for (const sel of [
-          '[data-testid="conversation-panel-messages"] [role="row"]',
-          '[data-testid="conversation-panel-body"] [role="row"]',
-          '[role="row"]',
-          '[role="listitem"]',
-        ]) {
-          let els = []
-          try { els = root.querySelectorAll(sel) } catch { continue }
-          collect(els)
-        }
-        if (candidates.size > 0) return [...candidates.values()]
-
-        // Strategy 4 — walk-up from any selectable/copyable text span.
+        // 4) Walk up from any selectable/copyable text span.
         let spans = []
         try { spans = root.querySelectorAll('span.selectable-text, span.copyable-text, span[selectable="true"]') } catch { spans = [] }
         for (const s of spans) {
@@ -2103,9 +2094,9 @@ async function extractIncomingBubblesInPage(page) {
       if (nodes.length > 40) nodes = nodes.slice(nodes.length - 40)
 
       // Hard internal deadline: even on a healthy page, never spend more than
-      // ~6s of evaluate time scanning. Guarantees the read returns quickly and
-      // the outer watchdog can never sit idle waiting on a slow DOM.
-      const scanDeadline = Date.now() + 6000
+      // ~3s of evaluate time scanning. Guarantees the read returns quickly and
+      // the outer budget can never sit idle waiting on a slow DOM.
+      const scanDeadline = Date.now() + 3000
       for (const n of nodes) {
         if (Date.now() > scanDeadline) {
           if (DEBUG) console.log('[worker] bubble scan hit internal deadline — returning partial results')
@@ -2522,20 +2513,30 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
   let rows = []
   console.log('[INCOMING_SCAN_START]')
   try {
-    // Wait briefly for the message panel (#main) to render before reading —
-    // a freshly-opened chat streams its bubbles asynchronously.
-    await page.waitForSelector('#main, div[id="main"], [data-testid="conversation-panel-wrapper"], [data-testid="conversation-panel-messages"], [data-testid="conversation-panel-body"], [data-testid="conversation-panel-chat"], [data-testid="chat-panel"], [data-testid="conversation-panel"], [aria-label*="Conversation"], [aria-label*="Message list"], div[role="region"], div[data-id], [data-pre-plain-text], span.copyable-text', { timeout: 8000 }).catch(() => {})
+    // SHORT bounded render wait: the conversation may be verified open while the
+    // (virtualized) message list is still rendering. Wait only for MESSAGE
+    // content — never for #main (which exists as soon as the panel opens) — and
+    // cap it at 3s so a slow render returns quickly instead of blocking the read.
+    await page.waitForSelector(
+      '[data-pre-plain-text], span.selectable-text, span.copyable-text, [data-testid="message-in"], [data-testid="message-out"], [data-testid="msg-container"], [data-testid="msg-in"], [data-testid="msg-out"]',
+      { timeout: 3000 }
+    ).catch(() => {})
+    console.log('[INCOMING_DOM_READY]')
 
-    // Single-round-trip bubble reader (runs inside the page in one evaluate).
-    // A null result means the evaluate timed out — the page main thread is busy
-    // — so do NOT retry (it would hang the same way). The caller reloads.
-    let firstResult = null
+    // Single lightweight, budgeted extract (runs inside the page in one
+    // evaluate, bounded by EXTRACT_EVALUATE_TIMEOUT_MS). A null result means the
+    // page genuinely did not respond in budget — do NOT retry it (it would hang
+    // the same way); the caller's pageBusy recovery path handles that.
+    const tEval = Date.now()
+    console.log('[INCOMING_EVALUATE_START]')
     rows = await extractIncomingBubblesInPage(page)
-    firstResult = rows
+    console.log(`[INCOMING_EVALUATE_DONE] ms=${Date.now() - tEval}`)
     if (rows === null) {
       console.warn('[worker] message-bubble evaluate failed (page busy/timed out) — fast-returning for recovery')
       rows = []
     } else if (rows.length === 0) {
+      // Short bounded retry: give the freshly-rendered list one quick second
+      // attempt before declaring no message.
       await sleep(800)
       rows = await extractIncomingBubblesInPage(page)
       if (rows === null) rows = []
@@ -2549,9 +2550,6 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
       if (DEBUG) await dumpBubbleHtml(page, 3)
     } else if (DEBUG && rows.length > 0) {
       console.log(`[worker] bubbles in #main: ${rows.length}`)
-    }
-    if (DEBUG && firstResult !== null && firstResult !== rows && !pageBusy) {
-      console.log(`[worker] bubble retry: ${firstResult ? firstResult.length : 'null'} → ${rows.length}`)
     }
 
     // DEBUG: print what the extractor actually saw (id / testid / pre / dir) so
