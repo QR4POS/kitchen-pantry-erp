@@ -1528,7 +1528,7 @@ async function dumpDomForDiagnostics(page) {
   const parts = ['=== DOM PROBE ' + new Date().toISOString() + ' ===']
 
   try {
-    const snapshot = await page.evaluate(() => {
+    const snapshot = await page.evaluate((bubbleRootSelector) => {
       const safeText = (el) => {
         if (!el) return ''
         return String(el.textContent || '').replace(/\s+/g, ' ').trim()
@@ -1550,7 +1550,7 @@ async function dumpDomForDiagnostics(page) {
       const unreadMarker = document.querySelector('[data-testid="icon-unread-count"], [data-icon*="unread"], [aria-label*="unread"], [data-testid*="unread"], [aria-label*="Unread"], [data-testid*="unread-count"]')
       const unreadRow = unreadMarker ? unreadMarker.closest('div[role="row"], div[role="button"], div') : null
       const titleElement = document.querySelector('[data-testid="conversation-info-header-chat-title"], [data-testid="conversation-info-header"], [data-testid="conversation-title"], header [title], header span[dir="auto"], header span[dir="ltr"], header h1')
-      const root = document.querySelector(BUBBLE_ROOT_SELECTOR) || document.body
+      const root = document.querySelector(bubbleRootSelector) || document.body
       const bubbleCandidates = []
       const seen = new Set()
       if (root) {
@@ -1594,7 +1594,7 @@ async function dumpDomForDiagnostics(page) {
         bubbleRootSelector: root ? root.tagName + (root.id ? `#${root.id}` : '') : 'none',
         bubbleCandidates,
       }
-    })
+    }, BUBBLE_ROOT_SELECTOR)
 
     parts.push(`URL:\n${snapshot.url}`)
     parts.push(`document.title:\n${snapshot.title}`)
@@ -1914,9 +1914,20 @@ async function detectMediaType(el) {
 // hundreds of Playwright protocol round-trips that each wait behind a busy page
 // and blow past the watchdog.
 async function extractIncomingBubblesInPage(page) {
+  // page.evaluate() ignores a trailing { timeout } options argument, so on a
+  // busy WhatsApp page the evaluate can hang indefinitely (Playwright library
+  // mode has no default timeout). Race it against a timer so a slow render can
+  // never stall the inbound read for the whole 60s watchdog.
+  let timer
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      pageBusy = true
+      resolve(null)
+    }, EXTRACT_EVALUATE_TIMEOUT_MS)
+  })
   try {
-    return await page.evaluate(() => {
-      const root = document.querySelector(BUBBLE_ROOT_SELECTOR) || document.body
+    const extract = page.evaluate((bubbleRootSelector) => {
+      const root = document.querySelector(bubbleRootSelector) || document.body
       if (!root) return []
       const out = []
       const seen = new Set()
@@ -2126,11 +2137,14 @@ async function extractIncomingBubblesInPage(page) {
         out.push({ text, id, pre, dir, isSystem, hasMedia, hasAudio, audioSrc, audioMime })
       }
       return out
-    }, BUBBLE_ROOT_SELECTOR, { timeout: EXTRACT_EVALUATE_TIMEOUT_MS })
+    }, BUBBLE_ROOT_SELECTOR)
       .then((r) => { pageBusy = false; return r })
       .catch(() => { pageBusy = true; return null })
+    return await Promise.race([extract, deadline])
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -2251,8 +2265,14 @@ async function rowToIncomingMessage(page, row, dirCtx, phoneKey) {
 // as <audio> elements whose src is a page-scoped blob: URL, readable ONLY inside
 // the page context (Node cannot fetch a blob URL).
 async function fetchBlobBase64(page, url) {
+  let timer
   try {
-    return await page.evaluate(async (u) => {
+    // Bound the evaluate — page.evaluate() ignores a { timeout } options arg, so
+    // a stalled blob fetch must be raced against a timer instead.
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), 8000)
+    })
+    const extract = page.evaluate(async (u) => {
       const res = await fetch(u)
       if (!res.ok) throw new Error(`audio fetch ${res.status}`)
       const buf = await res.arrayBuffer()
@@ -2262,9 +2282,12 @@ async function fetchBlobBase64(page, url) {
         binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
       }
       return btoa(binary)
-    }, url, { timeout: 8000 }).catch(() => null)
+    }, url).catch(() => null)
+    return await Promise.race([extract, deadline])
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -2497,6 +2520,7 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
   }
   const collected = [] // newest-first
   let rows = []
+  console.log('[INCOMING_SCAN_START]')
   try {
     // Wait briefly for the message panel (#main) to render before reading —
     // a freshly-opened chat streams its bubbles asynchronously.
@@ -2516,6 +2540,7 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
       rows = await extractIncomingBubblesInPage(page)
       if (rows === null) rows = []
     }
+    console.log(`[INCOMING_BUBBLE_CANDIDATES] count=${rows.length}`)
 
     if (rows.length === 0 && !pageBusy) {
       console.log('[worker] no message bubbles found in #main')
@@ -2549,6 +2574,7 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
         console.log(`[direction] dir=${row.dir || 'null'} text="${(row.text || '').slice(0, 80)}" → ingested`)
       }
       if (isAlreadyProcessedBoundary(msg, storedLastId, storedLastText)) return collected
+      if (collected.length === 0) console.log('[INCOMING_BUBBLE_FOUND]')
       collected.push(msg)
     }
 
