@@ -206,7 +206,7 @@ describe('per-chat own-reply isolation — A -> B -> A', () => {
 })
 
 describe('isIngestHandled — dedup boundary advances only on handled messages', () => {
-  it('advances on a processed turn', () => {
+  it('advances on a processed turn that queued a reply', () => {
     expect(fn.isIngestHandled({ processed: true, action: 'reply', replyQueued: true })).toBe(true)
   })
 
@@ -214,6 +214,17 @@ describe('isIngestHandled — dedup boundary advances only on handled messages',
     expect(fn.isIngestHandled({ processed: false, skipReason: 'already_replied' })).toBe(true)
     expect(fn.isIngestHandled({ processed: false, skipReason: 'matches_outgoing' })).toBe(true)
     expect(fn.isIngestHandled({ processed: false, skipReason: 'duplicate' })).toBe(true)
+  })
+
+  it('advances on a terminal handoff/close even without a queued reply (staff takes over)', () => {
+    expect(fn.isIngestHandled({ processed: true, action: 'handoff', replyQueued: false })).toBe(true)
+    expect(fn.isIngestHandled({ processed: true, action: 'close', replyQueued: false })).toBe(true)
+  })
+
+  it('does NOT advance when the turn returned wait with NO reply (customer was not answered)', () => {
+    expect(fn.isIngestHandled({ processed: true, action: 'wait', replyQueued: false })).toBe(false)
+    // A reply action that failed to queue is also not handled.
+    expect(fn.isIngestHandled({ processed: true, action: 'reply', replyQueued: false })).toBe(false)
   })
 
   it('does NOT advance on agent_disabled or unexpected responses', () => {

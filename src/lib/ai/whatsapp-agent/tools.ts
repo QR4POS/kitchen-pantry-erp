@@ -178,13 +178,17 @@ export async function findOutgoingByProviderId(phone: string, providerId: string
 }
 
 // Check if an outgoing reply already exists for this inbound message.
-// One customer turn must never produce more than one AI reply.
+// One customer turn must never produce more than one AI reply. Only replies that
+// are actually delivered or still in-flight count as "already replied": a reply
+// that FAILED to send (the customer never received it) must NOT suppress a new
+// message, otherwise a genuinely-unanswered customer is permanently blocked.
 export async function findOutgoingBySourceInbound(sourceInboundId: string) {
   const { data } = await admin()
     .from('whatsapp_messages')
-    .select('id,message,created_at')
+    .select('id,message,created_at,status')
     .eq('source_inbound_message_id', sourceInboundId)
     .eq('direction', 'outgoing')
+    .in('status', ['pending', 'processing', 'sent'])
     .order('created_at', { ascending: true })
     .limit(1)
     .maybeSingle()

@@ -359,13 +359,23 @@ function metaHasRecentSent(meta, text, phone) {
 }
 
 // True when an ingest response means the message was actually handled, so the
-// per-chat dedup boundary may advance. A processed turn, or a legitimately
-// terminal skip (already replied / matches outgoing / duplicate), advances the
-// boundary. Everything else (agent disabled, unexpected response) must NOT
-// advance it — the message is retried on a later poll instead of being silently
-// marked processed with no reply.
+// per-chat dedup boundary may advance. A processed turn that produced a reply
+// (replyQueued, or a reply/handoff/close action) advances the boundary, as do
+// legitimately-terminal skips (already replied / matches outgoing / duplicate).
+// A processed turn that returned bare `action=wait` with NO reply is NOT handled
+// — the customer was not answered, so the boundary must NOT advance and the
+// message is retried on a later poll instead of being silently lost.
 function isIngestHandled(res) {
-  if (res && res.processed === true) return true
+  if (res && res.processed === true) {
+    // A queued reply means the customer was answered → handled.
+    if (res.replyQueued === true) return true
+    // A terminal handoff / close is handled even without a queued reply (staff
+    // takes over, or the exchange is intentionally closed). A bare `reply`/`wait`
+    // with NO queued reply means the customer was NOT answered → not handled, so
+    // the message is retried on a later poll instead of being silently lost.
+    if (res.action === 'handoff' || res.action === 'close') return true
+    return false
+  }
   const skip = res && res.skipReason
   return skip === 'already_replied' || skip === 'matches_outgoing' || skip === 'duplicate'
 }
@@ -1869,9 +1879,16 @@ async function resolveChatPhone(page, title, messageDataId) {
   }
   try {
     // WhatsApp URL hash is #p/+94760544773 (leading '+' before digits). Some
-    // builds use #chat/<jid> / #wa/<jid>; try those too.
+    // builds use #chat/<jid> / #wa/<jid>, or embed the number elsewhere in the
+    // URL. Fall back to a standalone 10-14 digit run so saved-contact-name
+    // chats (whose title and data-pre-plain-text show a name, not a number) can
+    // still resolve a numeric phone identity from the open chat's URL.
     const u = page.url()
-    const m = u.match(/#p\/\+?(\d+)/) || u.match(/#chat\/?\+?(\d+)/) || u.match(/#wa\/?\+?(\d+)/)
+    const m = u.match(/#p\/\+?(\d+)/) ||
+      u.match(/#chat\/?\+?(\d+)/) ||
+      u.match(/#wa\/?\+?(\d+)/) ||
+      u.match(/[#/?&](?:phone|tel|id)=(\d{10,14})/) ||
+      u.match(/\/(\d{10,14})(?:[/#@]|$)/)
     if (m) return m[1]
   } catch { /* ignore */ }
   const digits = canonicalPhone(title)
@@ -3360,19 +3377,23 @@ async function detectAndForwardIncoming(page, state) {
         console.log(`[worker] ingest response ok=${res?.ok} processed=${res?.processed}${res?.reason ? ' reason=' + res.reason : ''}${res?.skipReason ? ' skipReason=' + res.skipReason : ''}${res?.replyQueued != null ? ' replyQueued=' + res.replyQueued : ''}${res?.action ? ' action=' + res.action : ''}`)
 
         // Only advance the per-chat dedup boundary when the ingest actually
-        // handled the message (processed, or a legitimately-terminal skip such as
-        // already_replied / matches_outgoing / duplicate). Anything else (e.g.
-        // agent_disabled) leaves the boundary untouched so the message is retried.
+        // handled the message (a reply was queued, or a legitimately-terminal
+        // skip such as already_replied / matches_outgoing / duplicate). A bare
+        // `wait` with no reply leaves the boundary untouched so the message is
+        // retried — bounded by EXTRACT_RETRY_LIMIT so a genuinely terminal wait
+        // does not spam the AI forever.
         const handled = isIngestHandled(res)
         if (!handled) {
-          console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=ingest_not_handled skipReason=${res?.skipReason ?? res?.reason ?? 'unknown'}`)
+          const retries = (stored?.extractRetries ?? 0) + 1
+          const giveUp = retries >= EXTRACT_RETRY_LIMIT
+          console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=ingest_not_handled attempt=${retries} giveUp=${giveUp} skipReason=${res?.skipReason ?? res?.reason ?? 'unknown'}`)
           state.chats[key] = {
             ...(stored || {}),
             title: chat.title,
             phone,
             preview: chat.preview,
-            rowSig: stored?.rowSig || null,
-            extractRetries: 0,
+            rowSig: giveUp ? chat.raw || stored?.rowSig || null : stored?.rowSig || null,
+            extractRetries: giveUp ? 0 : retries,
             conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
             updatedAt: new Date().toISOString(),
           }
