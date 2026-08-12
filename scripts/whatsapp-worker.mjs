@@ -264,6 +264,19 @@ function normalizeMessageText(text) {
   return cleanText(text).replace(/\s+/g, ' ').trim()
 }
 
+// Canonical per-chat phone/identity key. Every WhatsApp display format must map
+// to the SAME key so per-chat state never collides across chats or formats:
+//   "+94 76 054 4773", "94760544773", "+94760544773", "0760544773", "076 054 4773"
+//   → "94760544773"
+// A 10-digit local number starting with "0" is converted to the international
+// form with the +94 country prefix (Sri Lankan market). Non-digit values (e.g.
+// saved-contact names) return '' so callers fall back to their name handling.
+function canonicalPhone(value) {
+  let digits = String(value ?? '').replace(/[^\d]/g, '')
+  if (digits.length === 10 && digits.startsWith('0')) digits = '94' + digits.slice(1)
+  return digits
+}
+
 // Deterministic fallback identity for a message whose data-id the current
 // WhatsApp Web DOM does not expose. MUST be stable across polls — never based
 // on Date.now() — so the persistent dedup boundary keeps working; otherwise the
@@ -299,29 +312,41 @@ function finalizeMessageIdentity(text, rawId, rawTs, phoneKey) {
 }
 
 // Record a message this account just sent so it can never be re-ingested as
-// incoming. Kept capped and time-boxed to bound memory.
-function recordSentMessage(state, text) {
+// incoming. Kept capped and time-boxed to bound memory. The canonical phone of
+// the chat it was sent to is stored alongside, so own-reply detection can be
+// scoped to the SAME chat (an outgoing message to Customer A must never mark
+// Customer B's incoming message as the account's own reply).
+function recordSentMessage(state, text, phone) {
   const meta = ensureMessageStateMeta(state)
   const norm = normalizeMessageText(text)
   if (!norm) return
   const now = Date.now()
   const fresh = (meta.recentSent || []).filter((e) => now - (e.ts || 0) < RECENT_SENT_TTL_MS)
-  fresh.push({ text: norm, ts: now })
+  fresh.push({ text: norm, ts: now, phone: canonicalPhone(phone) || null })
   meta.recentSent = fresh.slice(-RECENT_SENT_MAX)
   saveMessageState(state)
 }
 
 // True when a normalized message text matches something this account sent
-// recently (outgoing evidence). Safe to call with an undefined meta.
-// Checks BOTH directions: norm.startsWith(e.text) catches exact/truncated match
-// where norm is longer; e.text.startsWith(norm) catches the case where the
+// recently to the SAME chat (outgoing evidence). Safe to call with an undefined
+// meta. Checks BOTH directions: norm.startsWith(e.text) catches exact/truncated
+// match where norm is longer; e.text.startsWith(norm) catches the case where the
 // chat-list row preview is a truncated version of the full sent text.
-function metaHasRecentSent(meta, text) {
+//
+// CRITICAL: matching is scoped to the canonical phone of the incoming message.
+// A reply sent to Customer A must NEVER suppress Customer B's incoming message,
+// even when the texts are prefix-equal (e.g. A's welcome "Hello! …" vs B's
+// "Hello"). Entries recorded without a phone (legacy cache) only match when no
+// phone is known for the incoming message.
+function metaHasRecentSent(meta, text, phone) {
   const cleanText = cleanMessageText(text)
   const norm = normalizeMessageText(cleanText).replace(/(?:\.{3}|…)?(?:\s*read\s*more)?$/i, '').trim()
   if (!norm) return false
   const now = Date.now()
+  const chatKey = canonicalPhone(phone)
   return ((meta && meta.recentSent) || []).some((e) => {
+    // Own-reply evidence is per-chat: skip entries belonging to another chat.
+    if (chatKey && e.phone && e.phone !== chatKey) return false
     // e.text is the full original sent text.
     // norm is the extracted (and possibly truncated) text.
     // A perfect match or a substantial prefix match is enough.
@@ -864,14 +889,15 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
 
   // Persistent outgoing evidence: remember exactly what this account sent and
   // learn the account's own sender token from the sent bubble, so future polls
-  // (and polls after a restart) can identify these messages as outgoing.
+  // (and polls after a restart) can identify these messages as outgoing. The
+  // phone is recorded so own-reply detection stays scoped to this chat.
   if (state) {
-    recordSentMessage(state, text)
+    recordSentMessage(state, text, phoneNumber)
     await learnOwnSenderToken(page, state, text)
     // Also persist per-chat lastSentText so detectAndForwardIncoming can guard
     // against re-ingesting the bot's own reply from the chat-list row preview.
-    const digits = (phoneNumber || '').replace(/\D/g, '')
-    const chatKey = digits || (phoneNumber || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+    // Keyed by the canonical phone so it matches chatStateKey().
+    const chatKey = canonicalPhone(phoneNumber) || (phoneNumber || '').toLowerCase().replace(/[^a-z0-9]/g, '')
     if (chatKey && state.chats && state.chats[chatKey]) {
       state.chats[chatKey].lastSentText = normalizeMessageText(text)
       saveMessageState(state)
@@ -1842,9 +1868,11 @@ async function resolveChatPhone(page, title, messageDataId) {
   return title.trim() || 'unknown-chat'
 }
 
-// Stable, never-empty key used for the persistent dedup state.
+// Stable, never-empty key used for the persistent dedup state. Digit-based
+// titles (unsaved numbers) are canonicalized so every display format of the
+// same phone maps to one key; name titles (saved contacts) keep a name key.
 function chatStateKey(title) {
-  const digits = title.replace(/\D/g, '')
+  const digits = canonicalPhone(title)
   if (digits) return digits
   const norm = title.toLowerCase().replace(/[^a-z0-9]/g, '')
   return norm || 'unknown-chat'
@@ -2571,7 +2599,11 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
       if (DEBUG) {
         console.log(`[direction] dir=${row.dir || 'null'} text="${(row.text || '').slice(0, 80)}" → ingested`)
       }
-      if (isAlreadyProcessedBoundary(msg, storedLastId, storedLastText)) return collected
+      if (isAlreadyProcessedBoundary(msg, storedLastId, storedLastText)) {
+        console.log(`[DEDUP_CHECK] chat=${phoneKey} messageId=${msg.id ?? 'none'} duplicate=true reason=already_processed`)
+        return collected
+      }
+      console.log(`[DEDUP_CHECK] chat=${phoneKey} messageId=${msg.id ?? 'none'} duplicate=false`)
       if (collected.length === 0) console.log('[INCOMING_BUBBLE_FOUND]')
       collected.push(msg)
     }
@@ -3055,10 +3087,12 @@ async function detectAndForwardIncoming(page, state) {
       console.log(`[INCOMING_MESSAGE_FOUND] source=${opened ? 'bubbles' : 'row_preview'}`)
 
       // 4. Resolve the phone from the correct source only: the opened chat when
-      //    available, otherwise the chat title digits (row fallback).
+      //    available, otherwise the chat title digits (row fallback). Always
+      //    canonicalize so every chat is keyed by the same phone form.
       if (!phone) {
         phone = opened ? await resolveChatPhone(page, chat.title, last.id || '') : (chat.title || '').replace(/\D/g, '')
       }
+      phone = canonicalPhone(phone) || phone
       console.log(`[worker] resolved chat id: ${phone}`)
 
       // 5. Classification. Self / groups / broadcasts are ignored; ALL confirmed
@@ -3105,6 +3139,10 @@ async function detectAndForwardIncoming(page, state) {
         console.log('[worker] new customer detected')
       }
 
+      // Per-chat state trace (no message content). Confirms each chat keeps its
+      // own dedup boundary — Customer A's boundary must never affect Customer B.
+      console.log(`[CHAT_STATE] chat=${key} phone=${phone} unread=${chat.hasUnread} previousMessageId=${stored?.lastIncomingId ?? 'none'} currentMessageId=${last.id ?? 'none'}`)
+
       // ── GUARD: never re-ingest this account's own outgoing replies ──
       // The chat-list preview changes to the bot's reply after it is sent.
       // The changed rowSig triggers a new deep-read but the DOM often cannot
@@ -3112,9 +3150,11 @@ async function detectAndForwardIncoming(page, state) {
       // learned ownSenderToken). The result is readNewIncomingMessages returns
       // nothing new, the row-fallback fires and extracts the bot's text, which
       // gets a different fallback-id than the customer message → treated as new.
-      // Fix: compare extracted text against recentSent AND lastSentText, handling truncation.
+      // Fix: compare extracted text against recentSent AND lastSentText, handling
+      // truncation. recentSent matching is scoped to THIS chat (phone) so an
+      // outgoing message to another customer can never suppress this message.
       let normMessageToSend = normalizeMessageText(messageToSend).replace(/(?:\.{3}|…)?(?:\s*read\s*more)?$/i, '').trim()
-      let isOwnReply = metaHasRecentSent(state.meta, messageToSend)
+      let isOwnReply = metaHasRecentSent(state.meta, messageToSend, phone)
       if (!isOwnReply && stored?.lastSentText) {
         const isMatch = stored.lastSentText === normMessageToSend ||
                         stored.lastSentText.startsWith(normMessageToSend) ||
@@ -3125,6 +3165,7 @@ async function detectAndForwardIncoming(page, state) {
       }
 
       if (isOwnReply) {
+        console.log(`[INGEST_DECISION] chat=${key} shouldForward=false reason=own_reply`)
         console.log(`[WORKER_SKIP] reason=own_reply text="${messageToSend.slice(0, 80)}"`)
         state.chats[key] = {
           ...(stored || {}),
@@ -3141,6 +3182,7 @@ async function detectAndForwardIncoming(page, state) {
         continue
       }
 
+      console.log(`[INGEST_DECISION] chat=${key} shouldForward=true reason=new_incoming_message`)
       console.log(`[INGEST] provider_message_id=${last.id ?? 'none'} phone=${phone} message="${messageToSend.slice(0, 80)}"`)
 
       // ── Photo media upload ──
