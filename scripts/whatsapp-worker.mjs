@@ -581,12 +581,14 @@ async function openChatByPhone(page, digits) {
 
   // 1. Primary: find a chat title span whose digits match the target number
   //    and click it directly — works for phone-number and contact-name titles.
+  //    The clickable target is the row ancestor, never the bare title span.
   const anchors = page.locator('span[title]')
   const count = await anchors.count().catch(() => 0)
   for (let i = 0; i < count; i++) {
     const title = (await anchors.nth(i).getAttribute('title').catch(() => '')) || ''
     if (title.replace(/\D/g, '').endsWith(digits.slice(-8))) {
-      await anchors.nth(i).click({ timeout: 3000 }).catch(() => {})
+      const clickTarget = await clickableRowOf(anchors.nth(i))
+      await clickTarget.click({ timeout: 3000 }).catch(() => {})
       return title
     }
   }
@@ -609,7 +611,8 @@ async function openChatByPhone(page, digits) {
     for (let i = 0; i < rcount; i++) {
       const t = (await results.nth(i).getAttribute('title').catch(() => '')) || ''
       if (t.replace(/\D/g, '').endsWith(digits.slice(-8))) {
-        await results.nth(i).click({ timeout: 3000 }).catch(() => {})
+        const clickTarget = await clickableRowOf(results.nth(i))
+        await clickTarget.click({ timeout: 3000 }).catch(() => {})
         return t
       }
     }
@@ -1221,7 +1224,17 @@ async function readOpenChatTitle(page, fallbackTitle) {
       const inner = ((await convTitle.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
       if (inner) return inner
     }
-    const titleSpan = page.locator('header span[title], div[role="heading"] span[title]').first()
+    // Current builds (2026+) expose the open-chat title on a dir="auto" span
+    // (or a heading) inside the conversation header. Read the title attribute
+    // first — it is stable and avoids an innerText layout round-trip.
+    const headerTitleAttr = page.locator('[data-testid="conversation-info-header"] span[dir="auto"][title], [data-testid="conversation-info-header"] span[title], div[role="heading"][title], header span[title]').first()
+    if ((await headerTitleAttr.count().catch(() => 0)) > 0) {
+      const t = (await headerTitleAttr.getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
+      if (t) return t
+      const inner = ((await headerTitleAttr.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+      if (inner) return inner
+    }
+    const titleSpan = page.locator('div[role="heading"] span[title]').first()
     if ((await titleSpan.count().catch(() => 0)) > 0) {
       const t = (await titleSpan.getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
       if (t) return t
@@ -1240,15 +1253,104 @@ async function readOpenChatTitle(page, fallbackTitle) {
   return (fallbackTitle || '').trim()
 }
 
+// Verify the correct conversation is actually open. Locator-based (no
+// page.evaluate) so transient DOM churn while WhatsApp asynchronously renders
+// the panel can never turn a successful open into a false failure. A chat
+// counts as OPEN once the open-chat header title matches the target (phone
+// digits or saved-contact name) — the panel and message bubbles render after
+// the header, so they are NOT required to confirm the open.
 async function verifyActiveConversation(page, expectedPhoneOrTitle) {
   const expectedDigits = String(expectedPhoneOrTitle || '').replace(/\D/g, '')
   const targetTail = expectedDigits.slice(-10)
-  let lastResult = {
+
+  const headerSelectors = [
+    '[data-testid="conversation-info-header-chat-title"]',
+    '[data-testid="conversation-title"]',
+    '[data-testid="conversation-info-header"] span[dir="auto"][title]',
+    '[data-testid="conversation-info-header"] span[title]',
+    'header span[title]',
+    'div[role="heading"][title]',
+    'div[role="heading"] span[title]',
+    'header span[dir="auto"]',
+  ]
+  const panelSelectors = [
+    '#main',
+    'div[id="main"]',
+    '[data-testid="conversation-panel-wrapper"]',
+    '[data-testid="conversation-panel-messages"]',
+    '[data-testid="conversation-panel-body"]',
+    '[data-testid="conversation-panel-chat"]',
+    '[data-testid="chat-panel"]',
+    '[data-testid="conversation-panel"]',
+    'div[role="main"]',
+    'main',
+  ]
+
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline) {
+    try {
+      let headerTitle = ''
+      for (const sel of headerSelectors) {
+        const el = page.locator(sel).first()
+        if ((await el.count().catch(() => 0)) === 0) continue
+        const titleAttr = (await el.getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
+        headerTitle = titleAttr.trim() || ((await el.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+        if (headerTitle) break
+      }
+
+      const selectedRow = await page.locator('[role="row"][aria-selected="true"], [aria-selected="true"][role="row"], [aria-selected="true"]').count().catch(() => 0) > 0
+
+      let panelFound = false
+      for (const sel of panelSelectors) {
+        if ((await page.locator(sel).first().count().catch(() => 0)) > 0) {
+          panelFound = true
+          break
+        }
+      }
+
+      const headerDigits = headerTitle.replace(/\D/g, '')
+      const phoneMatched = Boolean(
+        expectedDigits && headerDigits && (headerDigits.endsWith(targetTail) || targetTail.endsWith(headerDigits))
+      )
+      const titleMatched = expectedDigits
+        ? phoneMatched
+        : Boolean(headerTitle && (headerTitle === expectedPhoneOrTitle || headerTitle.includes(String(expectedPhoneOrTitle || ''))))
+
+      // Header match is authoritative (the panel/bubbles render afterwards);
+      // a selected row + visible panel is a secondary confirmation.
+      const headerVerified = phoneMatched || titleMatched
+      const panelVerified = panelFound && selectedRow && Boolean(headerTitle)
+
+      if (headerVerified || panelVerified) {
+        return {
+          ok: true,
+          reason: headerVerified ? 'header_verified' : 'selected_row_verified',
+          headerTitle,
+          main: panelFound,
+          panel: panelFound,
+          selectedRow,
+          phoneMatched,
+          titleMatched,
+          hasBubbles: false,
+          candidateCount: 0,
+          latestCandidateText: '',
+        }
+      }
+    } catch {
+      /* transient DOM — keep polling */
+    }
+    await sleep(250)
+  }
+
+  // Failure snapshot for the [DEBUG] chat verification log (best effort).
+  const headerTitle = (await page.locator('[data-testid="conversation-info-header"] span[dir="auto"][title], header span[title], [data-testid="conversation-info-header-chat-title"]').first().getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
+  const panelFound = await page.locator('#main, div[role="main"], main, [data-testid="conversation-panel-wrapper"]').first().count().catch(() => 0) > 0
+  return {
     ok: false,
-    reason: 'init',
-    headerTitle: '',
-    main: false,
-    panel: false,
+    reason: 'verification_failed',
+    headerTitle,
+    main: panelFound,
+    panel: panelFound,
     selectedRow: false,
     phoneMatched: false,
     titleMatched: false,
@@ -1256,43 +1358,6 @@ async function verifyActiveConversation(page, expectedPhoneOrTitle) {
     candidateCount: 0,
     latestCandidateText: '',
   }
-
-  const deadline = Date.now() + 2500
-  while (Date.now() < deadline) {
-    try {
-      const result = await page.evaluate((expectedDigits, targetTail, expectedPhoneOrTitle) => {
-        const bubbleRoot = document.querySelector('#main, div[id="main"], [data-testid="conversation-panel-wrapper"], [data-testid="conversation-panel-messages"], [data-testid="conversation-panel-body"], [data-testid="conversation-panel-chat"], [data-testid="chat-panel"], [data-testid="conversation-panel"], main, [aria-label*="Conversation"], [aria-label*="Message list"], div[role="main"], div[role="region"]')
-        const main = Boolean(bubbleRoot)
-        const panel = Boolean(document.querySelector('[data-testid="conversation-panel-wrapper"], [data-testid="conversation-panel-messages"], [data-testid="conversation-panel-body"], [data-testid="conversation-panel-chat"], [data-testid="chat-panel"], div[role="main"], div[role="region"]'))
-        const titleEl = document.querySelector('[data-testid="conversation-info-header-chat-title"], [data-testid="conversation-info-header"], [data-testid="conversation-title"], header [title], header span[dir="auto"], header span[dir="ltr"], header h1, div[role="heading"] span, div[aria-label*="chat"], div[aria-label*="conversation"]')
-        const headerTitle = titleEl ? (titleEl.textContent || '').trim() : ''
-        const selectedRow = Boolean(document.querySelector('[role="row"][aria-selected="true"], [aria-selected="true"][role="row"], [aria-selected="true"]'))
-        const hasBubbles = Boolean(bubbleRoot && bubbleRoot.querySelector('[data-id], [data-pre-plain-text], span.selectable-text, span.copyable-text, [data-testid="message-in"], [data-testid="message-out"], .message-in, .message-out'))
-        const candidateEls = bubbleRoot ? Array.from(bubbleRoot.querySelectorAll('[data-testid], [data-id], [data-pre-plain-text], span.selectable-text, span.copyable-text')) : []
-        const candidateCount = candidateEls.length
-        const latestCandidateText = candidateCount > 0 ? (candidateEls[candidateEls.length - 1].textContent || '').trim().replace(/\s+/g, ' ').slice(0, 200) : ''
-        const titleDigits = headerTitle.replace(/\D/g, '')
-        const phoneMatched = expectedDigits && titleDigits && (titleDigits.endsWith(targetTail) || targetTail.endsWith(titleDigits))
-        const titleMatched = expectedDigits ? phoneMatched : (headerTitle && (headerTitle === expectedPhoneOrTitle || headerTitle.includes(expectedPhoneOrTitle)))
-        return { main, panel, selectedRow, headerTitle, phoneMatched, titleMatched, hasBubbles, candidateCount, latestCandidateText }
-      }, expectedDigits, targetTail, String(expectedPhoneOrTitle || ''))
-
-      lastResult = { ok: false, reason: 'pending', ...result }
-      const openPanelVisible = result.main && (result.panel || result.hasBubbles)
-      const targetVerified = result.phoneMatched || result.titleMatched || result.selectedRow || Boolean(result.headerTitle)
-      if (openPanelVisible && targetVerified) {
-        return {
-          ok: true,
-          reason: result.selectedRow ? 'selected_row_verified' : (result.phoneMatched ? 'phone_verified' : 'conversation_panel_verified'),
-          ...result,
-        }
-      }
-    } catch {
-      /* ignore transient stale DOM */
-    }
-    await sleep(250)
-  }
-  return { ok: false, reason: 'verification_failed', ...lastResult }
 }
 
 // Saved-contact heuristic: WhatsApp renders a saved contact's NAME in the chat
@@ -1398,6 +1463,28 @@ async function findRowAncestor(anchor) {
     }
     return null
   }, { timeout: 2000 }).catch(() => null)
+}
+
+// Walk up from a chat title span / anchor to the nearest clickable chat row
+// (div[role="row"][data-testid="list-item-N"]). The clickable target is the row,
+// NOT the bare title span — clicking the span does not reliably open the
+// conversation in current builds. Uses the XPath ancestor axis (locator-native,
+// no DOM-element serialization), trying the most specific marker first. Returns
+// the original element when no row ancestor is found, so callers always have
+// something to click.
+async function clickableRowOf(el) {
+  const candidates = [
+    'xpath=ancestor::div[starts-with(@data-testid,"list-item-")][1]',
+    'xpath=ancestor::div[@role="row"][1]',
+    'xpath=ancestor::div[@role="listitem"][1]',
+  ]
+  for (const xpath of candidates) {
+    try {
+      const row = el.locator(xpath).first()
+      if ((await row.count().catch(() => 0)) > 0) return row
+    } catch { /* try next ancestor marker */ }
+  }
+  return el
 }
 
 async function probeChatDom(page) {
@@ -1559,8 +1646,16 @@ const BUBBLE_ROOT_SELECTOR = '#main, div[id="main"], [data-testid="conversation-
 // Chat-row container selectors, stable-first. WhatsApp switches between
 // role=listitem / button / row and several data-testid markers across builds,
 // so the row locators in discovery, fallback and diagnostics all share one
-// ordered fallback list. Newer markers are appended — never replace the old.
+// ordered fallback list. Current builds (2026+) render rows as
+// div[role="row"][data-testid="list-item-N"] inside the chat-list pane, so
+// those anchors are tried first; the historical #side / #pane-side variants
+// are kept so older builds keep working. Only stable attributes are used
+// (role / data-testid / title / aria-label) — never generated CSS classes.
 const CHAT_ROW_SELECTORS = [
+  'div[data-testid="chat-list"] [data-testid^="list-item-"]',
+  'div[data-testid="chat-list"] div[role="row"]',
+  'div[role="row"][data-testid^="list-item-"]',
+  '[data-testid^="list-item-"]',
   'div[id="side"] [data-testid^="list-item-"]',
   'div[id="pane-side"] [data-testid^="list-item-"]',
   'div[id="side"] [data-testid="chat-list"] div[role="listitem"]',
@@ -2480,18 +2575,30 @@ async function confirmChatOpened(page, chat, targetDigits) {
   if (DEBUG) {
     console.log(`[DEBUG] chat verification: url=${page.url()} closed=${page.isClosed()} ok=${result.ok} reason=${result.reason} headerTitle="${result.headerTitle}" main=${result.main} panel=${result.panel} selectedRow=${result.selectedRow} phoneMatched=${result.phoneMatched} titleMatched=${result.titleMatched} hasBubbles=${result.hasBubbles} candidateCount=${result.candidateCount} latestCandidateText="${result.latestCandidateText}"`)
   }
-  if (result.ok) return true
+  if (result.ok) {
+    console.log(`[CHAT_OPEN_VERIFIED] reason=${result.reason}`)
+    return true
+  }
 
   const deadline = Date.now() + 2000
   while (Date.now() < deadline) {
     const headerTitle = await readOpenChatTitle(page, chat.title)
     const hDigits = headerTitle.replace(/\D/g, '')
-    if (targetDigits && hDigits && hDigits.includes(targetDigits.slice(-10))) return true
-    if (!targetDigits && headerTitle && headerTitle === chat.title) return true
+    if (targetDigits && hDigits && hDigits.includes(targetDigits.slice(-10))) {
+      console.log('[CHAT_OPEN_VERIFIED] reason=header_title_fallback')
+      return true
+    }
+    if (!targetDigits && headerTitle && headerTitle === chat.title) {
+      console.log('[CHAT_OPEN_VERIFIED] reason=header_title_exact')
+      return true
+    }
     try {
       // WhatsApp URL hash is #p/+94760544773 (leading '+' before digits).
       const u = page.url().match(/#p\/\+?(\d+)/)
-      if (u && targetDigits && u[1].includes(targetDigits.slice(-10))) return true
+      if (u && targetDigits && u[1].includes(targetDigits.slice(-10))) {
+        console.log('[CHAT_OPEN_VERIFIED] reason=url_hash')
+        return true
+      }
     } catch { /* ignore */ }
     await sleep(500)
   }
@@ -2506,22 +2613,26 @@ async function openChatRobustly(page, chat) {
     return false
   }
   const targetDigits = title.replace(/\D/g, '')
+  console.log('[CHAT_OPEN_START]')
 
   const strategies = [
     { name: 'chat row click', run: async () => {
       const row = await findChatRow(page, chat)
       if (!row) throw new Error('row not found')
+      console.log('[CHAT_ROW_FOUND]')
       await clickChatRow(page, row)
     } },
     { name: 'getByTitle exact', run: async () => {
       const t = page.getByTitle(title, { exact: true }).first()
       if ((await t.count().catch(() => 0)) === 0) throw new Error('not found')
-      await t.click({ timeout: 3000 })
+      const target = await clickableRowOf(t)
+      await target.click({ timeout: 3000 })
     } },
     { name: 'getByTitle loose', run: async () => {
       const t = page.getByTitle(title).first()
       if ((await t.count().catch(() => 0)) === 0) throw new Error('not found')
-      await t.click({ timeout: 3000 })
+      const target = await clickableRowOf(t)
+      await target.click({ timeout: 3000 })
     } },
     { name: 'openChatByPhone search', run: async () => {
       const digits = targetDigits
@@ -2569,10 +2680,8 @@ async function findChatRow(page, chat) {
   const targetDigits = title.replace(/\D/g, '')
   const digitsTail = targetDigits.slice(-10)
 
-  // Row-container strategies, stable-first. WhatsApp changes the chat-list row
-  // markup between builds, so several container selectors are tried in order and
-  // the first that yields a matching row wins. Selection is by stable identity
-  // (title digits / title text / aria-label), never by hashed class names.
+  // Row-container strategies, stable-first. Selection is by stable identity
+  // (title attribute / digits / aria-label), never by hashed class names.
   const rowSelectors = CHAT_ROW_SELECTORS
   for (const sel of rowSelectors) {
     const rows = page.locator(sel)
@@ -2580,65 +2689,72 @@ async function findChatRow(page, chat) {
     for (let i = 0; i < n; i++) {
       const row = rows.nth(i)
       try {
-        const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
-        if (targetDigits && txt.replace(/\D/g, '').includes(targetDigits)) return row
-        if (txt.includes(title)) return row
+        // Fast path: read the stable title attribute (attribute reads avoid the
+        // slow innerText layout round-trip that blew the open watchdog budget).
         const rTitle = await extractChatTitle(row)
-        if (rTitle && (rTitle === title || (digitsTail && rTitle.replace(/\D/g, '').includes(digitsTail)))) return row
-        const aria = (await row.getAttribute('aria-label', { timeout: 100 }).catch(() => '')) || ''
-        if (aria && (aria.includes(title) || (digitsTail && aria.includes(digitsTail)))) return row
+        if (rTitle && (rTitle === title || (digitsTail && rTitle.replace(/\D/g, '').includes(digitsTail)))) {
+          return clickableRowOf(row)
+        }
       } catch { /* keep looking */ }
     }
   }
 
-  // Span-title fallback: some builds only expose chat titles on span[title].
+  // Title-scan fallback: some builds only expose chat titles on span[title].
+  // Return the clickable ROW ancestor, not the bare span.
   let anchors = page.locator('div[data-testid="chat-list"] span[title]')
   let ac = await anchors.count().catch(() => 0)
   if (ac === 0) {
-    anchors = page.locator('div[id="side"] span[title]')
+    anchors = page.locator('div[id="side"] span[title], div[id="pane-side"] span[title]')
     ac = await anchors.count().catch(() => 0)
   }
   for (let i = 0; i < ac; i++) {
     const a = anchors.nth(i)
     const t = (await a.getAttribute('title', { timeout: 100 }).catch(() => '')) || ''
-    if (t === title || (digitsTail && t.replace(/\D/g, '').includes(digitsTail))) return a
+    if (t === title || (digitsTail && t.replace(/\D/g, '').includes(digitsTail))) {
+      return clickableRowOf(a)
+    }
   }
 
-  // Bounded all-rows text scan: last resort — match any visible side row whose
-  // text carries the target digits or title.
+  // Bounded all-rows text scan: last resort — match any visible row whose text
+  // carries the target digits or title.
   const allRows = page.locator(CHAT_ROW_SELECTORS.join(','))
   const an = await allRows.count().catch(() => 0)
   for (let i = 0; i < an && i < SCAN_CHAT_LIMIT * 3; i++) {
     try {
       const row = allRows.nth(i)
       const txt = ((await row.innerText({ timeout: 100 }).catch(() => '')) || '')
-      if ((targetDigits && txt.replace(/\D/g, '').includes(targetDigits)) || (title && txt.includes(title))) return row
+      if ((targetDigits && txt.replace(/\D/g, '').includes(targetDigits)) || (title && txt.includes(title))) return clickableRowOf(row)
     } catch { /* keep looking */ }
   }
   return null
 }
 
 async function clickChatRow(page, row) {
+  // Always click the row container, never a bare title span.
+  const target = await clickableRowOf(row)
   try {
-    await row.scrollIntoViewIfNeeded().catch(() => {})
-    await row.click({ timeout: 3000 })
+    await target.scrollIntoViewIfNeeded().catch(() => {})
+    await target.click({ timeout: 3000 })
+    console.log('[CHAT_ROW_CLICKED]')
     return
   } catch (firstError) {
     try {
-      const fallbackSelector = row.locator('span[title], [data-testid="cell-frame-title"], [data-testid^="list-item-"], [role="button"], [role="row"]').first()
+      const fallbackSelector = target.locator('[data-testid^="list-item-"], [role="row"], [role="button"], span[title], [data-testid="cell-frame-title"]').first()
       if ((await fallbackSelector.count().catch(() => 0)) > 0) {
         await fallbackSelector.scrollIntoViewIfNeeded().catch(() => {})
         await fallbackSelector.click({ timeout: 3000 })
+        console.log('[CHAT_ROW_CLICKED] (fallback)')
         return
       }
     } catch {
       // ignore and try native evaluate click below
     }
     try {
-      await row.evaluate((el) => {
+      await target.evaluate((el) => {
         el.scrollIntoView({ block: 'center', inline: 'center' })
         el.click()
       })
+      console.log('[CHAT_ROW_CLICKED] (evaluate)')
       return
     } catch (secondError) {
       throw new Error(`click failed: ${firstError.message}; ${secondError.message}`)
@@ -2912,6 +3028,7 @@ async function detectAndForwardIncoming(page, state) {
       const messageToSend = cleanText(last.text) || '[voice note]'
 
       console.log(`[worker] message extracted: ${messageToSend.slice(0, 120)}`)
+      console.log(`[INCOMING_MESSAGE_FOUND] source=${opened ? 'bubbles' : 'row_preview'}`)
 
       // 4. Resolve the phone from the correct source only: the opened chat when
       //    available, otherwise the chat title digits (row fallback).
@@ -3022,6 +3139,7 @@ async function detectAndForwardIncoming(page, state) {
         saveMessageState(state)
 
         console.log('[worker] sending to ingest')
+        console.log('[INCOMING_MESSAGE_FORWARD]')
         const tIngest = Date.now()
         const res = await apiPost('/api/whatsapp/ingest', {
           phone_number: phone,
