@@ -2189,31 +2189,70 @@ function matchesCustomerText(sender, dirCtx) {
   return false
 }
 
-// Decide a row's direction. DOM signals (message-in/out classes + data-testid)
-// win; otherwise the data-pre-plain-text sender is authoritative (in a 1:1 chat
-// the non-customer sender is this account → outgoing). System banners → 'system'.
+// Decide a row's direction using a strict hierarchy. Returns
+// { dir: 'in' | 'out' | 'system' | 'unknown', source }.
+//
+//   1. system banners
+//   2. DOM markers (.message-in/.message-out classes, message-in/out testids)
+//   3. direction-related DOM attributes (data-direction / aria)
+//   4. data-pre-plain-text sender
+//   5. sender == own account token → outgoing
+//   6. sender == current customer phone/name → incoming (any other sender in a
+//      confirmed 1:1 chat is this account → outgoing)
+//   7. recent outgoing evidence scoped to the CURRENT chat
+//   8. still impossible → UNKNOWN — callers must NOT ingest and must retry the
+//      bubble on the next scan.
+//
+// The old behavior defaulted an undirected bubble to 'in', which let the
+// account's own (or another chat's) messages be mistaken for incoming. That
+// "default to incoming" path is gone.
 function resolveRowDirection(row, dirCtx) {
-  if (row.isSystem) return 'system'
-  if (row.dir === 'in' || row.dir === 'out') return row.dir
+  if (row.isSystem) return { dir: 'system', source: 'dom' }
+  if (row.dir === 'in') {
+    // DOM says incoming — but if data-pre-plain-text identifies a DIFFERENT
+    // customer (i.e. a stale bubble left over from a previously-open chat),
+    // never assign that message to the currently-open chat. Only trust the DOM
+    // 'in' marker when the sender is the current customer or is unknown.
+    if (row.pre) {
+      const sender = extractSenderFromPre(row.pre)
+      const senderLower = sender.toLowerCase()
+      const own = (dirCtx.ownSenderToken || '').toLowerCase()
+      const isOwn = senderLower === 'you' || senderLower === 'me' || (own && senderLower === own)
+      if (sender && !isOwn && !matchesCustomerText(sender, dirCtx)) {
+        return { dir: 'out', source: 'pre-sender' }
+      }
+    }
+    return { dir: 'in', source: 'dom' }
+  }
+  if (row.dir === 'out') return { dir: 'out', source: 'dom' }
+  const dirAttr = String(row.dirAttr || '').toLowerCase()
+  if (dirAttr === 'in' || dirAttr === 'out') return { dir: dirAttr, source: 'dom' }
+
   const pre = row.pre
   if (pre) {
     const sender = extractSenderFromPre(pre)
     const senderLower = sender.toLowerCase()
     const own = (dirCtx.ownSenderToken || '').toLowerCase()
-    if (senderLower === 'you' || senderLower === 'me') return 'out'
-    if (own && senderLower === own) return 'out'
+    if (senderLower === 'you' || senderLower === 'me') return { dir: 'out', source: 'own-token' }
+    if (own && senderLower === own) return { dir: 'out', source: 'own-token' }
     if (sender) {
-      if (matchesCustomerText(sender, dirCtx)) return 'in'
-      return 'out'
+      if (matchesCustomerText(sender, dirCtx)) return { dir: 'in', source: 'customer-match' }
+      // Confirmed 1:1 chat: any non-customer sender is this account → outgoing.
+      return { dir: 'out', source: 'pre-sender' }
     }
   }
-  // No direction marker and no data-pre-plain-text (newer WhatsApp DOM). In a
-  // confirmed 1:1 chat a bubble is almost always the customer's; the worker's
-  // own-reply guard (recentSent / lastSentText text match) still rejects the
-  // account's own outgoing messages downstream, so default to 'in' rather than
-  // silently dropping the customer's message.
-  console.warn(`[worker] direction unknown for bubble (dir=${row.dir ?? 'null'} pre=${pre ? 'set' : 'none'}) text="${(row.text || '').slice(0, 60)}" — defaulting to incoming`)
-  return 'in'
+
+  // Recent outgoing evidence scoped to the CURRENT chat (dirCtx.recentOutgoingTexts
+  // carries texts this account sent to this chat) — never another customer's text.
+  // Exact normalized match only: a short customer message must never be labelled
+  // outgoing merely because it is a prefix of a longer reply.
+  const normText = normalizeMessageText(row.text || '')
+  const recentOutgoing = (dirCtx.recentOutgoingTexts || []).map((t) => normalizeMessageText(t))
+  if (normText && recentOutgoing.includes(normText)) {
+    return { dir: 'out', source: 'outgoing-evidence' }
+  }
+
+  return { dir: 'unknown', source: 'none' }
 }
 
 // Re-locate a bubble element by its WhatsApp data-id so voice/media handling
@@ -2230,8 +2269,21 @@ async function locateBubbleById(page, dataId) {
 // media get their synthetic marker. A voice note's duration label is never
 // treated as message content.
 async function rowToIncomingMessage(page, row, dirCtx, phoneKey) {
-  let dir = resolveRowDirection(row, dirCtx)
+  const resolved = resolveRowDirection(row, dirCtx)
+  const dir = resolved.dir
+  const dirSource = resolved.source
+  const chatKey = canonicalPhone(phoneKey) || phoneKey
+
+  // Direction UNKNOWN → NEVER ingest and NEVER create a fallback id. Log and skip
+  // this bubble for this scan; it is retried on the next poll when the DOM gives
+  // better information (never permanently lost, because no boundary is advanced).
+  if (dir === 'unknown') {
+    console.log(`[DIRECTION_UNKNOWN] chat=${chatKey} messageId=${row.id || 'none'}`)
+    return null
+  }
   if (dir === 'out' || dir === 'system') return null
+  // dir === 'in' — the only bubbles that may enter the pipeline.
+  console.log(`[DIRECTION_RESOLVE] chat=${chatKey} messageId=${row.id || 'none'} direction=in source=${dirSource}`)
 
   let text = row.text
 
@@ -2243,7 +2295,6 @@ async function rowToIncomingMessage(page, row, dirCtx, phoneKey) {
       ? await transcribeVoiceSrc(page, row.audioSrc, row.audioMime)
       : (row.id ? await handleIncomingVoiceMessage(page, await locateBubbleById(page, row.id)) : null)
     text = transcript || '[voice note]'
-    if (dir === null) dir = 'in'
   } else if (!text.trim()) {
     // Other media (photo/video/sticker/document) — synthesise a marker so the AI
     // can acknowledge the attachment.
@@ -2261,7 +2312,6 @@ async function rowToIncomingMessage(page, row, dirCtx, phoneKey) {
     } else {
       return null // empty text and no media → not a real message row
     }
-    if (dir === null) dir = 'in'
   }
 
   let ts = null
@@ -2269,8 +2319,6 @@ async function rowToIncomingMessage(page, row, dirCtx, phoneKey) {
     const m = row.pre.match(/^\[([^\]]+)\]/)
     if (m) ts = m[1]
   }
-
-  if (dir === 'out' || dir === 'system' || dir !== 'in') return null
 
   // Safety: a voice note whose transcription returned nothing (or a media row
   // whose text resolved to only a stripped timestamp) must NEVER reach the
@@ -2445,12 +2493,18 @@ async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
   // Only real message bubbles inside the OPEN chat (#main) are ever considered.
   // Direction is decided by resolveRowDirection() — only 'in' is ever returned.
   // Outgoing, system banners, and unknown messages are skipped.
-  const customerDigits = String(customerTitle || '').replace(/\D/g, '')
+  const customerDigits = canonicalPhone(customerTitle)
   const customerName = String(customerTitle || '').trim().toLowerCase()
   const dirCtx = {
     ownSenderToken: (meta && meta.ownSenderToken) || '',
     customerDigits,
     customerName,
+    // Outgoing texts this account recently sent to THIS chat (scoped by the
+    // canonical chat key) — used to label undirected own-replies as outgoing and
+    // never as a different customer's incoming message.
+    recentOutgoingTexts: (meta && meta.recentSent || [])
+      .filter((e) => !e.phone || e.phone === canonicalPhone(phoneKey))
+      .map((e) => e.text),
   }
   const rows = await extractIncomingBubblesInPage(page) || []
   for (let i = rows.length - 1; i >= 0; i--) {
@@ -2530,12 +2584,18 @@ async function dumpBubbleHtml(page, max = 2) {
 // work for chats with very long unread runs.
 async function readNewIncomingMessages(page, storedLastId, storedLastText, meta, phoneKey, customerTitle, cap = MAX_NEW_MESSAGES) {
   const tStart = Date.now()
-  const customerDigits = String(customerTitle || '').replace(/\D/g, '')
+  const customerDigits = canonicalPhone(customerTitle)
   const customerName = String(customerTitle || '').trim().toLowerCase()
   const dirCtx = {
     ownSenderToken: (meta && meta.ownSenderToken) || '',
     customerDigits,
     customerName,
+    // Outgoing texts this account recently sent to THIS chat (scoped by the
+    // canonical chat key) — used to label undirected own-replies as outgoing and
+    // never as a different customer's incoming message.
+    recentOutgoingTexts: (meta && meta.recentSent || [])
+      .filter((e) => !e.phone || e.phone === canonicalPhone(phoneKey))
+      .map((e) => e.text),
   }
   const collected = [] // newest-first
   let rows = []

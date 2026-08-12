@@ -40,6 +40,8 @@ let fn: {
   chatStateKey: (t: string) => string
   recordSentMessage: (state: Record<string, unknown>, text: string, phone: string) => void
   metaHasRecentSent: (meta: Record<string, unknown> | undefined, text: string, phone: string) => boolean
+  generateFallbackId: (phoneKey: string, text: string, ts: string) => string
+  resolveRowDirection: (row: Record<string, unknown>, dirCtx: Record<string, unknown>) => { dir: string; source: string }
 }
 
 beforeAll(() => {
@@ -62,18 +64,22 @@ beforeAll(() => {
     extractFunction(src, 'recordSentMessage'),
     extractFunction(src, 'metaHasRecentSent'),
     extractFunction(src, 'chatStateKey'),
+    extractFunction(src, 'generateFallbackId'),
+    extractFunction(src, 'extractSenderFromPre'),
+    extractFunction(src, 'matchesCustomerText'),
+    extractFunction(src, 'resolveRowDirection'),
   ].join('\n')
 
   const sandbox = new Function(
     'saveMessageState',
     'DEBUG',
     'createHash',
-    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent };`
+    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection };`
   )
   fn = sandbox(
     () => {},
     false,
-    { createHash: () => ({ update: () => ({ digest: () => 'hash' }) }) }
+    () => ({ update: () => ({ digest: () => 'hash' }) })
   )
 })
 
@@ -139,5 +145,81 @@ describe('per-chat own-reply isolation — A -> B -> A', () => {
     expect(fn.metaHasRecentSent(state.meta, 'Hello', '94771234567')).toBe(false)
     // A sending the same text again is still its own outgoing echo → suppressed.
     expect(fn.metaHasRecentSent(state.meta, 'Hello', '94760544773')).toBe(true)
+  })
+
+  it('A "Hello" and B "Hello" produce independent fallback message identities', () => {
+    const idA = fn.generateFallbackId('94760544773', 'Hello', '12:00')
+    const idB = fn.generateFallbackId('94771234567', 'Hello', '12:00')
+    expect(idA.startsWith('msg_fallback_94760544773_')).toBe(true)
+    expect(idB.startsWith('msg_fallback_94771234567_')).toBe(true)
+    expect(idA).not.toBe(idB)
+  })
+
+  it('A outgoing "Hello there" never marks B incoming "Hello" as A\'s outgoing', () => {
+    const state = makeState()
+    fn.recordSentMessage(state, 'Hello there', '94760544773') // A's outgoing
+    // B's incoming "Hello" is a DIFFERENT chat → not classified as an own reply.
+    expect(fn.metaHasRecentSent(state.meta, 'Hello', '94771234567')).toBe(false)
+  })
+})
+
+describe('resolveRowDirection — strict direction hierarchy (unknown is never assumed incoming)', () => {
+  const baseCtx = {
+    ownSenderToken: 'Kitchen Pantry',
+    customerDigits: '94771234567',
+    customerName: '',
+    recentOutgoingTexts: ['Welcome back!'],
+  }
+
+  it('uses DOM markers first', () => {
+    expect(fn.resolveRowDirection({ dir: 'in', text: 'Hi' }, baseCtx)).toEqual({ dir: 'in', source: 'dom' })
+    expect(fn.resolveRowDirection({ dir: 'out', text: 'Hi' }, baseCtx)).toEqual({ dir: 'out', source: 'dom' })
+    expect(fn.resolveRowDirection({ isSystem: true, text: 'end to end encrypted' }, baseCtx)).toEqual({ dir: 'system', source: 'dom' })
+  })
+
+  it('never assigns a stale bubble from another customer\'s chat to the current chat', () => {
+    // DOM says 'in' but the pre sender is Customer A's number while the current
+    // chat is Customer B → must be rejected (out), not ingested as B's message.
+    const staleRow = { dir: 'in', pre: '[12:00 PM, 8/12/2026] +94 76 054 4773: Hello', text: 'Hello' }
+    const ctxB = { ownSenderToken: 'Kitchen Pantry', customerDigits: '94771234567', customerName: '', recentOutgoingTexts: [] }
+    expect(fn.resolveRowDirection(staleRow, ctxB).dir).toBe('out')
+    // But the same bubble read while Customer A's chat is open IS incoming.
+    const ctxA = { ownSenderToken: 'Kitchen Pantry', customerDigits: '94760544773', customerName: '', recentOutgoingTexts: [] }
+    expect(fn.resolveRowDirection(staleRow, ctxA).dir).toBe('in')
+  })
+
+  it('resolves incoming from the customer phone in data-pre-plain-text', () => {
+    const row = { dir: null, pre: '[12:00 PM, 8/12/2026] +94 77 123 4567: Hello', text: 'Hello' }
+    expect(fn.resolveRowDirection(row, baseCtx).dir).toBe('in')
+    expect(fn.resolveRowDirection(row, baseCtx).source).toBe('customer-match')
+  })
+
+  it('resolves outgoing from the own account token / placeholder senders', () => {
+    expect(fn.resolveRowDirection({ dir: null, pre: '[12:00 PM, 8/12/2026] Kitchen Pantry: Hello', text: 'Hello' }, baseCtx).dir).toBe('out')
+    expect(fn.resolveRowDirection({ dir: null, pre: '[12:00 PM, 8/12/2026] You: Hello', text: 'Hello' }, baseCtx).dir).toBe('out')
+  })
+
+  it('resolves a non-customer, non-own sender as outgoing (1:1 chat)', () => {
+    // Some other sender that is neither the customer nor the account → outgoing.
+    expect(fn.resolveRowDirection({ dir: null, pre: '[12:00 PM, 8/12/2026] Someone Else: Hello', text: 'Hello' }, baseCtx).dir).toBe('out')
+  })
+
+  it('resolves undirected text matching this chat\'s recent outgoing evidence as outgoing', () => {
+    const row = { dir: null, pre: null, text: 'Welcome back!' }
+    expect(fn.resolveRowDirection(row, baseCtx)).toEqual({ dir: 'out', source: 'outgoing-evidence' })
+  })
+
+  it('returns UNKNOWN (never incoming) when nothing can decide the direction', () => {
+    const row = { dir: null, pre: null, text: 'Hello' }
+    const ctx = { ...baseCtx, recentOutgoingTexts: [] }
+    expect(fn.resolveRowDirection(row, ctx).dir).toBe('unknown')
+  })
+
+  it('does NOT leak Customer A outgoing evidence into Customer B direction', () => {
+    // A sent "Hello there" (recorded under A's phone). B's undirected "Hello"
+    // bubble must NOT be labelled outgoing from A's evidence.
+    const ctxB = { ownSenderToken: 'Kitchen Pantry', customerDigits: '94771234567', customerName: '', recentOutgoingTexts: ['Hello there'] }
+    const result = fn.resolveRowDirection({ dir: null, pre: null, text: 'Hello' }, ctxB)
+    expect(result.dir).toBe('unknown')
   })
 })
