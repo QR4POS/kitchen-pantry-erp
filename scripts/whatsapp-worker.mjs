@@ -358,6 +358,18 @@ function metaHasRecentSent(meta, text, phone) {
   })
 }
 
+// True when an ingest response means the message was actually handled, so the
+// per-chat dedup boundary may advance. A processed turn, or a legitimately
+// terminal skip (already replied / matches outgoing / duplicate), advances the
+// boundary. Everything else (agent disabled, unexpected response) must NOT
+// advance it — the message is retried on a later poll instead of being silently
+// marked processed with no reply.
+function isIngestHandled(res) {
+  if (res && res.processed === true) return true
+  const skip = res && res.skipReason
+  return skip === 'already_replied' || skip === 'matches_outgoing' || skip === 'duplicate'
+}
+
 function loadMessageState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(LAST_MESSAGES_FILE, 'utf-8'))
@@ -845,6 +857,7 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
     await saveSendFailure(page)
     return { ok: false, error: `chat not locatable (${identifier})` }
   }
+  console.log(`[OUTBOX_CHAT_RESOLVED] chat=${canonicalPhone(identifier) || identifier}`)
   await sleep(1200)
 
   if (opts.mediaUrl) {
@@ -1139,6 +1152,8 @@ async function processOutbox(page, messageState) {
   result.claimed = messages.length
   const results = []
   for (const msg of messages) {
+    const outboxPhone = canonicalPhone(msg.phone_number) || String(msg.phone_number || '')
+    console.log(`[OUTBOX_PROCESS_START] chat=${outboxPhone} id=${msg.id}`)
     console.log(`[OUTBOX_SEND_START] id=${msg.id} phone=${msg.phone_number}`)
     try {
       const outcome = await sendMessageToChat(page, msg.phone_number, msg.message, messageState, {
@@ -1148,15 +1163,18 @@ async function processOutbox(page, messageState) {
       if (outcome.ok) {
         result.sent += 1
         results.push({ id: msg.id, status: 'sent' })
+        console.log(`[OUTBOX_PROCESS_DONE] chat=${outboxPhone} id=${msg.id} ok=true`)
         console.log(`[OUTBOX_SEND_DONE] id=${msg.id}`)
       } else {
         result.failed += 1
         results.push({ id: msg.id, status: 'failed', error_message: outcome.error || 'send failed' })
+        console.log(`[OUTBOX_PROCESS_DONE] chat=${outboxPhone} id=${msg.id} ok=false`)
         console.log(`[OUTBOX_SEND_FAILED] id=${msg.id} reason=${outcome.error || 'send failed'}`)
       }
     } catch (e) {
       result.failed += 1
       results.push({ id: msg.id, status: 'failed', error_message: e.message })
+      console.log(`[OUTBOX_PROCESS_DONE] chat=${outboxPhone} id=${msg.id} ok=false error=${e.message}`)
       console.log(`[OUTBOX_SEND_FAILED] id=${msg.id} reason=${e.message}`)
     }
   }
@@ -1850,11 +1868,13 @@ async function resolveChatPhone(page, title, messageDataId) {
     if (m) return m[1]
   }
   try {
-    // WhatsApp URL hash is #p/+94760544773 (leading '+' before digits).
-    const u = page.url().match(/#p\/\+?(\d+)/)
-    if (u) return u[1]
+    // WhatsApp URL hash is #p/+94760544773 (leading '+' before digits). Some
+    // builds use #chat/<jid> / #wa/<jid>; try those too.
+    const u = page.url()
+    const m = u.match(/#p\/\+?(\d+)/) || u.match(/#chat\/?\+?(\d+)/) || u.match(/#wa\/?\+?(\d+)/)
+    if (m) return m[1]
   } catch { /* ignore */ }
-  const digits = title.replace(/\D/g, '')
+  const digits = canonicalPhone(title)
   if (digits) return digits
   // For non-saved contacts, data-pre-plain-text shows the sender's number.
   const prePlain = page.locator('[data-pre-plain-text]')
@@ -1865,7 +1885,9 @@ async function resolveChatPhone(page, title, messageDataId) {
     const m = sender.match(/(\d{7,14})/)
     if (m) return m[1]
   }
-  return title.trim() || 'unknown-chat'
+  // Unresolved. Callers must NOT fall back to a contact name as the phone —
+  // that would break per-customer identity on the AI side.
+  return ''
 }
 
 // Stable, never-empty key used for the persistent dedup state. Digit-based
@@ -2515,17 +2537,24 @@ async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
 }
 
 // Dedup boundary: stop scanning when a message equals the last one already
-// processed. Matches on the authoritative WhatsApp data-id when present. For
-// data-id-less messages (fallback ids) the normalized text is compared against
-// the stored lastIncomingText too, so the cleanText upgrade never re-ingests a
-// message that was already handled under a different fallback hash.
+// processed. Matches on the authoritative WhatsApp data-id when present. Fallback
+// ids already embed chat + normalized text + timestamp, so a DIFFERENT fallback
+// id means a DIFFERENT message — identical text from the same customer at a
+// different time (or from another customer) must never be text-collided. Text
+// comparison is used only when the current message has no id at all AND the
+// stored boundary was itself id-less, so a genuine un-identifiable re-forward is
+// still blocked.
 function isAlreadyProcessedBoundary(msg, storedLastId, storedLastText) {
   if (storedLastId && msg.id && msg.id === storedLastId) return true
-  if (!storedLastId || !storedLastText) return false
-  const storedIsFallback = String(storedLastId).startsWith('msg_fallback_')
-  const msgIsFallback = !msg.id || String(msg.id).startsWith('msg_fallback_')
-  if (!storedIsFallback && !msgIsFallback) return false
-  return normalizeMessageText(msg.text) === normalizeMessageText(storedLastText)
+  // Stored boundary exists and this message has its own id that differs → a NEW
+  // distinct message (even when the text is identical).
+  if (storedLastId && msg.id) return false
+  if (!storedLastId) return false
+  // This message has no id (rare): only text-compare against a text-based
+  // (fallback) boundary so an unidentifiable re-forward is blocked without
+  // colliding distinct same-text messages.
+  if (!String(storedLastId).startsWith('msg_fallback_')) return false
+  return Boolean(storedLastText) && normalizeMessageText(msg.text) === normalizeMessageText(storedLastText)
 }
 
 // ── Bubble markup diagnostics ──
@@ -2975,6 +3004,7 @@ async function detectAndForwardIncoming(page, state) {
     const tScan = Date.now()
     const chats = await withTimeout(scanChatRows(page), CHAT_SCAN_TIMEOUT_MS, [], 'scanChatRows')
     perf('worker_detect', tScan, `chats=${chats.length}`)
+    console.log(`[MULTI_CHAT_SCAN] candidates=${chats.length}`)
     if (chats.length === 0) return
 
     let deepReads = 0
@@ -2985,11 +3015,12 @@ async function detectAndForwardIncoming(page, state) {
       // Stable key that is never empty — name-only chats are never skipped.
       const key = chatStateKey(chat.title)
       const stored = state.chats[key]
+      console.log(`[CHAT_PROCESS_START] chat=${key}`)
 
       // Per-conversation processing lock: ignore additional events while one
       // incoming message for this chat is still being handled.
       if (processingLocks.get(key)) {
-        console.log('[worker] conversation in progress, event ignored')
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=lock_held`)
         continue
       }
 
@@ -2997,7 +3028,10 @@ async function detectAndForwardIncoming(page, state) {
       // unchanged since we last handled this chat. A changed preview/time — or
       // an unread badge — makes the chat a candidate. This detects new messages
       // from the chat list alone, without any unread badge selector.
-      if (!chat.hasUnread && stored && stored.rowSig && chat.raw && stored.rowSig === chat.raw) continue
+      if (!chat.hasUnread && stored && stored.rowSig && chat.raw && stored.rowSig === chat.raw) {
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=row_unchanged`)
+        continue
+      }
 
       console.log('[worker] incoming message detected')
       if (chat.hasUnread) console.log('[worker] unread chat detected')
@@ -3126,6 +3160,7 @@ async function detectAndForwardIncoming(page, state) {
           updatedAt: new Date().toISOString(),
         }
         saveMessageState(state)
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=no_message attempt=${retries} giveUp=${giveUp}`)
         if (giveUp) {
           console.log(`[worker] giving up on unreadable chat ${chat.title} after ${EXTRACT_RETRY_LIMIT} attempts`)
         } else {
@@ -3148,11 +3183,21 @@ async function detectAndForwardIncoming(page, state) {
 
       // 4. Resolve the phone from the correct source only: the opened chat when
       //    available, otherwise the chat title digits (row fallback). Always
-      //    canonicalize so every chat is keyed by the same phone form.
+      //    canonicalize so every chat is keyed by the same phone form. A phone
+      //    with no digits (e.g. a saved-contact name whose number is not yet
+      //    resolvable) is skipped for this scan — never ingested under a name,
+      //    which would break per-customer identity on the AI side. It is retried
+      //    on the next poll (rowSig is not advanced).
       if (!phone) {
         phone = opened ? await resolveChatPhone(page, chat.title, last.id || '') : (chat.title || '').replace(/\D/g, '')
       }
-      phone = canonicalPhone(phone) || phone
+      phone = canonicalPhone(phone)
+      if (!phone) {
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=phone_unresolved`)
+        await resetChatView(page)
+        continue
+      }
+      console.log(`[CUSTOMER_RESOLVED] chat=${phone}`)
       console.log(`[worker] resolved chat id: ${phone}`)
 
       // 5. Classification. Self / groups / broadcasts are ignored; ALL confirmed
@@ -3162,19 +3207,19 @@ async function detectAndForwardIncoming(page, state) {
       const jid = opened ? jidType(last) : null
 
       if (isSelfChat(headerTitle)) {
-        console.log('[worker] self chat ignored')
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=self`)
         state.chats[key] = { ...(stored || {}), title: chat.title, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, lastIncomingText: last.text, lastIncomingId: last.id || null, lastIncomingTs: last.ts, extractRetries: 0, conversationState: 'WAITING_FOR_CUSTOMER', updatedAt: new Date().toISOString() }
         saveMessageState(state)
         continue
       }
       if (jid === 'group') {
-        console.log('[worker] group chat ignored')
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=group`)
         state.chats[key] = { ...(stored || {}), title: chat.title, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, lastIncomingText: last.text, lastIncomingId: last.id || null, lastIncomingTs: last.ts, extractRetries: 0, conversationState: 'WAITING_FOR_CUSTOMER', updatedAt: new Date().toISOString() }
         saveMessageState(state)
         continue
       }
       if (jid === 'broadcast') {
-        console.log('[worker] broadcast chat ignored')
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=broadcast`)
         state.chats[key] = { ...(stored || {}), title: chat.title, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, lastIncomingText: last.text, lastIncomingId: last.id || null, lastIncomingTs: last.ts, extractRetries: 0, conversationState: 'WAITING_FOR_CUSTOMER', updatedAt: new Date().toISOString() }
         saveMessageState(state)
         continue
@@ -3183,7 +3228,7 @@ async function detectAndForwardIncoming(page, state) {
         // Could not open the chat and the title is a name with no resolvable
         // number — cannot confirm it is a 1:1 chat (may be a group/broadcast).
         // Skip this poll; it is retried later.
-        console.log('[worker] chat not verified as 1:1, skipped')
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=not_verified_1to1`)
         continue
       }
       if (hasContactName(headerTitle)) {
@@ -3225,6 +3270,7 @@ async function detectAndForwardIncoming(page, state) {
       }
 
       if (isOwnReply) {
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=own_reply`)
         console.log(`[INGEST_DECISION] chat=${key} shouldForward=false reason=own_reply`)
         console.log(`[WORKER_SKIP] reason=own_reply text="${messageToSend.slice(0, 80)}"`)
         state.chats[key] = {
@@ -3261,20 +3307,78 @@ async function detectAndForwardIncoming(page, state) {
 
       processingLocks.set(key, true)
       try {
-        state.chats[key] = { ...(stored || {}), title: chat.title, phone, preview: chat.preview, rowSig: chat.raw || stored?.rowSig || null, lastIncomingText: last.text, lastIncomingId: last.id || null, lastIncomingTs: last.ts, extractRetries: 0, conversationState: 'PROCESS_MESSAGE', updatedAt: new Date().toISOString() }
+        // Transient in-progress marker. The per-chat dedup boundary
+        // (lastIncomingId / lastIncomingText / rowSig) is deliberately NOT
+        // advanced here: it may only move AFTER the ingest/reply workflow
+        // succeeds, so a transient ingest failure can never mark an un-replied
+        // message as processed.
+        state.chats[key] = {
+          ...(stored || {}),
+          title: chat.title,
+          phone,
+          preview: chat.preview,
+          extractRetries: 0,
+          conversationState: 'PROCESS_MESSAGE',
+          updatedAt: new Date().toISOString(),
+        }
         saveMessageState(state)
 
         console.log('[worker] sending to ingest')
         console.log('[INCOMING_MESSAGE_FORWARD]')
+        console.log(`[INGEST_START] chat=${phone} providerMessageId=${last.id ?? 'none'}`)
         const tIngest = Date.now()
-        const res = await apiPost('/api/whatsapp/ingest', {
-          phone_number: phone,
-          message: messageToSend,
-          provider_message_id: last.id,
-          media_url: mediaUrl,
-        })
+        let res = null
+        try {
+          res = await apiPost('/api/whatsapp/ingest', {
+            phone_number: phone,
+            message: messageToSend,
+            provider_message_id: last.id,
+            media_url: mediaUrl,
+          })
+        } catch (e) {
+          // Ingest failed (network / 5xx after retries). This chat's message is
+          // NOT marked processed — the boundary stays untouched so it is retried
+          // on the next poll. Critically, this must NEVER abort the remaining
+          // candidates: another customer's message is still processed this scan.
+          console.error(`[CHAT_PROCESS_ERROR] chat=${key} reason=ingest_failed error=${e.message}`)
+          writeStatus({ lastError: `Ingest failed for ${key}: ${e.message}` })
+          state.chats[key] = {
+            ...(stored || {}),
+            title: chat.title,
+            phone,
+            preview: chat.preview,
+            rowSig: stored?.rowSig || null,
+            extractRetries: 0,
+            conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
+            updatedAt: new Date().toISOString(),
+          }
+          saveMessageState(state)
+          continue
+        }
         perf('ingest_call', tIngest, `phone=${phone} processed=${res?.processed}`)
+        console.log(`[INGEST_RESULT] chat=${phone} processed=${res?.processed} replyQueued=${res?.replyQueued === true} skipReason=${res?.skipReason ?? res?.reason ?? 'none'}`)
         console.log(`[worker] ingest response ok=${res?.ok} processed=${res?.processed}${res?.reason ? ' reason=' + res.reason : ''}${res?.skipReason ? ' skipReason=' + res.skipReason : ''}${res?.replyQueued != null ? ' replyQueued=' + res.replyQueued : ''}${res?.action ? ' action=' + res.action : ''}`)
+
+        // Only advance the per-chat dedup boundary when the ingest actually
+        // handled the message (processed, or a legitimately-terminal skip such as
+        // already_replied / matches_outgoing / duplicate). Anything else (e.g.
+        // agent_disabled) leaves the boundary untouched so the message is retried.
+        const handled = isIngestHandled(res)
+        if (!handled) {
+          console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=ingest_not_handled skipReason=${res?.skipReason ?? res?.reason ?? 'unknown'}`)
+          state.chats[key] = {
+            ...(stored || {}),
+            title: chat.title,
+            phone,
+            preview: chat.preview,
+            rowSig: stored?.rowSig || null,
+            extractRetries: 0,
+            conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
+            updatedAt: new Date().toISOString(),
+          }
+          saveMessageState(state)
+          continue
+        }
 
         // Normalize conversationState to canonical WAITING_FOR_CUSTOMER.
         // The ingest response returns 'waiting_customer' (legacy path) or
@@ -3300,6 +3404,7 @@ async function detectAndForwardIncoming(page, state) {
           updatedAt: new Date().toISOString(),
         }
         saveMessageState(state)
+        console.log(`[CHAT_PROCESS_SUCCESS] chat=${key} replyQueued=${res?.replyQueued === true}`)
         if (res?.replyQueued === true) {
           perf('reply_queued', tIngest, `phone=${phone}`)
           console.log(`[worker] AI reply queued action=${res.action}`)

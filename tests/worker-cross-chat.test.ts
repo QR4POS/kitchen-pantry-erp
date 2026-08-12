@@ -42,6 +42,8 @@ let fn: {
   metaHasRecentSent: (meta: Record<string, unknown> | undefined, text: string, phone: string) => boolean
   generateFallbackId: (phoneKey: string, text: string, ts: string) => string
   resolveRowDirection: (row: Record<string, unknown>, dirCtx: Record<string, unknown>) => { dir: string; source: string }
+  isIngestHandled: (res: Record<string, unknown> | null | undefined) => boolean
+  isAlreadyProcessedBoundary: (msg: Record<string, unknown>, storedLastId: string | null, storedLastText: string | null) => boolean
 }
 
 beforeAll(() => {
@@ -68,19 +70,34 @@ beforeAll(() => {
     extractFunction(src, 'extractSenderFromPre'),
     extractFunction(src, 'matchesCustomerText'),
     extractFunction(src, 'resolveRowDirection'),
+    extractFunction(src, 'isIngestHandled'),
+    extractFunction(src, 'isAlreadyProcessedBoundary'),
   ].join('\n')
 
   const sandbox = new Function(
     'saveMessageState',
     'DEBUG',
     'createHash',
-    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection };`
+    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary };`
   )
-  fn = sandbox(
-    () => {},
-    false,
-    () => ({ update: () => ({ digest: () => 'hash' }) })
-  )
+  // Deterministic fake createHash so generateFallbackId produces distinct ids
+  // for distinct (chat, text, timestamp) inputs.
+  const fakeCreateHash = () => {
+    let input = ''
+    const api = {
+      update(data: string) { input += String(data); return api },
+      digest() {
+        let h = 2166136261
+        for (const ch of input) {
+          h ^= ch.charCodeAt(0)
+          h = Math.imul(h, 16777619) >>> 0
+        }
+        return h.toString(16)
+      },
+    }
+    return api
+  }
+  fn = sandbox(() => {}, false, fakeCreateHash)
 })
 
 function makeState() {
@@ -160,6 +177,81 @@ describe('per-chat own-reply isolation — A -> B -> A', () => {
     fn.recordSentMessage(state, 'Hello there', '94760544773') // A's outgoing
     // B's incoming "Hello" is a DIFFERENT chat → not classified as an own reply.
     expect(fn.metaHasRecentSent(state.meta, 'Hello', '94771234567')).toBe(false)
+  })
+
+  it('A, B and C each sending "Hello" keep fully independent own-reply state', () => {
+    const state = makeState()
+    fn.recordSentMessage(state, 'Hello', '94760544773')   // A echo
+    fn.recordSentMessage(state, 'Hello', '94771234567')   // B echo
+    fn.recordSentMessage(state, 'Hello', '94775804903')   // C echo
+    // Each chat's own echo is suppressed, but no chat suppresses another's.
+    expect(fn.metaHasRecentSent(state.meta, 'Hello', '94760544773')).toBe(true)
+    expect(fn.metaHasRecentSent(state.meta, 'Hello', '94771234567')).toBe(true)
+    expect(fn.metaHasRecentSent(state.meta, 'Hello', '94775804903')).toBe(true)
+    // A third customer D sending "Hello" is NOT an echo of A/B/C.
+    expect(fn.metaHasRecentSent(state.meta, 'Hello', '94777123456')).toBe(false)
+  })
+
+  it('A sending "Hello" twice keeps distinct identities when timestamps differ', () => {
+    const id1 = fn.generateFallbackId('94760544773', 'Hello', '12:00')
+    const id2 = fn.generateFallbackId('94760544773', 'Hello', '12:05')
+    expect(id1).not.toBe(id2)
+  })
+
+  it('A sending the identical message at the same timestamp produces the same boundary id', () => {
+    const id1 = fn.generateFallbackId('94760544773', 'Hello', '12:00')
+    const id2 = fn.generateFallbackId('94760544773', 'Hello', '12:00')
+    expect(id1).toBe(id2)
+  })
+})
+
+describe('isIngestHandled — dedup boundary advances only on handled messages', () => {
+  it('advances on a processed turn', () => {
+    expect(fn.isIngestHandled({ processed: true, action: 'reply', replyQueued: true })).toBe(true)
+  })
+
+  it('advances on terminal skips (already_replied / matches_outgoing / duplicate)', () => {
+    expect(fn.isIngestHandled({ processed: false, skipReason: 'already_replied' })).toBe(true)
+    expect(fn.isIngestHandled({ processed: false, skipReason: 'matches_outgoing' })).toBe(true)
+    expect(fn.isIngestHandled({ processed: false, skipReason: 'duplicate' })).toBe(true)
+  })
+
+  it('does NOT advance on agent_disabled or unexpected responses', () => {
+    expect(fn.isIngestHandled({ processed: false, skipReason: 'agent_disabled' })).toBe(false)
+    expect(fn.isIngestHandled({ processed: false, skipReason: 'processing_error' })).toBe(false)
+    expect(fn.isIngestHandled(undefined)).toBe(false)
+    expect(fn.isIngestHandled(null)).toBe(false)
+    expect(fn.isIngestHandled({ ok: true })).toBe(false)
+  })
+})
+
+describe('isAlreadyProcessedBoundary — identical text is not auto-duplicate', () => {
+  it('same fallback id → boundary (the very same message re-read)', () => {
+    const id = 'msg_fallback_94760544773_abc12345'
+    expect(fn.isAlreadyProcessedBoundary({ id, text: 'Hello' }, id, 'Hello')).toBe(true)
+  })
+
+  it('same real data-id → boundary', () => {
+    expect(fn.isAlreadyProcessedBoundary({ id: 'true_x@c.us', text: 'Hello' }, 'true_x@c.us', 'Hello')).toBe(true)
+  })
+
+  it('DIFFERENT fallback ids with identical text → NOT the boundary (two distinct messages)', () => {
+    const id1 = 'msg_fallback_94760544773_a111'
+    const id2 = 'msg_fallback_94760544773_b222'
+    expect(fn.isAlreadyProcessedBoundary({ id: id2, text: 'Hello' }, id1, 'Hello')).toBe(false)
+  })
+
+  it('different real data-id → NOT the boundary', () => {
+    expect(fn.isAlreadyProcessedBoundary({ id: 'true_y@c.us', text: 'Hello' }, 'true_x@c.us', 'Hello')).toBe(false)
+  })
+
+  it('no stored boundary (new chat) → never a duplicate', () => {
+    expect(fn.isAlreadyProcessedBoundary({ id: 'msg_fallback_94771234567_x', text: 'Hello' }, null, null)).toBe(false)
+  })
+
+  it('Customer B "Hello" never hits Customer A boundary (per-chat stored state)', () => {
+    const aId = 'msg_fallback_94760544773_a111'
+    expect(fn.isAlreadyProcessedBoundary({ id: 'msg_fallback_94771234567_b111', text: 'Hello' }, aId, 'Hello')).toBe(false)
   })
 })
 
