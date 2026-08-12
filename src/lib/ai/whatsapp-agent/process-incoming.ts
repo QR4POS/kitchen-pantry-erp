@@ -19,13 +19,20 @@ export async function handleIncomingMessage(
 ): Promise<{
   processed: boolean
   reason?: string
-  skipReason?: 'agent_disabled' | 'duplicate' | 'matches_outgoing' | 'already_replied'
+  skipReason?: 'agent_disabled' | 'duplicate' | 'matches_outgoing' | 'already_replied' | 'processing_error'
   action?: 'reply' | 'wait' | 'handoff' | 'close'
   state?: string
   replyQueued?: boolean
   conversationId?: string | null
 }> {
   const normalized = normalizePhone(phone)
+
+  await logAgent('incoming_received', null, 'info', {
+    phone: normalized,
+    hasProviderMessageId: Boolean(meta?.providerMessageId),
+    media: Boolean(meta?.mediaUrl),
+  })
+  console.log(`[ingest] incoming received phone=${normalized} message="${String(message).slice(0, 80)}"`)
 
   // ── PART 1: Reject messages that match known outgoing messages ──
   // A) Exact provider-id match — the candidate's DOM id equals an outgoing's provider id.
@@ -59,18 +66,56 @@ export async function handleIncomingMessage(
   // ── Persist raw incoming message ──
   try {
     await persistIncomingMessage(normalized, message, meta?.providerMessageId)
+    await logAgent('message_persisted', null, 'info', {
+      phone: normalized,
+      providerMessageId: meta?.providerMessageId ?? null,
+    })
   } catch (e) {
     const err = e as { code?: string; message: string }
     if (err.code === '23505') {
-      await logAgent('message_duplicate', null, 'info', { phone: normalized, skipReason: 'duplicate' })
-      return { processed: false, reason: 'duplicate', skipReason: 'duplicate' }
+      // Unique-index collision. With a provider message id this usually means
+      // the worker re-forwarded the same message (e.g. retry after a transient
+      // 500). If a reply already exists we must NOT reply again; otherwise the
+      // message was persisted by an earlier attempt that never completed, so we
+      // continue processing — the one-reply-per-inbound DB index still
+      // guarantees at most one outgoing reply. Without a provider id there is
+      // no way to verify idempotency, so a text-level duplicate is rejected.
+      if (meta?.providerMessageId) {
+        const existingReply = await findOutgoingBySourceInbound(meta.providerMessageId)
+        if (existingReply) {
+          await logAgent('duplicate_reply_blocked', null, 'info', {
+            phone: normalized,
+            incomingId: meta.providerMessageId,
+            existingReply: (existingReply as { id: string }).id,
+            skipReason: 'already_replied',
+          })
+          return { processed: false, reason: 'already_replied', skipReason: 'already_replied' }
+        }
+        await logAgent('persist_duplicate_retried', null, 'info', {
+          phone: normalized,
+          providerMessageId: meta.providerMessageId,
+          reason: 'already persisted by a prior attempt — continuing processing',
+        })
+      } else {
+        await logAgent('message_duplicate', null, 'info', { phone: normalized, skipReason: 'duplicate' })
+        return { processed: false, reason: 'duplicate', skipReason: 'duplicate' }
+      }
+    } else {
+      await logAgent('persist_incoming', null, 'error', { phone: normalized }, err.message)
     }
-    await logAgent('persist_incoming', null, 'error', { phone: normalized }, err.message)
   }
 
   const settings = await getAgentSettings()
   if (!settings?.whatsapp_agent_enabled) {
-    await logAgent('message_ignored', null, 'info', { phone: normalized, reason: 'agent_disabled', skipReason: 'agent_disabled' })
+    await logAgent('message_ignored', null, 'info', {
+      phone: normalized,
+      reason: 'agent_disabled',
+      whatsapp_agent_enabled: false,
+      auto_reply_enabled: settings?.auto_reply_enabled ?? false,
+      skipReason: 'agent_disabled',
+      explanation: 'Agent disabled — incoming message persisted but no AI reply was queued',
+    })
+    console.log(`[ingest] agent disabled — no reply queued for ${normalized}`)
     return { processed: false, reason: 'agent_disabled', skipReason: 'agent_disabled' }
   }
 
@@ -89,10 +134,24 @@ export async function handleIncomingMessage(
     }
   }
 
-  const result = await processWhatsAppMessage(
-    normalized,
-    message,
-    { providerMessageId: meta?.providerMessageId ?? null, mediaUrl: meta?.mediaUrl ?? null }
-  )
-  return { processed: true, ...result }
+  try {
+    const result = await processWhatsAppMessage(
+      normalized,
+      message,
+      { providerMessageId: meta?.providerMessageId ?? null, mediaUrl: meta?.mediaUrl ?? null }
+    )
+    return { processed: true, ...result }
+  } catch (e) {
+    // Pre-lock failures (DB/settings). The conversation is never left in
+    // 'processing' here because the lock is not held yet, but the failure must
+    // still be recorded so a silent drop is diagnosable. The HTTP layer returns
+    // the error so the worker retries; the persisted incoming message's dedup
+    // key prevents the retry from double-processing.
+    await logAgent('processing_error', null, 'error', {
+      phone: normalized,
+      providerMessageId: meta?.providerMessageId ?? null,
+      phase: 'pre_lock',
+    }, (e as Error).message)
+    throw e
+  }
 }

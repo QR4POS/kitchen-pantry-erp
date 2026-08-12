@@ -22,6 +22,12 @@ import { isKitchenRelatedMessage, NON_KITCHEN_REPLY } from './intent-filter'
 import { runOnboardingTurn } from '@/lib/ai/conversation/onboarding'
 import { runOnboardingCompletion } from '@/lib/ai/conversation/completion'
 import { runSupportTurn } from '@/lib/ai/conversation/support'
+import {
+  isStaleProcessing,
+  moveConversationToSafeState,
+  releaseStuckProcessingLock,
+} from './agent-recovery'
+import { handleProviderFailure, isProviderFailureError, sanitizeErrorText } from './provider-fallback'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
 
 // Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
@@ -190,12 +196,18 @@ export async function processWhatsAppMessage(
   const providerMessageId = meta?.providerMessageId ?? null
   const mediaUrl = meta?.mediaUrl ?? null
   const settings = await getAgentSettings()
+  const normalizedPhone = normalizePhone(phone)
   if (!settings?.whatsapp_agent_enabled) {
-    await logAgent('skip_message', null, 'info', { phone, reason: 'agent_disabled' })
-    return { action: 'wait', state: 'closed', replyQueued: false, conversationId: null }
+    await logAgent('agent_disabled', null, 'info', {
+      phone: normalizedPhone,
+      whatsapp_agent_enabled: false,
+      auto_reply_enabled: settings?.auto_reply_enabled ?? false,
+      reason: 'agent_disabled_no_reply_queued',
+    })
+    console.log(`[engine] agent disabled — no reply queued for ${normalizedPhone}`)
+    return { action: 'wait', state: 'waiting_customer', replyQueued: false, conversationId: null }
   }
   const tEngine = Date.now()
-  const normalizedPhone = normalizePhone(phone)
 
   const tConv = Date.now()
   const { conversation, created: conversationCreated, genuinelyNew, isReturning, lastInteractionAt } = await getOrCreateConversation(phone)
@@ -247,49 +259,76 @@ export async function processWhatsAppMessage(
   // Only one process may process this conversation at a time. If another
   // caller already acquired the lock (status is 'processing'), skip.
   if (!(await acquireConversationLock(conversation.id))) {
-    // Auto-recover: if stuck in 'processing' for > 5 min, reset and retry
-    const isStuck = conversation.conversation_status === 'processing'
-    const updatedMs = new Date(conversation.updated_at).getTime()
-    const stuckForMinutes = isStuck ? (Date.now() - updatedMs) / 60000 : 0
-
-    if (isStuck && stuckForMinutes > 5) {
-      await admin()
-        .from('ai_conversations')
-        .update({ conversation_status: 'waiting_customer', updated_at: new Date().toISOString() })
-        .eq('id', conversation.id)
-        .eq('conversation_status', 'processing')
-      await logAgent('conversation_unstuck', null, 'info', {
-        phone,
-        conversationId: conversation.id,
-        stuckForMinutes: Math.round(stuckForMinutes),
+    // Auto-recover: if stuck in 'processing' for longer than the configured
+    // timeout, reset the transient lock and retry. Collected data and history
+    // are preserved.
+    if (isStaleProcessing(conversation)) {
+      const unstuck = await releaseStuckProcessingLock({
+        phone: normalizedPhone,
+        conversation,
+        reason: 'stale',
       })
-      console.log(`[engine] conversation unstuck (was processing for ${Math.round(stuckForMinutes)}m) conversation_id=${conversation.id}`)
-      // Continue processing — reload the conversation
+
+      if (!unstuck) {
+        // Another process already reset it (or it is no longer stale) — the
+        // lock is now held elsewhere, so skip this turn.
+        await logAgent('conversation_locked', null, 'info', {
+          phone: normalizedPhone,
+          conversationId: conversation.id,
+          reason: 'lock_held_after_unstuck',
+        })
+        console.log(`[engine] conversation still locked after unstuck conversation_id=${conversation.id}`)
+        return { action: 'wait', state: 'waiting_customer', replyQueued: false, conversationId: conversation.id }
+      }
+
+      // Continue processing — reload the conversation so the turn modules see
+      // the recovered (waiting_customer) state.
       const { data: reloaded } = await admin()
         .from('ai_conversations')
         .select('*')
         .eq('id', conversation.id)
         .maybeSingle()
-      if (reloaded) {
-        const reloadedConv = reloaded as unknown as AiConversationRow
-        conversation.conversation_status = reloadedConv.conversation_status
-        conversation.support_mode_at = reloadedConv.support_mode_at
-        if (!(await acquireConversationLock(conversation.id))) {
-          await logAgent('conversation_locked', null, 'info', { phone, conversationId: conversation.id })
-          console.log(`[engine] conversation still locked after unstuck conversation_id=${conversation.id}`)
-          return { action: 'wait', state: conversation.conversation_status, replyQueued: false, conversationId: conversation.id }
-        }
-      } else {
+      if (!reloaded) {
+        await logAgent('conversation_locked', null, 'info', {
+          phone: normalizedPhone,
+          conversationId: conversation.id,
+          reason: 'reload_missing',
+        })
+        return { action: 'wait', state: 'waiting_customer', replyQueued: false, conversationId: conversation.id }
+      }
+      const reloadedConv = reloaded as unknown as AiConversationRow
+      conversation.conversation_status = reloadedConv.conversation_status
+      conversation.support_mode_at = reloadedConv.support_mode_at
+      conversation.updated_at = reloadedConv.updated_at
+      if (!(await acquireConversationLock(conversation.id))) {
+        await logAgent('conversation_locked', null, 'info', {
+          phone: normalizedPhone,
+          conversationId: conversation.id,
+          reason: 'reacquire_failed',
+        })
+        console.log(`[engine] conversation still locked after unstuck conversation_id=${conversation.id}`)
         return { action: 'wait', state: conversation.conversation_status, replyQueued: false, conversationId: conversation.id }
       }
+      await logAgent('conversation_lock_acquired', null, 'info', {
+        phone: normalizedPhone,
+        conversationId: conversation.id,
+        recovered: true,
+      })
     } else {
       await logAgent('conversation_locked', null, 'info', {
-        phone,
+        phone: normalizedPhone,
         conversationId: conversation.id,
+        currentState: conversation.conversation_status,
+        reason: 'already_processing',
       })
       console.log(`[engine] conversation locked conversation_id=${conversation.id}`)
       return { action: 'wait', state: conversation.conversation_status, replyQueued: false, conversationId: conversation.id }
     }
+  } else {
+    await logAgent('conversation_lock_acquired', null, 'info', {
+      phone: normalizedPhone,
+      conversationId: conversation.id,
+    })
   }
 
   // ── LUXUS estimation trigger ──
@@ -297,74 +336,113 @@ export async function processWhatsAppMessage(
   // photos, dimensions, or asks for a final quote gets an estimate regardless of
   // conversation state. Skipped when the customer is simply answering the AI's
   // previous question (e.g. the onboarding "kitchen size" prompt).
-  if (!isAnswering && (await isEstimateTrigger(incomingText))) {
-    const estimation = await runLuxusEstimation({
+  // Every step below runs while holding the processing lock. Any error MUST
+  // leave the conversation in a usable state — waiting_customer (retryable) or
+  // human_active (handoff) — never stuck in 'processing'.
+  try {
+    if (!isAnswering && (await isEstimateTrigger(incomingText))) {
+      const estimation = await runLuxusEstimation({
+        conversation,
+        phone: normalizedPhone,
+        incomingText,
+        settings,
+        providerMessageId,
+        mediaUrl,
+      })
+      perf('engine_total', tEngine, `phone=${phone} estimate`)
+      return estimation
+    }
+
+    // ── Route to the right conversation module ──
+    const inSupportMode = Boolean(conversation.support_mode_at) || conversation.conversation_status === 'completed'
+
+    if (inSupportMode) {
+      const support = await runSupportTurn({
+        conversation,
+        phone: normalizedPhone,
+        incomingText,
+        settings,
+        providerMessageId,
+      })
+      perf('engine_total', tEngine, `phone=${phone} support`)
+      return {
+        action: support.action,
+        state: support.nextState,
+        replyQueued: support.replyQueued,
+        conversationId: conversation.id,
+      }
+    }
+
+    const onboarding = await runOnboardingTurn({
       conversation,
       phone: normalizedPhone,
       incomingText,
-      settings,
       providerMessageId,
-      mediaUrl,
-    })
-    perf('engine_total', tEngine, `phone=${phone} estimate`)
-    return estimation
-  }
-
-  // ── Route to the right conversation module ──
-  const inSupportMode = Boolean(conversation.support_mode_at) || conversation.conversation_status === 'completed'
-
-  if (inSupportMode) {
-    const support = await runSupportTurn({
-      conversation,
-      phone: normalizedPhone,
-      incomingText,
       settings,
-      providerMessageId,
+      isReturning,
+      lastInteractionAt,
+      isNewConversation,
+      conversationCreated,
+      genuinelyNew,
     })
-    perf('engine_total', tEngine, `phone=${phone} support`)
+
+    if (onboarding.complete) {
+      const completion = await runOnboardingCompletion({
+        conversation,
+        phone: normalizedPhone,
+        collected: onboarding.collected,
+        settings,
+        providerMessageId,
+      })
+      perf('engine_total', tEngine, `phone=${phone} completed`)
+      return {
+        action: 'reply',
+        state: 'completed',
+        replyQueued: completion.confirmationQueued,
+        conversationId: conversation.id,
+      }
+    }
+
+    perf('engine_total', tEngine, `phone=${phone}`)
     return {
-      action: support.action,
-      state: support.nextState,
-      replyQueued: support.replyQueued,
+      action: onboarding.decisionAction,
+      state: onboarding.nextState,
+      replyQueued: onboarding.replyQueued,
       conversationId: conversation.id,
     }
-  }
-
-  const onboarding = await runOnboardingTurn({
-    conversation,
-    phone: normalizedPhone,
-    incomingText,
-    providerMessageId,
-    settings,
-    isReturning,
-    lastInteractionAt,
-    isNewConversation,
-    conversationCreated,
-    genuinelyNew,
-  })
-
-  if (onboarding.complete) {
-    const completion = await runOnboardingCompletion({
-      conversation,
+  } catch (e) {
+    const providerFailure = isProviderFailureError(e)
+    await logAgent('processing_error', null, 'error', {
       phone: normalizedPhone,
-      collected: onboarding.collected,
-      settings,
-      providerMessageId,
-    })
-    perf('engine_total', tEngine, `phone=${phone} completed`)
-    return {
-      action: 'reply',
-      state: 'completed',
-      replyQueued: completion.confirmationQueued,
       conversationId: conversation.id,
-    }
-  }
+      providerFailure,
+    }, sanitizeErrorText(e))
+    console.log(
+      `[engine] processing error after lock acquired conversation_id=${conversation.id} providerFailure=${providerFailure} error=${sanitizeErrorText(e)}`
+    )
 
-  perf('engine_total', tEngine, `phone=${phone}`)
-  return {
-    action: onboarding.decisionAction,
-    state: onboarding.nextState,
-    replyQueued: onboarding.replyQueued,
-    conversationId: conversation.id,
+    // Both AI providers failed → queue the friendly fallback and hand off to
+    // staff so the customer is never left without a reply.
+    if (providerFailure) {
+      return handleProviderFailure({
+        phone: normalizedPhone,
+        conversation,
+        providerMessageId,
+        error: e,
+      })
+    }
+
+    // Non-provider failure → release the lock to waiting_customer so the next
+    // incoming message can retry the turn. Never leave the conversation in
+    // 'processing'.
+    await moveConversationToSafeState({
+      phone: normalizedPhone,
+      conversationId: conversation.id,
+      targetState: 'waiting_customer',
+      aiSuppressed: false,
+      handoffReason: null,
+      lastAction: 'wait',
+    })
+    return { action: 'wait', state: 'waiting_customer', replyQueued: false, conversationId: conversation.id }
   }
 }

@@ -21,6 +21,11 @@ import { deterministicDecision, type ConversationDecision } from '@/lib/ai/whats
 import { classifySubIntent } from '@/lib/ai/whatsapp-agent/intent-filter'
 import { retrieveKnowledge } from '@/lib/ai/knowledge/retriever'
 import { generateRecommendations } from '@/lib/ai/knowledge/recommender'
+import {
+  handleProviderFailure,
+  isProviderFailureError,
+  AI_PROVIDER_FALLBACK_MESSAGE,
+} from '@/lib/ai/whatsapp-agent/provider-fallback'
 import { applyLeadUpdates } from './lead-sync'
 import { applyCustomerUpdates } from './customer-sync'
 import { safeParseJson, findAdminId, type SupportTurnResult } from './types'
@@ -212,6 +217,26 @@ export async function runSupportTurn(input: {
     }
   } catch (e) {
     await logAgent('support_error', null, 'error', { phone, conversationId: conversation.id }, (e as Error).message)
+
+    // Both AI providers failed → queue the friendly fallback and hand off to
+    // staff so the customer is never left without a reply.
+    if (isProviderFailureError(e)) {
+      const fallback = await handleProviderFailure({
+        phone,
+        conversation,
+        providerMessageId,
+        error: e,
+      })
+      return {
+        mode: 'support',
+        reply: AI_PROVIDER_FALLBACK_MESSAGE,
+        action: 'handoff',
+        nextState: 'human_active',
+        replyQueued: fallback.replyQueued,
+        updatesApplied: false,
+        conversationId: conversation.id,
+      }
+    }
     reply = 'Thank you for your message. Our team is currently reviewing and will get back to you shortly.'
   }
 
@@ -239,10 +264,24 @@ export async function runSupportTurn(input: {
   }
 
   const replyUnavailable = Boolean(reply && !settings.auto_reply_enabled)
+  if (replyUnavailable) {
+    await logAgent('auto_reply_disabled', null, 'warn', {
+      phone,
+      conversationId: conversation.id,
+      reason: 'Auto reply is disabled — no automatic outgoing message queued; handing off to staff',
+      handoffState: 'human_active',
+    })
+  }
+  const nextConversationState: 'reply_queued' | 'human_active' | 'completed' = queued
+    ? 'reply_queued'
+    : replyUnavailable
+      ? 'human_active'
+      : 'completed'
+
   await admin
     .from('ai_conversations')
     .update({
-      conversation_status: queued ? 'reply_queued' : replyUnavailable ? 'human_active' : 'completed',
+      conversation_status: nextConversationState,
       ai_suppressed: replyUnavailable ? true : conversation.ai_suppressed,
       handoff_reason: replyUnavailable ? 'Auto reply is disabled; staff response required' : null,
       last_intent: subIntent.intent,
@@ -257,13 +296,14 @@ export async function runSupportTurn(input: {
     conversationId: conversation.id,
     intent: subIntent.intent,
     updates: Object.keys(updates),
+    nextState: nextConversationState,
   })
 
   return {
     mode: 'support',
     reply,
-    action: 'reply',
-    nextState: 'completed',
+    action: replyUnavailable ? 'handoff' : 'reply',
+    nextState: nextConversationState,
     replyQueued: queued,
     updatesApplied,
     conversationId: conversation.id,
@@ -282,15 +322,36 @@ async function handleDeterministicSupportTurn(
   const now = new Date().toISOString()
   const nextState = decision.next_state
 
+  // Auto reply is OFF but the deterministic decision produced a reply that the
+  // customer must still receive → hand the conversation to staff instead of
+  // silently swallowing the acknowledgement.
+  const autoReplyDisabled = Boolean(decision.reply && !settings.auto_reply_enabled)
+  const resolvedState = autoReplyDisabled ? 'human_active' : nextState
+  const resolvedHandoffReason = autoReplyDisabled
+    ? 'Auto reply is disabled; staff response required'
+    : decision.handoff_reason
+  const resolvedSuppressed =
+    autoReplyDisabled ||
+    decision.action === 'handoff' ||
+    (decision.action === 'close' && decision.reply === null)
+      ? true
+      : conversation.ai_suppressed
+
+  if (autoReplyDisabled) {
+    await logAgent('auto_reply_disabled', null, 'warn', {
+      phone,
+      conversationId: conversation.id,
+      reason: 'Auto reply is disabled — no automatic outgoing message queued; handing off to staff',
+      handoffState: 'human_active',
+    })
+  }
+
   await admin
     .from('ai_conversations')
     .update({
-      conversation_status: nextState,
-      ai_suppressed:
-        decision.action === 'handoff' || (decision.action === 'close' && decision.reply === null)
-          ? true
-          : conversation.ai_suppressed,
-      handoff_reason: decision.handoff_reason,
+      conversation_status: resolvedState,
+      ai_suppressed: resolvedSuppressed,
+      handoff_reason: resolvedHandoffReason,
       last_intent: decision.intent,
       last_action: decision.action,
       turn_count: (conversation.turn_count ?? 0) + 1,
@@ -316,15 +377,15 @@ async function handleDeterministicSupportTurn(
     phone,
     conversationId: conversation.id,
     action: decision.action,
-    nextState,
+    nextState: resolvedState,
     intent: decision.intent,
   })
 
   return {
     mode: 'support',
     reply: decision.reply,
-    action: decision.action,
-    nextState,
+    action: autoReplyDisabled ? 'handoff' : decision.action,
+    nextState: resolvedState,
     replyQueued: queued,
     updatesApplied: false,
     conversationId: conversation.id,

@@ -29,6 +29,11 @@ import { classifySubIntent } from '@/lib/ai/whatsapp-agent/intent-filter'
 import { retrieveKnowledge } from '@/lib/ai/knowledge/retriever'
 import { generateRecommendations } from '@/lib/ai/knowledge/recommender'
 import {
+  handleProviderFailure,
+  isProviderFailureError,
+  AI_PROVIDER_FALLBACK_MESSAGE,
+} from '@/lib/ai/whatsapp-agent/provider-fallback'
+import {
   REQUIRED_FIELDS,
   FIELD_QUESTIONS,
   cleanExtracted,
@@ -287,6 +292,27 @@ export async function runOnboardingTurn(input: {
       phone,
       conversationId: conversation.id,
     }, (e as Error).message)
+
+    // Both AI providers failed → queue the friendly fallback and hand off to
+    // staff instead of looping through more AI calls.
+    if (isProviderFailureError(e)) {
+      const fallback = await handleProviderFailure({
+        phone,
+        conversation,
+        providerMessageId,
+        error: e,
+      })
+      return {
+        mode: 'onboarding',
+        complete: false,
+        reply: AI_PROVIDER_FALLBACK_MESSAGE,
+        nextState: 'human_active',
+        replyQueued: fallback.replyQueued,
+        collected: conversation.collected_data ?? {},
+        decisionAction: 'handoff',
+        conversationId: conversation.id,
+      }
+    }
     return runLegacyFallbackTurn(input)
   }
 }
@@ -353,6 +379,15 @@ async function applyControllerDecision(input: {
     decision.action === 'handoff' ||
     (decision.action === 'close' && decision.reply === null) ||
     autoReplyUnavailable
+
+  if (autoReplyUnavailable) {
+    await logAgent('auto_reply_disabled', null, 'warn', {
+      phone,
+      conversationId: conversation.id,
+      reason: 'Auto reply is disabled — no automatic outgoing message queued; handing off to staff',
+      handoffState: 'human_active',
+    })
+  }
 
   const immediateState = decision.reply
     ? settings.auto_reply_enabled
@@ -571,6 +606,27 @@ async function runLegacyFallbackTurn(input: {
       reply = (next.content || '').trim()
     } catch (e) {
       await logAgent('fallback_ai_error', null, 'error', { phone }, (e as Error).message)
+
+      // Both providers failed → queue the friendly fallback and hand off to
+      // staff (never a bare "try again" loop, never a stuck conversation).
+      if (isProviderFailureError(e)) {
+        const fallback = await handleProviderFailure({
+          phone,
+          conversation,
+          providerMessageId,
+          error: e,
+        })
+        return {
+          mode: 'onboarding',
+          complete: false,
+          reply: AI_PROVIDER_FALLBACK_MESSAGE,
+          nextState: 'human_active',
+          replyQueued: fallback.replyQueued,
+          collected,
+          decisionAction: 'handoff',
+          conversationId: conversation.id,
+        }
+      }
     }
     // Provider outage or empty output must never crash the turn or queue a
     // blank message — send a graceful retry prompt instead.
@@ -606,11 +662,54 @@ async function runLegacyFallbackTurn(input: {
     }
   }
 
+  // No AI step ran. This is reached when auto-reply is disabled (all AI steps
+  // are gated on settings.auto_reply_enabled). The processing lock was acquired
+  // by the engine, so the conversation MUST be moved to a usable state here —
+  // never left in 'processing'. Auto-reply disabled means no automatic outgoing
+  // message can be sent, so the conversation is handed to staff for a manual
+  // reply.
+  if (!settings.auto_reply_enabled) {
+    await logAgent('auto_reply_disabled', null, 'warn', {
+      phone,
+      conversationId: conversation.id,
+      reason: 'Auto reply is disabled — no automatic outgoing message queued; handing off to staff',
+      handoffState: 'human_active',
+    })
+    await admin()
+      .from('ai_conversations')
+      .update({
+        conversation_status: 'human_active',
+        ai_suppressed: true,
+        handoff_reason: 'Auto reply is disabled; staff response required',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', conversation.id)
+    return {
+      mode: 'onboarding',
+      complete: false,
+      reply: null,
+      nextState: 'human_active',
+      replyQueued: false,
+      collected,
+      decisionAction: 'handoff',
+      conversationId: conversation.id,
+    }
+  }
+
+  // Defensive fallback: release the processing lock so the conversation can
+  // never be left in 'processing' by this path.
+  await admin()
+    .from('ai_conversations')
+    .update({
+      conversation_status: 'waiting_customer',
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', conversation.id)
   return {
     mode: 'onboarding',
     complete: false,
     reply: null,
-    nextState: conversation.conversation_status,
+    nextState: 'waiting_customer',
     replyQueued: false,
     collected,
     decisionAction: 'wait',

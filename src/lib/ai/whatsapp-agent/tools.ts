@@ -289,6 +289,13 @@ export async function queueOutgoingMessage(
   }
   const row = data as unknown as WhatsappMessageRow
   console.log(`[QUEUE_CREATE] outgoing_id=${row.id} source_inbound_message_id=${options?.sourceInboundMessageId ?? 'none'} conversation_id=${options?.conversationId ?? 'none'}`)
+  await logAgent('reply_queued', null, 'success', {
+    phone,
+    conversationId: options?.conversationId ?? null,
+    sourceInboundMessageId: options?.sourceInboundMessageId ?? null,
+    messageId: row.id,
+    aiGenerated: aiGenerated,
+  })
   return row
 }
 

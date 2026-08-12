@@ -21,6 +21,12 @@ export async function GET(request: Request) {
     // Never send when agent is OFF
     const settings = await getAgentSettings()
     if (!settings?.whatsapp_agent_enabled) {
+      await logAgent('outbox_skipped', null, 'info', {
+        reason: 'agent_disabled',
+        whatsapp_agent_enabled: false,
+        auto_reply_enabled: settings?.auto_reply_enabled ?? false,
+        explanation: 'Outbox not claimed while the agent is disabled',
+      })
       return NextResponse.json({ ok: true, messages: [], disabled: true })
     }
 
@@ -109,6 +115,10 @@ export async function POST(request: Request) {
           .maybeSingle()
 
         console.log(`[OUTBOX_ACK] id=${r.id} status=sent row_found=${Boolean(sentRow)} conversation_id=${sentRow?.conversation_id ?? 'none'}`)
+        await logAgent('message_sent', null, 'success', {
+          messageId: r.id,
+          conversationId: sentRow?.conversation_id ?? null,
+        })
 
         // Move conversation state after confirmed send (reply_queued → controller's post_send_state)
         if (sentRow?.conversation_id && sentRow.post_send_state) {
@@ -121,6 +131,11 @@ export async function POST(request: Request) {
             })
             .eq('id', sentRow.conversation_id)
             .in('conversation_status', ['reply_queued', 'processing'])
+          await logAgent('conversation_transitioned', null, 'success', {
+            conversationId: sentRow.conversation_id,
+            from: 'reply_queued/processing',
+            to: sentRow.post_send_state,
+          })
         }
       } else {
         const { data: msg } = await admin
