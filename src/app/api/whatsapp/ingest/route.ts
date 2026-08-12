@@ -30,7 +30,11 @@ export async function POST(request: Request) {
     const result = await handleIncomingMessage(
       String(phone),
       String(message),
-      { providerMessageId: body?.provider_message_id ?? null, mediaUrl: mediaUrl ? String(mediaUrl) : null }
+      {
+        providerMessageId: body?.provider_message_id ?? null,
+        mediaUrl: mediaUrl ? String(mediaUrl) : null,
+        olderMessages: Array.isArray(body?.older_messages) ? body.older_messages.map(String) : undefined,
+      }
     )
 
     if (PERF) console.log(`[PERF] ingest_total_ms=${Date.now() - tStart} phone=${phone}`)

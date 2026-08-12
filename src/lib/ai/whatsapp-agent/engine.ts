@@ -25,6 +25,7 @@ import { runSupportTurn } from '@/lib/ai/conversation/support'
 import {
   isStaleProcessing,
   moveConversationToSafeState,
+  recoverAutomatedHandoffConversation,
   releaseStuckProcessingLock,
 } from './agent-recovery'
 import { handleProviderFailure, isProviderFailureError, sanitizeErrorText } from './provider-fallback'
@@ -213,6 +214,24 @@ export async function processWhatsAppMessage(
   const { conversation, created: conversationCreated, genuinelyNew, isReturning, lastInteractionAt } = await getOrCreateConversation(phone)
   const isNewConversation = conversationCreated && genuinelyNew
   perf('conversation', tConv, `phone=${phone}`)
+
+  // ── Recover an AUTOMATICALLY-suppressed conversation on a new customer message ──
+  // A transient send/provider failure must never permanently stop AI replies.
+  // Only handoffs set by an automated path are recovered here; a REAL staff
+  // takeover (admin control route, reason 'Manual staff takeover' / free-form)
+  // stays suppressed. If we recover, the local copy is updated so the lock can
+  // be acquired below.
+  if (conversation.ai_suppressed && conversation.conversation_status === 'human_active') {
+    const recovered = await recoverAutomatedHandoffConversation({
+      phone: normalizedPhone,
+      conversation,
+    })
+    if (recovered) {
+      conversation.conversation_status = 'waiting_customer'
+      conversation.ai_suppressed = false
+      conversation.handoff_reason = null
+    }
+  }
 
   // ── Answer detection: bypass kitchen filter when replying to AI's previous question ──
   const isAnswering = isAnswerToPreviousQuestion(

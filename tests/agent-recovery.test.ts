@@ -5,6 +5,8 @@ import {
   isStaleProcessing,
   releaseStuckProcessingLock,
   moveConversationToSafeState,
+  isAutomatedHandoff,
+  recoverAutomatedHandoffConversation,
 } from '@/lib/ai/whatsapp-agent/agent-recovery'
 import { sanitizeErrorText, isProviderFailureError } from '@/lib/ai/whatsapp-agent/provider-fallback'
 import type { AiConversationRow } from '@/types/database'
@@ -168,5 +170,60 @@ describe('provider failure helpers', () => {
     const safe = sanitizeErrorText('Authorization: Bearer sk-abcdef1234567890abcdef1234567890 failed')
     expect(safe).not.toContain('sk-abcdef1234567890abcdef1234567890')
     expect(safe).toContain('Bearer <redacted>')
+  })
+})
+
+describe('isAutomatedHandoff / recoverAutomatedHandoffConversation', () => {
+  it('classifies automated handoff reasons as recoverable', () => {
+    expect(isAutomatedHandoff('Outgoing message failed to send; next customer message will be handled')).toBe(true)
+    expect(isAutomatedHandoff('AI providers unavailable; staff response required')).toBe(true)
+    expect(isAutomatedHandoff('Auto reply is disabled; staff response required')).toBe(true)
+    expect(isAutomatedHandoff('Controller validation or provider failure')).toBe(true)
+  })
+
+  it('never auto-recovers a REAL staff takeover', () => {
+    expect(isAutomatedHandoff('Manual staff takeover')).toBe(false)
+    expect(isAutomatedHandoff('Customer is angry, please call them')).toBe(false)
+    expect(isAutomatedHandoff(null)).toBe(false)
+    expect(isAutomatedHandoff('')).toBe(false)
+  })
+
+  it('recovers an automatically-suppressed conversation to waiting_customer (not human_active)', async () => {
+    const capturedUpdate: Record<string, unknown> = {}
+    mockDb.on('ai_conversations', (q) => {
+      if (q.mode === 'update' && q.inFilters.conversation_status) {
+        Object.assign(capturedUpdate, q.payload)
+        return { data: { id: 'conv-1' }, error: null }
+      }
+      return { data: null, error: null }
+    })
+
+    const recovered = await recoverAutomatedHandoffConversation({
+      phone: '+94760000000',
+      conversation: {
+        id: 'conv-1',
+        conversation_status: 'human_active',
+        ai_suppressed: true,
+        handoff_reason: 'AI providers unavailable; staff response required',
+      },
+    })
+
+    expect(recovered).toBe(true)
+    expect(capturedUpdate.conversation_status).toBe('waiting_customer')
+    expect(capturedUpdate.ai_suppressed).toBe(false)
+    expect(capturedUpdate.handoff_reason).toBeNull()
+  })
+
+  it('does NOT recover a real staff takeover conversation', async () => {
+    const recovered = await recoverAutomatedHandoffConversation({
+      phone: '+94760000000',
+      conversation: {
+        id: 'conv-1',
+        conversation_status: 'human_active',
+        ai_suppressed: true,
+        handoff_reason: 'Manual staff takeover',
+      },
+    })
+    expect(recovered).toBe(false)
   })
 })

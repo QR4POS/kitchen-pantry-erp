@@ -46,6 +46,7 @@ let fn: {
   isAlreadyProcessedBoundary: (msg: Record<string, unknown>, storedLastId: string | null, storedLastText: string | null) => boolean
   previewSuggestsNewer: (expectedPreview: string | null | undefined, storedLastText: string | null | undefined) => boolean
   isRowUnchangedTerminal: (lastOutcome: string | null | undefined) => boolean
+  hasSentExactText: (meta: Record<string, unknown> | undefined, text: string, phone: string) => boolean
 }
 
 beforeAll(() => {
@@ -76,13 +77,14 @@ beforeAll(() => {
     extractFunction(src, 'isAlreadyProcessedBoundary'),
     extractFunction(src, 'previewSuggestsNewer'),
     extractFunction(src, 'isRowUnchangedTerminal'),
+    extractFunction(src, 'hasSentExactText'),
   ].join('\n')
 
   const sandbox = new Function(
     'saveMessageState',
     'DEBUG',
     'createHash',
-    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal };`
+    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, hasSentExactText };`
   )
   // Deterministic fake createHash so generateFallbackId produces distinct ids
   // for distinct (chat, text, timestamp) inputs.
@@ -311,6 +313,27 @@ describe('rowSig permanent-skip recovery', () => {
   it('a successfully replied message remains protected from duplicate processing', () => {
     // already_replied is a terminal skip → treated as handled (no duplicate reply).
     expect(fn.isIngestHandled({ processed: false, skipReason: 'already_replied' })).toBe(true)
+  })
+})
+
+describe('hasSentExactText — outbox duplicate-send guard', () => {
+  it('detects an exact text already sent to the SAME chat', () => {
+    const state = makeState()
+    fn.recordSentMessage(state, 'Thanks! We will share your quotation shortly.', '94760544773')
+    expect(fn.hasSentExactText(state.meta, 'Thanks! We will share your quotation shortly.', '94760544773')).toBe(true)
+  })
+
+  it('does NOT treat a different chat or different text as an echo', () => {
+    const state = makeState()
+    fn.recordSentMessage(state, 'Thanks! We will share your quotation shortly.', '94760544773')
+    expect(fn.hasSentExactText(state.meta, 'Thanks! We will share your quotation shortly.', '94771234567')).toBe(false)
+    expect(fn.hasSentExactText(state.meta, 'A different reply', '94760544773')).toBe(false)
+  })
+
+  it('prefix text is NOT treated as an exact echo (no false skip of a different reply)', () => {
+    const state = makeState()
+    fn.recordSentMessage(state, 'What is your kitchen size in feet?', '94760544773')
+    expect(fn.hasSentExactText(state.meta, 'What is your kitchen size?', '94760544773')).toBe(false)
   })
 })
 

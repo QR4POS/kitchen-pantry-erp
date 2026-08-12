@@ -15,7 +15,14 @@ import { logAgent } from '@/lib/ai/agent-provider'
 export async function handleIncomingMessage(
   phone: string,
   message: string,
-  meta?: { providerMessageId?: string | null; mediaUrl?: string | null }
+  meta?: {
+    providerMessageId?: string | null
+    mediaUrl?: string | null
+    // Older messages from the same burst (chronological, BEFORE `message`).
+    // Persisted for history but NOT processed by the AI (only the newest message
+    // of a turn generates a reply).
+    olderMessages?: string[]
+  }
 ): Promise<{
   processed: boolean
   reason?: string
@@ -103,6 +110,24 @@ export async function handleIncomingMessage(
     } else {
       await logAgent('persist_incoming', null, 'error', { phone: normalized }, err.message)
     }
+  }
+
+  // ── Persist older messages from the same burst (history only, no AI turn) ──
+  // A customer can send several messages quickly ("Hi", "Kitchen", "Matara").
+  // All of them are preserved as incoming history so the AI sees full context,
+  // but ONLY the newest message of the turn is processed for a reply.
+  if (meta?.olderMessages && meta.olderMessages.length > 0) {
+    for (const olderText of meta.olderMessages) {
+      try {
+        await persistIncomingMessage(normalized, String(olderText), null)
+      } catch (e) {
+        const err = e as { code?: string }
+        if (err.code !== '23505') {
+          await logAgent('persist_older_message', null, 'error', { phone: normalized }, (e as Error).message)
+        }
+      }
+    }
+    await logAgent('older_messages_persisted', null, 'info', { phone: normalized, count: meta.olderMessages.length })
   }
 
   const settings = await getAgentSettings()

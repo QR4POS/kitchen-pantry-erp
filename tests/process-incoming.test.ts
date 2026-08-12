@@ -151,4 +151,32 @@ describe('handleIncomingMessage — happy path forwards to the engine', () => {
     expect(result.replyQueued).toBe(true)
     expect(logAgent).toHaveBeenCalledWith('message_persisted', null, 'info', expect.anything())
   })
+
+  it('persists burst messages as history but runs only ONE AI turn for the newest', async () => {
+    getAgentSettings.mockResolvedValue({ whatsapp_agent_enabled: true })
+    processWhatsAppMessage.mockResolvedValue({
+      action: 'reply',
+      state: 'waiting_customer',
+      replyQueued: true,
+      conversationId: 'conv-1',
+    })
+
+    const result = await handleIncomingMessage('+94760000000', 'Matara', {
+      providerMessageId: 'wa-2',
+      olderMessages: ['Hi', 'Kitchen'],
+    })
+
+    // The newest message is processed exactly once.
+    expect(processWhatsAppMessage).toHaveBeenCalledTimes(1)
+    expect(processWhatsAppMessage).toHaveBeenCalledWith(
+      '+94760000000',
+      'Matara',
+      expect.objectContaining({ providerMessageId: 'wa-2' })
+    )
+    // Older burst messages are persisted as incoming history (no provider id).
+    expect(persistIncomingMessage).toHaveBeenCalledWith('+94760000000', 'Hi', null)
+    expect(persistIncomingMessage).toHaveBeenCalledWith('+94760000000', 'Kitchen', null)
+    expect(result.processed).toBe(true)
+    expect(logAgent).toHaveBeenCalledWith('older_messages_persisted', null, 'info', expect.objectContaining({ count: 2 }))
+  })
 })

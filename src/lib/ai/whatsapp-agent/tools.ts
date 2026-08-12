@@ -286,7 +286,25 @@ export async function queueOutgoingMessage(
         .eq('dedup_key', dedupKey)
         .limit(1)
         .maybeSingle()
-      return (existing as WhatsappMessageRow | null) ?? null
+
+      const existingRow = existing as unknown as WhatsappMessageRow | null
+      if (existingRow && existingRow.status === 'failed') {
+        // A previous reply for this turn FAILED to send and was never delivered.
+        // Re-queue it (bounded) so the customer can still receive it — a failed
+        // row must not masquerade as a successfully queued reply.
+        const { data: reQueued } = await admin()
+          .from('whatsapp_messages')
+          .update({ status: 'pending', retry_count: 0, claimed_at: null, error_message: null })
+          .eq('id', existingRow.id)
+          .eq('status', 'failed')
+          .select('*')
+          .maybeSingle()
+        if (reQueued) {
+          await logAgent('reply_requeued', null, 'info', { phone, messageId: existingRow.id, dedupKey })
+          return reQueued as unknown as WhatsappMessageRow
+        }
+      }
+      return existingRow
     }
     await logAgent('queue_outgoing', null, 'error', { phone }, error.message)
     return null

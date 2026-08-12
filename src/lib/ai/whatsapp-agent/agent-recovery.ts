@@ -25,6 +25,72 @@ export const PROCESSING_LOCK_TIMEOUT_MINUTES = (() => {
 
 export const PROCESSING_LOCK_TIMEOUT_MS = PROCESSING_LOCK_TIMEOUT_MINUTES * 60 * 1000
 
+// Handoff reasons set by AUTOMATED paths (provider failure, outbox failure,
+// auto-reply disabled, controller failure). These are NOT real staff takeovers:
+// a conversation suppressed by one of these may be safely recovered when a NEW
+// customer message arrives. A real staff takeover (admin control route) uses a
+// different reason ('Manual staff takeover' or a free-form reason) and must NOT
+// be auto-recovered.
+const AUTOMATED_HANDOFF_REASONS = [
+  'Outgoing message failed to send; next customer message will be handled',
+  'Outgoing message permanently failed to send',
+  'AI providers unavailable; staff response required',
+  'Auto reply is disabled; staff response required',
+  'Controller validation or provider failure',
+  'Low controller confidence',
+  'AI reply could not be queued; staff response required',
+]
+
+export function isAutomatedHandoff(handoffReason: string | null | undefined): boolean {
+  const reason = String(handoffReason ?? '').trim()
+  if (!reason) return false
+  return AUTOMATED_HANDOFF_REASONS.some((r) => reason === r || reason.includes(r))
+}
+
+// Recover a conversation that was suppressed by an AUTOMATED failure (not a real
+// staff takeover) so the NEXT customer message re-enters the AI pipeline. Returns
+// true when the recovery reset was applied.
+export async function recoverAutomatedHandoffConversation(input: {
+  phone: string
+  conversation: Pick<AiConversationRow, 'id' | 'conversation_status' | 'ai_suppressed' | 'handoff_reason'>
+}): Promise<boolean> {
+  const { phone, conversation } = input
+  if (
+    conversation.conversation_status !== 'human_active' ||
+    conversation.ai_suppressed !== true ||
+    !isAutomatedHandoff(conversation.handoff_reason)
+  ) {
+    return false
+  }
+
+  const now = new Date().toISOString()
+  const { data, error } = await createAdminClient()
+    .from('ai_conversations')
+    .update({
+      conversation_status: 'waiting_customer',
+      ai_suppressed: false,
+      handoff_reason: null,
+      updated_at: now,
+    })
+    .eq('id', conversation.id)
+    .in('conversation_status', ['human_active'])
+    .select('id')
+    .maybeSingle()
+
+  if (error) {
+    await logAgent('conversation_recovered_automated', null, 'error', { phone, conversationId: conversation.id }, error.message)
+    return false
+  }
+  if (!data) return false
+
+  await logAgent('conversation_recovered_automated', null, 'info', {
+    phone,
+    conversationId: conversation.id,
+    reason: conversation.handoff_reason,
+  })
+  return true
+}
+
 export function isStaleProcessing(
   conversation: Pick<AiConversationRow, 'conversation_status' | 'updated_at'>,
   now = Date.now()

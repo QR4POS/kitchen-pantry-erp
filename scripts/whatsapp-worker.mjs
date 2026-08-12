@@ -399,6 +399,21 @@ function isRowUnchangedTerminal(lastOutcome) {
   return lastOutcome === 'handled' || lastOutcome === 'no_reply_terminal'
 }
 
+// True when this account already SENT the exact normalized text to this chat
+// recently (send echo). Used as an outbox duplicate guard: if an ACK failed
+// after WhatsApp actually delivered the message, the re-claimed outbox row must
+// NOT be re-sent. Exact-text + same-chat + TTL only — never prefix matching, so
+// a different reply is never skipped.
+function hasSentExactText(meta, text, phone) {
+  const norm = normalizeMessageText(text)
+  const chatKey = canonicalPhone(phone)
+  if (!norm || !chatKey) return false
+  const now = Date.now()
+  return ((meta && meta.recentSent) || []).some((e) =>
+    e.phone === chatKey && normalizeMessageText(e.text) === norm && (now - (e.ts || 0)) < RECENT_SENT_TTL_MS
+  )
+}
+
 function loadMessageState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(LAST_MESSAGES_FILE, 'utf-8'))
@@ -413,9 +428,32 @@ function loadMessageState() {
   return fresh
 }
 
+// How long a fully-handled chat's state is kept before it is pruned, so the
+// state file does not grow unboundedly. Active/recent conversations are kept.
+const CHAT_STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
+
+function pruneChatState(state) {
+  const chats = state && state.chats
+  if (!chats || typeof chats !== 'object') return
+  const now = Date.now()
+  for (const key of Object.keys(chats)) {
+    const c = chats[key]
+    const updated = c && c.updatedAt ? new Date(c.updatedAt).getTime() : 0
+    const terminal = c && (c.lastOutcome === 'handled' || c.lastOutcome === 'no_reply_terminal')
+    if (Number.isFinite(updated) && now - updated > CHAT_STATE_RETENTION_MS && terminal) {
+      delete chats[key]
+    }
+  }
+}
+
+// Atomically persist the worker state: write to a temp file, then rename over
+// the real file so a crash mid-write can never corrupt the dedup boundary.
 function saveMessageState(state) {
   try {
-    fs.writeFileSync(LAST_MESSAGES_FILE, JSON.stringify(state, null, 2))
+    pruneChatState(state)
+    const tmp = `${LAST_MESSAGES_FILE}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2))
+    fs.renameSync(tmp, LAST_MESSAGES_FILE)
   } catch (e) {
     console.error('[whatsapp-worker] failed to save message state:', e.message)
   }
@@ -796,14 +834,17 @@ async function pressEnterOrSendButton(page, input) {
     const btn = page.locator(sel).first()
     const found = await btn.count().catch(() => 0) > 0
     if (found) {
-      console.log('[worker] send button found')
+      console.log(`[worker] send button found (selector=${sel})`)
       await btn.click({ timeout: 3000 }).catch(() => {})
-      return true
+      return 'button'
     }
   }
+  // Enter on a MULTILINE message may insert a newline instead of sending.
+  // Prefer the Send button; Enter is only a fallback and the caller verifies the
+  // composer cleared (with bounded recovery) before declaring success.
   console.log('[worker] send button not found, using Enter key')
   await input.press('Enter').catch(() => {})
-  return true
+  return 'enter'
 }
 
 async function saveSendFailure(page) {
@@ -912,7 +953,7 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
     await sleep(400)
 
     console.log('[worker] sending message')
-    await pressEnterOrSendButton(page, input)
+    const sendPath = await pressEnterOrSendButton(page, input)
     await sleep(1200)
 
     // Verify the message actually left the composer before declaring success.
@@ -921,9 +962,25 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
     // messages), so an emptied composer is the strongest cheap signal the message
     // was dispatched. Without this check a failed send could be ACKed as 'sent'
     // and the customer would never receive the reply.
-    const verified = await verifyComposerCleared(input)
+    let verified = await verifyComposerCleared(input)
+    // Bounded recovery: if the composer still holds text the send did not fire.
+    // Re-click the Send button (or press Enter again) a bounded number of times
+    // before declaring failure. The composer is verified cleared first, so a
+    // genuinely-sent message is never re-sent here.
+    for (let attempt = 1; attempt <= 3 && !verified; attempt++) {
+      console.log(`[worker] send not verified (composer still holds text) — retry ${attempt}/3 path=${sendPath}`)
+      const btn = page.locator('button[aria-label*="Send" i], button[data-testid="send"], button:has(span[data-icon="send"])').first()
+      const btnFound = (await btn.count().catch(() => 0)) > 0
+      if (btnFound) {
+        await btn.click({ timeout: 3000 }).catch(() => {})
+      } else {
+        await input.press('Enter').catch(() => {})
+      }
+      await sleep(1000)
+      verified = await verifyComposerCleared(input)
+    }
     if (!verified) {
-      console.error('[worker] send verification failed: composer still holds text')
+      console.error(`[worker] send verification failed: composer still holds text (path=${sendPath})`)
       await saveSendFailure(page)
       return { ok: false, error: 'send not verified (composer not cleared)' }
     }
@@ -1184,6 +1241,15 @@ async function processOutbox(page, messageState) {
     const outboxPhone = canonicalPhone(msg.phone_number) || String(msg.phone_number || '')
     console.log(`[OUTBOX_PROCESS_START] chat=${outboxPhone} id=${msg.id}`)
     console.log(`[OUTBOX_SEND_START] id=${msg.id} phone=${msg.phone_number}`)
+    // Exactly-once reconciliation: if the exact text was already delivered to
+    // this chat recently (a previous attempt sent it but its ACK failed), do NOT
+    // send it again — this avoids duplicate customer messages after ACK loss.
+    if (hasSentExactText(messageState?.meta, msg.message, msg.phone_number)) {
+      console.log(`[OUTBOX_DUPLICATE_GUARD] chat=${outboxPhone} id=${msg.id} text_already_sent`)
+      result.sent += 1
+      results.push({ id: msg.id, status: 'sent' })
+      continue
+    }
     try {
       const outcome = await sendMessageToChat(page, msg.phone_number, msg.message, messageState, {
         mediaUrl: msg.media_url || null,
@@ -2598,38 +2664,50 @@ function isAlreadyProcessedBoundary(msg, storedLastId, storedLastText) {
 // the opened chat (#main) so a WhatsApp DOM update is visible in the log
 // instead of guessed at. Runs only with WHATSAPP_DEBUG=1. Never crashes.
 async function dumpBubbleHtml(page, max = 2) {
+  // page.evaluate() ignores a trailing { timeout } options argument and only
+  // passes a single arg — the old call `evaluate((limit, selector) => …, max,
+  // BUBBLE_ROOT_SELECTOR, {timeout})` silently broke both. Pass one args object
+  // and race against a timer so this diagnostic can never hang the worker.
+  let timer
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve([]), 8000)
+  })
   try {
-    const items = await page.evaluate((limit, bubbleRootSelector) => {
-      const root = document.querySelector(bubbleRootSelector) || document.querySelector('#main') || document.body
-      if (!root) return []
-      const sels = [
-        '[data-testid="msg-container"]',
-        '[data-testid="message-in"]',
-        '[data-testid="message-out"]',
-        '[data-testid="msg-in"]',
-        '[data-testid="msg-out"]',
-        'div[data-id$="@c.us"]',
-        '[data-pre-plain-text]',
-        '.message-in, .message-out, .tail-in, .tail-out',
-      ]
-      const out = []
-      const seen = new Set()
-      for (const sel of sels) {
-        for (const el of root.querySelectorAll(sel)) {
-          const key = el.getAttribute('data-id') || el.getAttribute('data-pre-plain-text') || el.getAttribute('data-testid') || ''
-          if (!key || seen.has(key)) continue
-          seen.add(key)
-          const attrs = {}
-          for (const at of ['data-id', 'data-testid', 'data-pre-plain-text', 'data-direction', 'role', 'aria-label']) {
-            const v = el.getAttribute(at)
-            if (v) attrs[at] = v.slice(0, 120)
+    const items = await Promise.race([
+      page.evaluate(({ limit, selector }) => {
+        const root = document.querySelector(selector) || document.querySelector('#main') || document.body
+        if (!root) return []
+        const sels = [
+          '[data-testid="msg-container"]',
+          '[data-testid="message-in"]',
+          '[data-testid="message-out"]',
+          '[data-testid="msg-in"]',
+          '[data-testid="msg-out"]',
+          'div[data-id$="@c.us"]',
+          '[data-pre-plain-text]',
+          '.message-in, .message-out, .tail-in, .tail-out',
+        ]
+        const out = []
+        const seen = new Set()
+        for (const sel of sels) {
+          for (const el of root.querySelectorAll(sel)) {
+            const key = el.getAttribute('data-id') || el.getAttribute('data-pre-plain-text') || el.getAttribute('data-testid') || ''
+            if (!key || seen.has(key)) continue
+            seen.add(key)
+            const attrs = {}
+            for (const at of ['data-id', 'data-testid', 'data-pre-plain-text', 'data-direction', 'role', 'aria-label']) {
+              const v = el.getAttribute(at)
+              if (v) attrs[at] = v.slice(0, 120)
+            }
+            out.push({ attrs, html: (el.outerHTML || '').slice(0, 1500) })
+            if (out.length >= limit) return out
           }
-          out.push({ attrs, html: (el.outerHTML || '').slice(0, 1500) })
-          if (out.length >= limit) return out
         }
-      }
-      return out
-    }, max, BUBBLE_ROOT_SELECTOR, { timeout: 8000 }).catch(() => [])
+        return out
+      }, { limit: max, selector: BUBBLE_ROOT_SELECTOR }).catch(() => []),
+      deadline,
+    ])
+    clearTimeout(timer)
 
     if (items.length === 0) {
       console.log('[bubble-html] (no bubble elements found in #main)')
@@ -2764,7 +2842,7 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
       // preview shows a newer message that has not rendered yet — retry briefly.
       retries += 1
       if (retries === 1) {
-        console.log(`[NEWEST_MISMATCH] chat=${phoneKey} preview="${String(expectedPreview).slice(0, 60)}" extractedId=${storedLastId ?? 'none'} extractedText="${boundaryText.slice(0, 60)}" retry=true`)
+        console.log(`[NEWEST_MISMATCH] chat=${phoneKey} preview="${String(expectedPreview).slice(0, 60)}" previousId=${storedLastId ?? 'none'} previousText="${boundaryText.slice(0, 60)}" retry=true`)
       }
       await sleep(NEWEST_RETRY_INTERVAL_MS)
       rows = await extractIncomingBubblesInPage(page)
@@ -2775,7 +2853,9 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
       console.log(`[NEWEST_RECOVERED] chat=${phoneKey} preview="${String(expectedPreview).slice(0, 60)}" extractedText="${(collected[0].text || '').slice(0, 60)}" attempt=${retries + 1}`)
     }
 
-    if (!storedLastId) return collected.slice(0, 1)
+    // Return ALL newly detected incoming messages (newest-first). The caller
+    // forwards the newest as the AI turn and persists the rest as burst history —
+    // no valid incoming message is silently discarded.
     return collected
   } finally {
     perf('read_new_messages', tStart, `rows=${rows.length} collected=${collected.length}`)
@@ -3159,11 +3239,15 @@ async function detectAndForwardIncoming(page, state) {
       const tExtract = Date.now()
       let last = null
       let phone = ''
+      let burstOlderMessages = []
       try {
         let newMessages = opened
           ? await withTimeout(readNewIncomingMessages(page, stored?.lastIncomingId || null, stored?.lastIncomingText || null, state.meta, key, chat.title, MAX_NEW_MESSAGES, chat.preview), READ_NEW_TIMEOUT_MS, [], 'readNewIncomingMessages')
           : []
         last = newMessages.length > 0 ? newMessages[0] : null
+        // Preserve the rest of the burst (chronological, excluding the newest
+        // which is the AI turn) so history is never lost.
+        burstOlderMessages = newMessages.length > 1 ? newMessages.slice(1).reverse().map((m) => m.text) : []
         // Row fallback ONLY when the page is healthy. If the bubble evaluate
         // timed out (pageBusy), every further Playwright call would queue behind
         // the frozen evaluate and the fallback would hang its whole budget too —
@@ -3283,7 +3367,10 @@ async function detectAndForwardIncoming(page, state) {
       if (!phone) {
         phone = opened ? await resolveChatPhone(page, chat.title, last.id || '') : (chat.title || '').replace(/\D/g, '')
       }
-      phone = canonicalPhone(phone)
+      // Canonicalize, and fall back to a previously-resolved phone for this chat
+      // (e.g. saved-contact-name chats whose URL/sender did not expose the number
+      // on this poll). Never guess a phone from a name.
+      phone = canonicalPhone(phone) || canonicalPhone(stored?.phone)
       if (!phone) {
         console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=phone_unresolved`)
         await resetChatView(page)
@@ -3426,6 +3513,7 @@ async function detectAndForwardIncoming(page, state) {
             message: messageToSend,
             provider_message_id: last.id,
             media_url: mediaUrl,
+            older_messages: burstOlderMessages.length > 0 ? burstOlderMessages : undefined,
           })
         } catch (e) {
           // Ingest failed (network / 5xx after retries). This chat's message is
@@ -3530,33 +3618,28 @@ async function detectAndForwardIncoming(page, state) {
 // and its last incoming message (text + id + timestamp) is recorded as already
 // processed. No ingest call is made — existing messages are never processed.
 // Only messages that arrive AFTER this baseline may trigger the AI.
+// Startup baseline seeds per-chat row signatures from the chat-list WITHOUT
+// opening every conversation (opening is slow and marks chats read). The row
+// signature is the replay guard: an unchanged, non-unread chat is fast-path
+// skipped; a chat whose row changes (or an unread chat) is processed fresh.
 async function createStartupBaseline(page, state) {
   const chats = await scanChatRows(page)
   let count = 0
   for (const chat of chats) {
     const key = chatStateKey(chat.title)
 
-    // Already-tracked chats keep their stored lastIncoming/rowSig, so messages
-    // received while the worker was offline are detected as new on the next
-    // poll. Only untracked chats are seeded here (first-ever run), which keeps
-    // pre-existing history from ever being replayed.
-    if (state.chats[key] && state.chats[key].lastIncomingId) continue
+    // Already-tracked chats keep their stored state so messages received while
+    // the worker was offline are detected as new on the next poll.
+    if (state.chats[key] && state.chats[key].rowSig) continue
 
-    // The user explicitly requested that we reply to UNREAD messages present
-    // upon startup. By skipping them here, they won't be in the baseline, 
-    // so the main loop will detect them as new and process them!
+    // Unread chats are NOT baselined — the main loop processes them as new.
     if (chat.hasUnread) {
       console.log(`[worker] skipping baseline for unread chat: ${chat.title}`)
       continue
     }
 
-    // Open and read the last incoming message where possible. Chats that cannot
-    // be opened still get rowSig recorded, so pre-existing messages are treated
-    // as already processed and can never be ingested on the first poll.
-    const opened = await openChatRobustly(page, chat)
-    const last = opened ? await readLastIncomingMessage(page, state.meta, chatStateKey(chat.title), chat.title) : null
-
-    const entry = {
+    state.chats[key] = {
+      ...(state.chats[key] || {}),
       title: chat.title,
       preview: chat.preview,
       rowSig: chat.raw || null,
@@ -3564,12 +3647,6 @@ async function createStartupBaseline(page, state) {
       conversationState: 'WAITING_FOR_CUSTOMER',
       updatedAt: new Date().toISOString(),
     }
-    if (last) {
-      entry.lastIncomingText = last.text
-      entry.lastIncomingId = last.id || null
-      entry.lastIncomingTs = last.ts
-    }
-    state.chats[key] = { ...(state.chats[key] || {}), ...entry }
     count += 1
   }
   saveMessageState(state)

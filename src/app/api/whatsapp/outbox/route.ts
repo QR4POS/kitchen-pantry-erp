@@ -166,18 +166,28 @@ export async function POST(request: Request) {
 
           await logAgent('message_failed', null, 'error', { messageId: r.id, attempt: retryCount }, errorMessage)
 
-          // Permanent send failure: move the conversation to human attention
+          // Send retries are exhausted. A failed outgoing message must NEVER
+          // permanently poison the AI conversation (human_active + ai_suppressed
+          // would make engine.ts return action=wait for every future message).
+          // Instead, move the conversation to a recoverable state so the NEXT new
+          // customer message re-enters the normal AI pipeline and gets a fresh
+          // reply. Real staff takeover is preserved: it is only set by the admin
+          // control route, never by a send failure.
           if (failedRow?.conversation_id) {
             await admin
               .from('ai_conversations')
               .update({
-                conversation_status: 'human_active',
-                ai_suppressed: true,
-                handoff_reason: 'Outgoing message permanently failed to send',
+                conversation_status: 'waiting_customer',
+                ai_suppressed: false,
+                handoff_reason: 'Outgoing message failed to send; next customer message will be handled',
                 updated_at: now,
               })
               .eq('id', failedRow.conversation_id)
-              .eq('conversation_status', 'reply_queued')
+              .in('conversation_status', ['reply_queued', 'processing', 'waiting_customer'])
+            await logAgent('conversation_recoverable', null, 'warn', {
+              conversationId: failedRow.conversation_id,
+              reason: 'outgoing_send_failed_but_conversation_kept_recoverable',
+            })
           }
         }
       }
