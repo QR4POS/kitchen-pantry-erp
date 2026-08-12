@@ -44,6 +44,8 @@ let fn: {
   resolveRowDirection: (row: Record<string, unknown>, dirCtx: Record<string, unknown>) => { dir: string; source: string }
   isIngestHandled: (res: Record<string, unknown> | null | undefined) => boolean
   isAlreadyProcessedBoundary: (msg: Record<string, unknown>, storedLastId: string | null, storedLastText: string | null) => boolean
+  previewSuggestsNewer: (expectedPreview: string | null | undefined, storedLastText: string | null | undefined) => boolean
+  isRowUnchangedTerminal: (lastOutcome: string | null | undefined) => boolean
 }
 
 beforeAll(() => {
@@ -72,13 +74,15 @@ beforeAll(() => {
     extractFunction(src, 'resolveRowDirection'),
     extractFunction(src, 'isIngestHandled'),
     extractFunction(src, 'isAlreadyProcessedBoundary'),
+    extractFunction(src, 'previewSuggestsNewer'),
+    extractFunction(src, 'isRowUnchangedTerminal'),
   ].join('\n')
 
   const sandbox = new Function(
     'saveMessageState',
     'DEBUG',
     'createHash',
-    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary };`
+    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal };`
   )
   // Deterministic fake createHash so generateFallbackId produces distinct ids
   // for distinct (chat, text, timestamp) inputs.
@@ -263,6 +267,50 @@ describe('isAlreadyProcessedBoundary — identical text is not auto-duplicate', 
   it('Customer B "Hello" never hits Customer A boundary (per-chat stored state)', () => {
     const aId = 'msg_fallback_94760544773_a111'
     expect(fn.isAlreadyProcessedBoundary({ id: 'msg_fallback_94771234567_b111', text: 'Hello' }, aId, 'Hello')).toBe(false)
+  })
+})
+
+describe('newest-message retry — preview shows a newer message than the boundary', () => {
+  it('triggers a re-extraction when the preview differs from the stored boundary text', () => {
+    // chat-list preview "Matara" vs stored boundary "Hi" → newer message pending.
+    expect(fn.previewSuggestsNewer('Matara', 'Hi')).toBe(true)
+  })
+
+  it('does NOT retry when the preview matches the boundary (nothing newer)', () => {
+    expect(fn.previewSuggestsNewer('Hi', 'Hi')).toBe(false)
+    expect(fn.previewSuggestsNewer('', 'Hi')).toBe(false)
+    expect(fn.previewSuggestsNewer('Matara', '')).toBe(false)
+    expect(fn.previewSuggestsNewer(undefined, 'Hi')).toBe(false)
+  })
+
+  it('still finds the NEW message when a second extraction returns it (Matara scenario)', () => {
+    // First extraction returns the already-processed boundary "Hi" (id A), so the
+    // retry gate fires. A later extraction returns the real newest "Matara" (id B).
+    const boundaryId = 'msg_fallback_94760544773_a111'
+    const mataraId = 'msg_fallback_94760544773_b222'
+    expect(fn.previewSuggestsNewer('Matara', 'Hi')).toBe(true)
+    // "Matara" is NOT the boundary → it is a new message and is processed.
+    expect(fn.isAlreadyProcessedBoundary({ id: mataraId, text: 'Matara' }, boundaryId, 'Hi')).toBe(false)
+    // "Hi" remains the boundary → it is NOT processed again.
+    expect(fn.isAlreadyProcessedBoundary({ id: boundaryId, text: 'Hi' }, boundaryId, 'Hi')).toBe(true)
+  })
+})
+
+describe('rowSig permanent-skip recovery', () => {
+  it('a chat with a stored rowSig but NO handled outcome is NOT skipped as row_unchanged', () => {
+    // Old/never-handled chats have no lastOutcome (or not_handled) → eligible for recovery.
+    expect(fn.isRowUnchangedTerminal(undefined)).toBe(false)
+    expect(fn.isRowUnchangedTerminal('not_handled')).toBe(false)
+  })
+
+  it('a chat whose last message reached a terminal outcome IS skipped as row_unchanged', () => {
+    expect(fn.isRowUnchangedTerminal('handled')).toBe(true)
+    expect(fn.isRowUnchangedTerminal('no_reply_terminal')).toBe(true)
+  })
+
+  it('a successfully replied message remains protected from duplicate processing', () => {
+    // already_replied is a terminal skip → treated as handled (no duplicate reply).
+    expect(fn.isIngestHandled({ processed: false, skipReason: 'already_replied' })).toBe(true)
   })
 })
 

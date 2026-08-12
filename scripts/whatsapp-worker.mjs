@@ -380,6 +380,25 @@ function isIngestHandled(res) {
   return skip === 'already_replied' || skip === 'matches_outgoing' || skip === 'duplicate'
 }
 
+// True when the chat-list preview promises a newer message than the stored
+// boundary — the signal that a short bounded re-extraction should run so a
+// message that has not rendered in the conversation DOM yet is recovered.
+function previewSuggestsNewer(expectedPreview, storedLastText) {
+  return Boolean(
+    expectedPreview &&
+    storedLastText &&
+    normalizeMessageText(expectedPreview) !== normalizeMessageText(storedLastText)
+  )
+}
+
+// True when a chat's last message reached a recorded terminal outcome, so the
+// row_unchanged fast-path may skip it. Any other value (or absent) means the
+// message was never confirmed handled → the chat must stay eligible for
+// recovery/reprocessing instead of being permanently skipped.
+function isRowUnchangedTerminal(lastOutcome) {
+  return lastOutcome === 'handled' || lastOutcome === 'no_reply_terminal'
+}
+
 function loadMessageState() {
   try {
     const parsed = JSON.parse(fs.readFileSync(LAST_MESSAGES_FILE, 'utf-8'))
@@ -2628,7 +2647,14 @@ async function dumpBubbleHtml(page, max = 2) {
 // boundary. When storedLastId is null (an untracked chat) only the newest
 // message is kept so pre-existing history is never replayed. A cap bounds the
 // work for chats with very long unread runs.
-async function readNewIncomingMessages(page, storedLastId, storedLastText, meta, phoneKey, customerTitle, cap = MAX_NEW_MESSAGES) {
+//
+// NEWEST-MESSAGE RETRY: the chat-list preview can show a message that the
+// opened-conversation DOM has not rendered yet (virtualized list). If the
+// newest extracted message is the already-processed boundary but the preview
+// indicates a newer message exists, we re-extract for a short bounded window so
+// the true newest message is recovered instead of being permanently skipped as
+// "already processed".
+async function readNewIncomingMessages(page, storedLastId, storedLastText, meta, phoneKey, customerTitle, cap = MAX_NEW_MESSAGES, expectedPreview) {
   const tStart = Date.now()
   const customerDigits = canonicalPhone(customerTitle)
   const customerName = String(customerTitle || '').trim().toLowerCase()
@@ -2697,21 +2723,56 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
       await dumpBubbleHtml(page, 1)
     }
 
-    for (let i = rows.length - 1; i >= 0; i--) {
-      if (collected.length >= cap) break
-      const row = rows[i]
-      const msg = await rowToIncomingMessage(page, row, dirCtx, phoneKey)
-      if (!msg) continue
-      if (DEBUG) {
-        console.log(`[direction] dir=${row.dir || 'null'} text="${(row.text || '').slice(0, 80)}" → ingested`)
+    // One scan pass over the extracted rows (newest-first). Stops at the
+    // already-processed boundary. Returns the collected new messages and whether
+    // the boundary was the newest extracted incoming message.
+    const scanPass = async (rowsToScan) => {
+      const found = []
+      let boundaryHit = false
+      for (let i = rowsToScan.length - 1; i >= 0; i--) {
+        if (found.length >= cap) break
+        const row = rowsToScan[i]
+        const msg = await rowToIncomingMessage(page, row, dirCtx, phoneKey)
+        if (!msg) continue
+        if (isAlreadyProcessedBoundary(msg, storedLastId, storedLastText)) {
+          boundaryHit = true
+          console.log(`[DEDUP_CHECK] chat=${phoneKey} messageId=${msg.id ?? 'none'} duplicate=true reason=already_processed`)
+          break
+        }
+        console.log(`[DEDUP_CHECK] chat=${phoneKey} messageId=${msg.id ?? 'none'} duplicate=false`)
+        if (found.length === 0) console.log('[INCOMING_BUBBLE_FOUND]')
+        found.push(msg)
       }
-      if (isAlreadyProcessedBoundary(msg, storedLastId, storedLastText)) {
-        console.log(`[DEDUP_CHECK] chat=${phoneKey} messageId=${msg.id ?? 'none'} duplicate=true reason=already_processed`)
-        return collected
+      return { found, boundaryHit }
+    }
+
+    // Does the chat-list preview promise a newer message than the boundary?
+    const newerPreview = previewSuggestsNewer(expectedPreview, storedLastText)
+
+    const MAX_NEWEST_RETRY = 6
+    const NEWEST_RETRY_INTERVAL_MS = 300
+    let retries = 0
+    let boundaryText = storedLastText || ''
+
+    while (true) {
+      const { found, boundaryHit } = await scanPass(rows)
+      if (found.length > 0 || !boundaryHit || !newerPreview || retries >= MAX_NEWEST_RETRY) {
+        if (found.length > 0) collected.push(...found)
+        break
       }
-      console.log(`[DEDUP_CHECK] chat=${phoneKey} messageId=${msg.id ?? 'none'} duplicate=false`)
-      if (collected.length === 0) console.log('[INCOMING_BUBBLE_FOUND]')
-      collected.push(msg)
+      // Newest extracted message is the already-processed boundary but the
+      // preview shows a newer message that has not rendered yet — retry briefly.
+      retries += 1
+      if (retries === 1) {
+        console.log(`[NEWEST_MISMATCH] chat=${phoneKey} preview="${String(expectedPreview).slice(0, 60)}" extractedId=${storedLastId ?? 'none'} extractedText="${boundaryText.slice(0, 60)}" retry=true`)
+      }
+      await sleep(NEWEST_RETRY_INTERVAL_MS)
+      rows = await extractIncomingBubblesInPage(page)
+      if (rows === null) rows = []
+    }
+
+    if (retries > 0 && collected.length > 0) {
+      console.log(`[NEWEST_RECOVERED] chat=${phoneKey} preview="${String(expectedPreview).slice(0, 60)}" extractedText="${(collected[0].text || '').slice(0, 60)}" attempt=${retries + 1}`)
     }
 
     if (!storedLastId) return collected.slice(0, 1)
@@ -3042,12 +3103,18 @@ async function detectAndForwardIncoming(page, state) {
       }
 
       // Fast path (unread-independent): skip only when the row signature is
-      // unchanged since we last handled this chat. A changed preview/time — or
-      // an unread badge — makes the chat a candidate. This detects new messages
-      // from the chat list alone, without any unread badge selector.
+      // unchanged since we last handled this chat AND the last message reached a
+      // recorded terminal outcome (reply queued / delivered, or an intentional
+      // terminal state). A chat whose row is unchanged but whose last message was
+      // NEVER handled (e.g. an older "action=wait / no reply" run that advanced
+      // rowSig) must NOT be skipped — it is re-examined and recovered once.
       if (!chat.hasUnread && stored && stored.rowSig && chat.raw && stored.rowSig === chat.raw) {
-        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=row_unchanged`)
-        continue
+        const terminal = isRowUnchangedTerminal(stored.lastOutcome)
+        if (terminal) {
+          console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=row_unchanged`)
+          continue
+        }
+        console.log(`[CHAT_RECOVERY] chat=${key} reason=row_unchanged_but_not_handled`)
       }
 
       console.log('[worker] incoming message detected')
@@ -3094,7 +3161,7 @@ async function detectAndForwardIncoming(page, state) {
       let phone = ''
       try {
         let newMessages = opened
-          ? await withTimeout(readNewIncomingMessages(page, stored?.lastIncomingId || null, stored?.lastIncomingText || null, state.meta, key, chat.title), READ_NEW_TIMEOUT_MS, [], 'readNewIncomingMessages')
+          ? await withTimeout(readNewIncomingMessages(page, stored?.lastIncomingId || null, stored?.lastIncomingText || null, state.meta, key, chat.title, MAX_NEW_MESSAGES, chat.preview), READ_NEW_TIMEOUT_MS, [], 'readNewIncomingMessages')
           : []
         last = newMessages.length > 0 ? newMessages[0] : null
         // Row fallback ONLY when the page is healthy. If the bubble evaluate
@@ -3148,10 +3215,18 @@ async function detectAndForwardIncoming(page, state) {
           await resetChatView(page)
           continue
         }
-        // Only re-read if the chat shows new activity — unread badge or
-        // the row signature (preview/time) actually changed since last poll.
+        // Only re-read if the chat shows new activity — unread badge, the row
+        // signature (preview/time) actually changed since last poll, OR the last
+        // message was never handled (recovery: re-read and re-forward it once so
+        // the AI gets another chance; the already_replied DB guard prevents
+        // duplicate replies).
         const previewChanged = stored && chat.raw && stored.rowSig !== chat.raw
-        if (chat.hasUnread || previewChanged) {
+        const needsRecovery = Boolean(
+          stored && stored.lastIncomingText &&
+          stored.lastOutcome !== 'handled' && stored.lastOutcome !== 'no_reply_terminal'
+        )
+        if (chat.hasUnread || previewChanged || needsRecovery) {
+          if (needsRecovery) console.log(`[CHAT_RECOVERY] chat=${key} reason=re-read_unhandled_last_message`)
           last = await withTimeout(readLastIncomingMessage(page, state.meta, key, chat.title), READ_LAST_TIMEOUT_MS, null, 'readLastIncomingMessage')
           if (last) {
             console.log(`[worker] re-read ok, found message in ${chat.title}`)
@@ -3366,6 +3441,7 @@ async function detectAndForwardIncoming(page, state) {
             preview: chat.preview,
             rowSig: stored?.rowSig || null,
             extractRetries: 0,
+            lastOutcome: 'not_handled',
             conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
             updatedAt: new Date().toISOString(),
           }
@@ -3392,8 +3468,12 @@ async function detectAndForwardIncoming(page, state) {
             title: chat.title,
             phone,
             preview: chat.preview,
+            // rowSig is NOT advanced while the message is unhandled, so the chat
+            // stays eligible for reprocessing. Only after the bounded retry budget
+            // is exhausted do we record a deliberate terminal state.
             rowSig: giveUp ? chat.raw || stored?.rowSig || null : stored?.rowSig || null,
             extractRetries: giveUp ? 0 : retries,
+            lastOutcome: giveUp ? 'no_reply_terminal' : 'not_handled',
             conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
             updatedAt: new Date().toISOString(),
           }
@@ -3420,6 +3500,7 @@ async function detectAndForwardIncoming(page, state) {
           lastIncomingId: last.id || null,
           lastIncomingTs: last.ts,
           extractRetries: 0,
+          lastOutcome: 'handled',
           lastSentText: stored?.lastSentText || null,
           conversationState: normalizedState,
           updatedAt: new Date().toISOString(),
