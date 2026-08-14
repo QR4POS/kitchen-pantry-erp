@@ -26,7 +26,7 @@ import {
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import type { Customer, Project, Payment } from "@/types"
-import { ProjectStatus, KitchenType, MaterialType, PaymentType } from "@/types"
+import { ProjectStatus } from "@/types"
 import { formatCurrency, formatDate } from "@/lib/auth/helpers"
 import { cn } from "@/utils/cn"
 import { DataTable, type Column } from "@/components/shared/data-table"
@@ -80,107 +80,6 @@ interface CustomerMessage {
   is_outgoing: boolean
 }
 
-const MOCK_CUSTOMER: Customer = {
-  id: "mock-customer-1",
-  profile_id: "mock-user-1",
-  full_name: "Sharma Modular Kitchens",
-  address: "42, Industrial Area, Phase 2",
-  city: "Bengaluru",
-  state: "Karnataka",
-  phone: "+91 98765 43210",
-  email: "contact@sharmakitchens.in",
-  notes: "Premium kitchen solutions provider",
-  created_at: "2026-01-05T10:30:00Z",
-}
-
-const MOCK_PROJECTS: Project[] = [
-  {
-    id: "mock-p1", name: "Modern L-Shape Kitchen", description: "", customer_id: "mock-customer-1",
-    contractor_id: undefined, staff_id: undefined,
-    kitchen_type: "LShape" as unknown as KitchenType, length: 12, width: 8, height: 10,
-    material_type: "MDF" as MaterialType, status: ProjectStatus.Completed,
-    estimated_cost: 180000, contractor_cost: 180000,
-    customer_price: 285000, profit_margin: 25,
-    start_date: "2026-01-15", expected_end_date: "2026-03-15", completed_date: "2026-03-10",
-    address: "42, Indl Area", city: "Bengaluru", notes: "",
-    created_at: "2026-01-10T08:00:00Z", updated_at: "2026-03-20T12:00:00Z",
-  },
-  {
-    id: "mock-p2", name: "Premium Island Kitchen", description: "", customer_id: "mock-customer-1",
-    contractor_id: undefined, staff_id: undefined,
-    kitchen_type: "Island" as unknown as KitchenType, length: 15, width: 10, height: 10,
-    material_type: "Acrylic" as unknown as MaterialType, status: ProjectStatus.Production,
-    estimated_cost: 280000, contractor_cost: 280000,
-    customer_price: 420000, profit_margin: 28,
-    start_date: "2026-04-01", expected_end_date: "2026-06-15",
-    address: "42, Indl Area", city: "Bengaluru", notes: "",
-    created_at: "2026-03-25T09:00:00Z", updated_at: "2026-04-15T14:00:00Z",
-  },
-  {
-    id: "mock-p3", name: "Compact U-Shape Kitchen", description: "", customer_id: "mock-customer-1",
-    contractor_id: undefined, staff_id: undefined,
-    kitchen_type: "UShape" as unknown as KitchenType, length: 10, width: 7, height: 10,
-    material_type: "Plywood" as unknown as MaterialType, status: ProjectStatus.Approved,
-    estimated_cost: 110000, contractor_cost: 110000,
-    customer_price: 195000, profit_margin: 30,
-    start_date: "2026-05-01", expected_end_date: "2026-07-01",
-    address: "42, Indl Area", city: "Bengaluru", notes: "",
-    created_at: "2026-04-20T11:00:00Z", updated_at: "2026-04-28T16:00:00Z",
-  },
-  {
-    id: "mock-p4", name: "Parallel Kitchen Renovation", description: "", customer_id: "mock-customer-1",
-    contractor_id: undefined, staff_id: undefined,
-    kitchen_type: "Parallel" as unknown as KitchenType, length: 14, width: 6, height: 10,
-    material_type: "Melamine" as unknown as MaterialType, status: ProjectStatus.QuotationSent,
-    estimated_cost: 85000, contractor_cost: 85000,
-    customer_price: 158000, profit_margin: 32,
-    start_date: undefined, expected_end_date: undefined,
-    address: "42, Indl Area", city: "Bengaluru", notes: "",
-    created_at: "2026-05-10T07:00:00Z", updated_at: "2026-05-12T10:00:00Z",
-  },
-  {
-    id: "mock-p5", name: "Straight Kitchen Setup", description: "", customer_id: "mock-customer-1",
-    contractor_id: undefined, staff_id: undefined,
-    kitchen_type: "Straight" as unknown as KitchenType, length: 8, width: 5, height: 10,
-    material_type: "HPL" as unknown as MaterialType, status: ProjectStatus.NewLead,
-    estimated_cost: 60000, contractor_cost: 60000,
-    customer_price: 112000, profit_margin: 35,
-    start_date: undefined, expected_end_date: undefined,
-    address: "42, Indl Area", city: "Bengaluru", notes: "",
-    created_at: "2026-06-01T06:00:00Z", updated_at: "2026-06-01T06:00:00Z",
-  },
-]
-
-const MOCK_PAYMENTS: Payment[] = [
-  { id: "mock-pay1", project_id: "mock-p1", customer_id: "mock-customer-1", amount: 100000, payment_type: "CUSTOMER_PAYMENT" as unknown as PaymentType, payment_method: "Bank Transfer", status: "paid", paid_date: "2026-01-20", description: "Advance payment", created_at: "2026-01-20T10:00:00Z" },
-  { id: "mock-pay2", project_id: "mock-p1", customer_id: "mock-customer-1", amount: 100000, payment_type: "CUSTOMER_PAYMENT" as unknown as PaymentType, payment_method: "Cheque", status: "paid", paid_date: "2026-02-15", description: "Progress payment", created_at: "2026-02-15T11:00:00Z" },
-  { id: "mock-pay3", project_id: "mock-p1", customer_id: "mock-customer-1", amount: 85000, payment_type: "CUSTOMER_PAYMENT" as unknown as PaymentType, payment_method: "Bank Transfer", status: "paid", paid_date: "2026-03-10", description: "Final payment", created_at: "2026-03-10T14:00:00Z" },
-  { id: "mock-pay4", project_id: "mock-p2", customer_id: "mock-customer-1", amount: 150000, payment_type: "CUSTOMER_PAYMENT" as unknown as PaymentType, payment_method: "Bank Transfer", status: "paid", paid_date: "2026-04-05", description: "Advance payment", created_at: "2026-04-05T09:00:00Z" },
-  { id: "mock-pay5", project_id: "mock-p2", customer_id: "mock-customer-1", amount: 150000, payment_type: "CUSTOMER_PAYMENT" as unknown as PaymentType, payment_method: "UPI", status: "pending", description: "Progress payment due", created_at: "2026-05-01T08:00:00Z" },
-  { id: "mock-pay6", project_id: "mock-p3", customer_id: "mock-customer-1", amount: 50000, payment_type: "CUSTOMER_PAYMENT" as unknown as PaymentType, payment_method: "Cash", status: "paid", paid_date: "2026-04-25", description: "Advance payment", created_at: "2026-04-25T10:00:00Z" },
-  { id: "mock-pay7", project_id: "mock-p3", customer_id: "mock-customer-1", amount: 145000, payment_type: "CUSTOMER_PAYMENT" as unknown as PaymentType, payment_method: "Bank Transfer", status: "pending", description: "Balance payment", created_at: "2026-05-01T10:00:00Z" },
-]
-
-const MOCK_DOCUMENTS: CustomerDocument[] = [
-  { id: "mock-d1", project_id: "mock-p1", project_name: "Modern L-Shape Kitchen", file_name: "floor-plan-v2.pdf", file_url: "#", file_type: "application/pdf", created_at: "2026-01-12T10:00:00Z" },
-  { id: "mock-d2", project_id: "mock-p1", project_name: "Modern L-Shape Kitchen", file_name: "3d-render-front.jpg", file_url: "#", file_type: "image/jpeg", created_at: "2026-01-14T11:00:00Z" },
-  { id: "mock-d3", project_id: "mock-p1", project_name: "Modern L-Shape Kitchen", file_name: "quotation-final.pdf", file_url: "#", file_type: "application/pdf", created_at: "2026-01-18T09:00:00Z" },
-  { id: "mock-d4", project_id: "mock-p2", project_name: "Premium Island Kitchen", file_name: "design-concept.png", file_url: "#", file_type: "image/png", created_at: "2026-03-28T14:00:00Z" },
-  { id: "mock-d5", project_id: "mock-p2", project_name: "Premium Island Kitchen", file_name: "material-specs.xlsx", file_url: "#", file_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", created_at: "2026-04-02T15:00:00Z" },
-  { id: "mock-d6", project_id: "mock-p3", project_name: "Compact U-Shape Kitchen", file_name: "measurement-sheet.pdf", file_url: "#", file_type: "application/pdf", created_at: "2026-04-22T10:00:00Z" },
-]
-
-const MOCK_MESSAGES: CustomerMessage[] = [
-  { id: "mock-msg1", sender: "You", content: "Hi Mr. Sharma, we've completed the initial design for your L-Shape kitchen. Would you like to schedule a review?", created_at: "2026-01-12T10:30:00Z", is_outgoing: true },
-  { id: "mock-msg2", sender: "Rajesh Sharma", content: "That sounds great! I'm free on Thursday afternoon around 3 PM.", created_at: "2026-01-12T11:15:00Z", is_outgoing: false },
-  { id: "mock-msg3", sender: "You", content: "Perfect, I'll book Thursday 3 PM. I'll send over the design preview beforehand.", created_at: "2026-01-12T11:20:00Z", is_outgoing: true },
-  { id: "mock-msg4", sender: "You", content: "The design preview is ready. Please find the 3D render attached.", created_at: "2026-01-13T09:00:00Z", is_outgoing: true },
-  { id: "mock-msg5", sender: "Rajesh Sharma", content: "Excellent! The design looks beautiful. I love the color scheme and layout.", created_at: "2026-01-15T16:45:00Z", is_outgoing: false },
-  { id: "mock-msg6", sender: "You", content: "Thank you! We'll begin production next week once the advance payment is processed.", created_at: "2026-01-15T17:00:00Z", is_outgoing: true },
-  { id: "mock-msg7", sender: "Rajesh Sharma", content: "I've made the advance payment of Rs.1,00,000 via bank transfer. Please confirm.", created_at: "2026-01-20T10:05:00Z", is_outgoing: false },
-  { id: "mock-msg8", sender: "You", content: "Payment received and confirmed. We'll start production on Monday!", created_at: "2026-01-20T11:30:00Z", is_outgoing: true },
-]
-
 function getInitials(name: string): string {
   return name
     .split(" ")
@@ -208,46 +107,49 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
   const [documents, setDocuments] = useState<CustomerDocument[]>([])
   const [messages, setMessages] = useState<CustomerMessage[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     async function fetchData() {
+      setLoading(true)
+      setError(null)
       try {
-        const { data: customerData } = await supabase
+        const { data: customerData, error: customerError } = await supabase
           .from("customers")
           .select("*")
           .eq("id", id)
           .single()
 
+        if (customerError) throw customerError
         if (customerData) {
           setCustomer(customerData as unknown as Customer)
         }
 
-        const { data: projectRows } = await supabase
+        const { data: projectRows, error: projectError } = await supabase
           .from("projects")
           .select("*")
           .eq("customer_id", id)
           .order("created_at", { ascending: false })
 
-        if (projectRows && projectRows.length > 0) {
-          setProjects(projectRows as unknown as Project[])
-        }
+        if (projectError) throw projectError
+        setProjects((projectRows ?? []) as unknown as Project[])
 
-        const { data: paymentRows } = await supabase
+        const { data: paymentRows, error: paymentError } = await supabase
           .from("payments")
           .select("*")
           .eq("customer_id", id)
           .order("created_at", { ascending: false })
 
-        if (paymentRows && paymentRows.length > 0) {
-          setPayments(paymentRows as unknown as Payment[])
-        }
+        if (paymentError) throw paymentError
+        setPayments((paymentRows ?? []) as unknown as Payment[])
 
-        const { data: projectFileRows } = await supabase
+        const { data: projectFileRows, error: fileError } = await supabase
           .from("project_files")
           .select("*, projects!inner(customer_id, project_name)")
           .eq("projects.customer_id", id)
           .order("created_at", { ascending: false })
 
+        if (fileError) throw fileError
         if (projectFileRows && projectFileRows.length > 0) {
           const docs: CustomerDocument[] = (projectFileRows as unknown as Record<string, unknown>[]).map((r) => ({
             id: r.id as string,
@@ -261,12 +163,13 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
           setDocuments(docs)
         }
 
-        const { data: messageRows } = await supabase
+        const { data: messageRows, error: messageError } = await supabase
           .from("messages")
           .select("*, conversations!inner(project_id), projects!inner(customer_id)")
           .eq("projects.customer_id", id)
           .order("created_at", { ascending: true })
 
+        if (messageError) throw messageError
         if (messageRows && messageRows.length > 0) {
           const msgs: CustomerMessage[] = (messageRows as unknown as Record<string, unknown>[]).map((r) => ({
             id: r.id as string,
@@ -277,8 +180,8 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
           }))
           setMessages(msgs)
         }
-      } catch {
-        // Fall back to mock data
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load customer details")
       } finally {
         setLoading(false)
       }
@@ -287,51 +190,26 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
     fetchData()
   }, [id, supabase])
 
-  const displayCustomer = useMemo(() => {
-    if (customer) return customer
-    return MOCK_CUSTOMER
-  }, [customer])
-
-  const displayProjects = useMemo(() => {
-    if (projects.length > 0) return projects
-    return MOCK_PROJECTS
-  }, [projects])
-
-  const displayPayments = useMemo(() => {
-    if (payments.length > 0) return payments
-    return MOCK_PAYMENTS
-  }, [payments])
-
-  const displayDocuments = useMemo(() => {
-    if (documents.length > 0) return documents
-    return MOCK_DOCUMENTS
-  }, [documents])
-
-  const displayMessages = useMemo(() => {
-    if (messages.length > 0) return messages
-    return MOCK_MESSAGES
-  }, [messages])
-
   const stats = useMemo(() => {
-    const totalProjects = displayProjects.length
-    const completedProjects = displayProjects.filter(
+    const totalProjects = projects.length
+    const completedProjects = projects.filter(
       (p) => p.status === ProjectStatus.Completed
     ).length
-    const totalPayments = displayPayments.reduce((sum, p) => sum + p.amount, 0)
-    const pendingAmount = displayPayments
+    const totalPayments = payments.reduce((sum, p) => sum + p.amount, 0)
+    const pendingAmount = payments
       .filter((p) => p.status !== "paid")
       .reduce((sum, p) => sum + p.amount, 0)
     return { totalProjects, completedProjects, totalPayments, pendingAmount }
-  }, [displayProjects, displayPayments])
+  }, [projects, payments])
 
   const statusDistribution = useMemo(() => {
     const counts: Record<string, number> = {}
-    displayProjects.forEach((p) => {
+    projects.forEach((p) => {
       const key = p.status.replace(/([a-z])([A-Z])/g, "$1 $2")
       counts[key] = (counts[key] ?? 0) + 1
     })
     return Object.entries(counts).map(([name, value]) => ({ name, value }))
-  }, [displayProjects])
+  }, [projects])
 
   const projectColumns: Column<Project>[] = [
     { key: "name", label: "Project Name", sortable: true },
@@ -400,7 +278,52 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
     },
   ]
 
-  const customerName = displayCustomer.full_name ?? displayCustomer.company ?? "Unnamed Customer"
+  if (loading) {
+    return (
+      <div className="space-y-6 animate-pulse">
+        <div className="h-8 w-32 bg-muted rounded" />
+        <div className="h-40 bg-muted rounded-xl" />
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="h-24 bg-muted rounded-xl" />
+          ))}
+        </div>
+        <div className="h-64 bg-muted rounded-xl" />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <Button variant="ghost" size="sm" onClick={() => router.push("/admin/customers")} className="gap-2 -ml-2">
+          <ArrowLeft className="size-4" />
+          Back to Customers
+        </Button>
+        <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-6 text-destructive">
+          <h2 className="text-lg font-semibold">Error loading customer</h2>
+          <p className="text-sm mt-1">{error}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!customer) {
+    return (
+      <div className="space-y-6">
+        <Button variant="ghost" size="sm" onClick={() => router.push("/admin/customers")} className="gap-2 -ml-2">
+          <ArrowLeft className="size-4" />
+          Back to Customers
+        </Button>
+        <div className="rounded-lg border p-6 text-muted-foreground">
+          <h2 className="text-lg font-semibold">Customer not found</h2>
+          <p className="text-sm mt-1">The requested customer does not exist.</p>
+        </div>
+      </div>
+    )
+  }
+
+  const customerName = customer.full_name ?? customer.company ?? "Unnamed Customer"
   const initials = getInitials(customerName)
 
   return (
@@ -417,7 +340,7 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
           <CardContent className="p-6">
             <div className="flex flex-col sm:flex-row items-start gap-6">
               <Avatar className="size-20">
-                <AvatarImage src={displayCustomer.email ? `https://ui-avatars.com/api/?name=${encodeURIComponent(customerName)}&background=3b82f6&color=fff` : undefined} />
+                <AvatarImage src={customer.email ? `https://ui-avatars.com/api/?name=${encodeURIComponent(customerName)}&background=3b82f6&color=fff` : undefined} />
                 <AvatarFallback className="text-2xl bg-primary text-primary-foreground">{initials}</AvatarFallback>
               </Avatar>
               <div className="flex-1 space-y-3 min-w-0">
@@ -429,22 +352,22 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-sm">
-                  {displayCustomer.phone && (
+                  {customer.phone && (
                     <span className="flex items-center gap-1.5 text-muted-foreground">
                       <Phone className="size-3.5" />
-                      {displayCustomer.phone}
+                      {customer.phone}
                     </span>
                   )}
-                  {displayCustomer.email && (
+                  {customer.email && (
                     <span className="flex items-center gap-1.5 text-muted-foreground">
                       <Mail className="size-3.5" />
-                      {displayCustomer.email}
+                      {customer.email}
                     </span>
                   )}
-                  {(displayCustomer.address || displayCustomer.city) && (
+                  {(customer.address || customer.city) && (
                     <span className="flex items-center gap-1.5 text-muted-foreground">
                       <MapPin className="size-3.5" />
-                      {[displayCustomer.address, displayCustomer.city, displayCustomer.state]
+                      {[customer.address, customer.city, customer.state]
                         .filter(Boolean)
                         .join(", ")}
                     </span>
@@ -464,11 +387,11 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                   <FileText className="size-4 mr-1.5" />
                   Generate Quotation
                 </Button>
-                {displayCustomer.phone && (
+                {customer.phone && (
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => window.open(`https://wa.me/${displayCustomer.phone!.replace(/[\s+]/g, "")}`, "_blank")}
+                    onClick={() => window.open(`https://wa.me/${customer.phone!.replace(/[\s+]/g, "")}`, "_blank")}
                   >
                     <MessageSquare className="size-4 mr-1.5" />
                     WhatsApp
@@ -541,7 +464,7 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                 )}
                 <DataTable
                   columns={projectColumns}
-                  data={displayProjects}
+                  data={projects}
                   loading={loading}
                   emptyMessage="No projects found"
                 />
@@ -550,16 +473,16 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
               <TabsContent value="payments" className="px-6 pb-6">
                 <DataTable
                   columns={paymentColumns}
-                  data={displayPayments}
+                  data={payments}
                   loading={loading}
                   emptyMessage="No payments found"
                 />
               </TabsContent>
 
               <TabsContent value="documents" className="px-6 pb-6">
-                {displayDocuments.length > 0 ? (
+                {documents.length > 0 ? (
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                    {displayDocuments.map((doc) => {
+                    {documents.map((doc) => {
                       const FileIcon = getFileIcon(doc.file_type)
                       return (
                         <Card key={doc.id} className="group hover:shadow-md transition-shadow">
@@ -593,9 +516,9 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
               </TabsContent>
 
               <TabsContent value="communication" className="px-6 pb-6">
-                {displayMessages.length > 0 ? (
+                {messages.length > 0 ? (
                   <div className="space-y-4 max-w-3xl">
-                    {displayMessages.map((msg) => (
+                    {messages.map((msg) => (
                       <div
                         key={msg.id}
                         className={cn(

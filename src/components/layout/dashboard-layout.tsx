@@ -51,9 +51,9 @@ export function DashboardLayout({ children, user }: DashboardLayoutProps) {
   useEffect(() => {
     if (isMobile) {
       setSidebarOpen(false)
-      setSidebarCollapsed(true)
     } else {
       setSidebarOpen(true)
+      setSidebarCollapsed(false)
     }
   }, [isMobile, setSidebarOpen, setSidebarCollapsed])
 

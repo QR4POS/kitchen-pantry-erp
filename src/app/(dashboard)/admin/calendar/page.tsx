@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { motion } from "framer-motion"
 import {
   CalendarDays,
@@ -10,11 +10,14 @@ import {
   Circle,
 } from "lucide-react"
 import { formatDate } from "@/lib/auth/helpers"
+import { createClient } from "@/lib/supabase/client"
+import { useToast } from "@/hooks/use-toast"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Skeleton } from "@/components/ui/skeleton"
 
 import {
   Dialog,
@@ -74,35 +77,13 @@ const EVENT_BADGE_VARIANTS: Record<EventType, "default" | "success" | "warning" 
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 
-function buildMockEvents(): CalendarEvent[] {
-  const now = new Date()
-  const year = now.getFullYear()
-  const month = now.getMonth()
-  const events: CalendarEvent[] = []
-  const types: EventType[] = ["Site Visit", "Installation", "Payment", "Deadline", "Contractor Schedule"]
-  const titles: Record<EventType, string[]> = {
-    "Site Visit": ["Kitchen site inspection", "Measurement visit", "Site evaluation"],
-    Installation: ["Cabinet installation", "Countertop fitting", "Hardware installation"],
-    Payment: ["Advance payment due", "Milestone payment", "Final payment"],
-    Deadline: ["Design approval deadline", "Material order cut-off", "Project handover"],
-    "Contractor Schedule": ["Electrician scheduled", "Plumber visit", "Flooring crew"],
-  }
+function parseDateOnly(value: string): Date {
+  const [y, m, d] = value.split("-").map(Number)
+  return new Date(y, (m || 1) - 1, d || 1)
+}
 
-  for (let i = 0; i < 12; i++) {
-    const type = types[i % types.length]
-    const day = (i * 3 + 5) % 28 + 1
-    const date = new Date(year, month, day)
-    const typeTitles = titles[type]
-    events.push({
-      id: `event-${i}`,
-      title: typeTitles[i % typeTitles.length],
-      date,
-      type,
-      description: `Scheduled ${type.toLowerCase()} for ${formatDate(date)}. Details to be confirmed.`,
-    })
-  }
-
-  return events
+function toDateOnly(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
 }
 
 function getMonthData(year: number, month: number) {
@@ -119,13 +100,55 @@ function isSameDay(a: Date, b: Date) {
 }
 
 export default function CalendarPage() {
+  const supabase = createClient()
+  const { addToast: toast } = useToast()
   const today = useMemo(() => new Date(), [])
   const [viewDate, setViewDate] = useState(() => new Date())
-  const [events, setEvents] = useState<CalendarEvent[]>(buildMockEvents)
+  const [events, setEvents] = useState<CalendarEvent[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
   const [selectedDay, setSelectedDay] = useState<Date | null>(null)
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [dayDialogOpen, setDayDialogOpen] = useState(false)
   const [newEvent, setNewEvent] = useState({ title: "", type: "Site Visit" as EventType, description: "" })
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadEvents() {
+      setLoading(true)
+      setError(null)
+      try {
+        const { data, error: dbError } = await supabase
+          .from("calendar_events")
+          .select("id, title, event_date, event_type, description")
+          .order("event_date", { ascending: true })
+        if (dbError) throw dbError
+        if (cancelled) return
+        setEvents(
+          (data ?? []).map((e) => ({
+            id: e.id,
+            title: e.title,
+            date: parseDateOnly(e.event_date),
+            type: e.event_type as EventType,
+            description: e.description ?? "",
+          }))
+        )
+      } catch (err) {
+        if (cancelled) return
+        const message = err instanceof Error ? err.message : "Failed to load events"
+        setError(message)
+        toast({ title: "Error loading calendar", description: message, variant: "destructive" })
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    loadEvents()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const year = viewDate.getFullYear()
   const month = viewDate.getMonth()
@@ -175,20 +198,45 @@ export default function CalendarPage() {
     setDayDialogOpen(true)
   }
 
-  function handleAddEvent() {
+  async function handleAddEvent() {
     if (!newEvent.title.trim()) return
-    setEvents((prev) => [
-      ...prev,
-      {
-        id: `event-${Date.now()}`,
-        title: newEvent.title,
-        date: selectedDay ?? new Date(year, month, 1),
-        type: newEvent.type,
-        description: newEvent.description,
-      },
-    ])
-    setNewEvent({ title: "", type: "Site Visit", description: "" })
-    setAddDialogOpen(false)
+    const date = selectedDay ?? new Date(year, month, 1)
+    setSaving(true)
+    try {
+      const { data, error: dbError } = await supabase
+        .from("calendar_events")
+        .insert({
+          title: newEvent.title.trim(),
+          event_date: toDateOnly(date),
+          event_type: newEvent.type,
+          description: newEvent.description,
+        })
+        .select("id, title, event_date, event_type, description")
+        .single()
+      if (dbError) throw dbError
+      setEvents((prev) => [
+        ...prev,
+        {
+          id: data.id,
+          title: data.title,
+          date,
+          type: data.event_type as EventType,
+          description: data.description ?? "",
+        },
+      ])
+      setNewEvent({ title: "", type: "Site Visit", description: "" })
+      setAddDialogOpen(false)
+      setSelectedDay(null)
+      toast({ title: "Event added", description: "Event has been saved to the calendar." })
+    } catch (err) {
+      toast({
+        title: "Error adding event",
+        description: err instanceof Error ? err.message : "Failed to save event.",
+        variant: "destructive",
+      })
+    } finally {
+      setSaving(false)
+    }
   }
 
   function openAddDialog() {
@@ -211,6 +259,12 @@ export default function CalendarPage() {
         </Button>
       </div>
 
+      {error && (
+        <motion.div variants={itemVariants} className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
+          {error}
+        </motion.div>
+      )}
+
       <motion.div variants={itemVariants}>
         <Card>
           <CardContent className="p-4 sm:p-6">
@@ -229,65 +283,78 @@ export default function CalendarPage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-7 gap-px bg-border rounded-lg overflow-hidden">
-              {DAY_NAMES.map((name) => (
-                <div
-                  key={name}
-                  className="bg-muted/50 px-2 py-2 text-center text-xs font-medium text-muted-foreground"
-                >
-                  {name}
+            {loading ? (
+              <div className="space-y-2">
+                <div className="grid grid-cols-7 gap-px">
+                  {Array.from({ length: 7 }).map((_, i) => (
+                    <Skeleton key={i} className="h-4" />
+                  ))}
                 </div>
-              ))}
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-24 rounded-md" />
+                ))}
+              </div>
+            ) : (
+              <div className="grid grid-cols-7 gap-px bg-border rounded-lg overflow-hidden">
+                {DAY_NAMES.map((name) => (
+                  <div
+                    key={name}
+                    className="bg-muted/50 px-2 py-2 text-center text-xs font-medium text-muted-foreground"
+                  >
+                    {name}
+                  </div>
+                ))}
 
-              {weekRows.map((row) =>
-                row.days.map((day, idx) => {
-                  if (day === null) {
-                    return <div key={`empty-${row.week}-${idx}`} className="bg-card min-h-[90px] sm:min-h-[110px]" />
-                  }
-                  const date = new Date(year, month, day)
-                  const isToday = isSameDay(date, today)
-                  const dayEvts = monthEvents.filter((e) => e.date.getDate() === day)
+                {weekRows.map((row) =>
+                  row.days.map((day, idx) => {
+                    if (day === null) {
+                      return <div key={`empty-${row.week}-${idx}`} className="bg-card min-h-[90px] sm:min-h-[110px]" />
+                    }
+                    const date = new Date(year, month, day)
+                    const isToday = isSameDay(date, today)
+                    const dayEvts = monthEvents.filter((e) => e.date.getDate() === day)
 
-                  return (
-                    <button
-                      key={`day-${day}`}
-                      type="button"
-                      onClick={() => handleDayClick(day)}
-                      className="bg-card min-h-[90px] sm:min-h-[110px] p-1.5 text-left transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring text-xs"
-                    >
-                      <span
-                        className={
-                          "inline-flex size-6 items-center justify-center rounded-full text-sm " +
-                          (isToday
-                            ? "bg-primary text-primary-foreground font-bold"
-                            : "text-foreground")
-                        }
+                    return (
+                      <button
+                        key={`day-${day}`}
+                        type="button"
+                        onClick={() => handleDayClick(day)}
+                        className="bg-card min-h-[90px] sm:min-h-[110px] p-1.5 text-left transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring text-xs"
                       >
-                        {day}
-                      </span>
-                      <div className="mt-1 flex flex-col gap-0.5">
-                        {dayEvts.slice(0, 3).map((evt) => (
-                          <div
-                            key={evt.id}
-                            className="flex items-center gap-1 truncate"
-                          >
-                            <span className={`size-1.5 shrink-0 rounded-full ${EVENT_COLORS[evt.type]}`} />
-                            <span className="truncate text-[11px] text-muted-foreground leading-tight">
-                              {evt.title}
+                        <span
+                          className={
+                            "inline-flex size-6 items-center justify-center rounded-full text-sm " +
+                            (isToday
+                              ? "bg-primary text-primary-foreground font-bold"
+                              : "text-foreground")
+                          }
+                        >
+                          {day}
+                        </span>
+                        <div className="mt-1 flex flex-col gap-0.5">
+                          {dayEvts.slice(0, 3).map((evt) => (
+                            <div
+                              key={evt.id}
+                              className="flex items-center gap-1 truncate"
+                            >
+                              <span className={`size-1.5 shrink-0 rounded-full ${EVENT_COLORS[evt.type]}`} />
+                              <span className="truncate text-[11px] text-muted-foreground leading-tight">
+                                {evt.title}
+                              </span>
+                            </div>
+                          ))}
+                          {dayEvts.length > 3 && (
+                            <span className="text-[11px] text-muted-foreground pl-2">
+                              +{dayEvts.length - 3} more
                             </span>
-                          </div>
-                        ))}
-                        {dayEvts.length > 3 && (
-                          <span className="text-[11px] text-muted-foreground pl-2">
-                            +{dayEvts.length - 3} more
-                          </span>
-                        )}
-                      </div>
-                    </button>
-                  )
-                })
-              )}
-            </div>
+                          )}
+                        </div>
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-4 mt-4 text-xs text-muted-foreground">
               {(Object.keys(EVENT_COLORS) as EventType[]).map((type) => (
@@ -324,7 +391,7 @@ export default function CalendarPage() {
                         {evt.type}
                       </Badge>
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">{evt.description}</p>
+                    <p className="text-xs text-muted-foreground mt-1">{evt.description || "No description"}</p>
                   </div>
                 </div>
               ))}
@@ -360,7 +427,7 @@ export default function CalendarPage() {
               <Label>Date</Label>
               <Input
                 type="date"
-                value={selectedDay ? selectedDay.toISOString().split("T")[0] : ""}
+                value={selectedDay ? toDateOnly(selectedDay) : ""}
                 onChange={(e) => {
                   const parts = e.target.value.split("-")
                   setSelectedDay(new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])))
@@ -403,7 +470,9 @@ export default function CalendarPage() {
             <Button variant="outline" onClick={() => setAddDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleAddEvent}>Save Event</Button>
+            <Button onClick={handleAddEvent} disabled={saving || !newEvent.title.trim()}>
+              {saving ? "Saving..." : "Save Event"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

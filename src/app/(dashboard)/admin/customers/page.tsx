@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { motion } from "framer-motion"
-import { Users, Plus, User, Eye, Edit3, Trash2, MessageSquare, FolderKanban, FileText } from "lucide-react"
+import { Users, Plus, Eye, Edit3, Trash2, MessageSquare, FileText } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import { createCustomerAccount } from "@/lib/customer/actions"
 import type { Customer } from "@/types"
@@ -33,7 +33,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
-import { Badge } from "@/components/ui/badge"
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -49,6 +48,7 @@ export default function CustomersPage() {
   const router = useRouter()
   const [customers, setCustomers] = useState<Customer[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editCustomer, setEditCustomer] = useState<Customer | null>(null)
@@ -60,18 +60,26 @@ export default function CustomersPage() {
   const { addToast: toast } = useToast()
 
   useEffect(() => {
+    // Initial data load on mount.
     fetchCustomers()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function fetchCustomers() {
+    setLoading(true)
+    setError(null)
     try {
-      const { data } = await supabase
+      const { data, error: dbError } = await supabase
         .from("customers")
         .select("*")
         .order("created_at", { ascending: false })
-      setCustomers(data as unknown as Customer[])
-    } catch {
+      if (dbError) throw dbError
+      setCustomers((data ?? []) as unknown as Customer[])
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load customers"
+      setError(message)
       setCustomers([])
+      toast({ title: "Error loading customers", description: message, variant: "destructive" })
     } finally {
       setLoading(false)
     }
@@ -228,6 +236,12 @@ export default function CustomersPage() {
           Add Customer
         </Button>
       </motion.div>
+
+      {error && !loading && (
+        <motion.div variants={itemVariants} className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
+          {error}
+        </motion.div>
+      )}
 
       <motion.div variants={itemVariants}>
         <Card>

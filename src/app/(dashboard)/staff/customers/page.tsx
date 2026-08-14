@@ -44,17 +44,10 @@ const itemVariants = {
   visible: { opacity: 1, y: 0 },
 }
 
-const mockCustomers: CustomerRow[] = [
-  { id: "1", profile_id: "", full_name: "Rajesh Sharma", phone: "9876543210", email: "rajesh@example.com", address: "Andheri West, Mumbai", city: "Mumbai", notes: null, created_by: null, created_at: "2025-01-15T10:30:00Z", updated_at: "2025-01-15T10:30:00Z" },
-  { id: "2", profile_id: "", full_name: "Ananya Gupta", phone: "9876543211", email: "ananya@example.com", address: "Powai, Mumbai", city: "Mumbai", notes: null, created_by: null, created_at: "2025-02-20T11:00:00Z", updated_at: "2025-02-20T11:00:00Z" },
-  { id: "3", profile_id: "", full_name: "Vikram Patel", phone: "9876543212", email: "vikram@example.com", address: "Bandra East, Mumbai", city: "Mumbai", notes: null, created_by: null, created_at: "2025-03-10T09:15:00Z", updated_at: "2025-03-10T09:15:00Z" },
-  { id: "4", profile_id: "", full_name: "Pallavi Desai", phone: "9876543213", email: "pallavi@example.com", address: "Juhu, Mumbai", city: "Mumbai", notes: null, created_by: null, created_at: "2025-04-05T14:45:00Z", updated_at: "2025-04-05T14:45:00Z" },
-  { id: "5", profile_id: "", full_name: "Amit Singh", phone: "9876543214", email: "amit@example.com", address: "Thane West", city: "Thane", notes: null, created_by: null, created_at: "2025-05-12T08:30:00Z", updated_at: "2025-05-12T08:30:00Z" },
-]
-
 export default function StaffCustomersPage() {
   const [customers, setCustomers] = useState<CustomerRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editCustomer, setEditCustomer] = useState<CustomerRow | null>(null)
@@ -65,27 +58,32 @@ export default function StaffCustomersPage() {
   const user = useAuthStore((state) => state.user)
   const { addToast: toast } = useToast()
 
-  useEffect(() => {
-    fetchCustomers()
-  }, [])
-
   async function fetchCustomers() {
+    setLoading(true)
+    setError(null)
     try {
-      const { data } = await supabase
+      const { data, error: dbError } = await supabase
         .from("customers")
         .select("*")
         .order("created_at", { ascending: false })
-      if (data && data.length > 0) {
-        setCustomers(data as unknown as CustomerRow[])
-      } else {
-        setCustomers(mockCustomers)
-      }
-    } catch {
-      setCustomers(mockCustomers)
+      if (dbError) throw dbError
+      setCustomers((data ?? []) as unknown as CustomerRow[])
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load customers"
+      setError(message)
+      setCustomers([])
+      toast({ title: "Error loading customers", description: message, variant: "destructive" })
     } finally {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    // Initial data load on mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchCustomers()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const filtered = useMemo(() => {
     if (!search) return customers
@@ -245,6 +243,12 @@ export default function StaffCustomersPage() {
           Add Customer
         </Button>
       </motion.div>
+
+      {error && !loading && (
+        <motion.div variants={itemVariants} className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
+          {error}
+        </motion.div>
+      )}
 
       <motion.div variants={itemVariants}>
         <Card>

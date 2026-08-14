@@ -1,9 +1,11 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { motion } from "framer-motion"
 import { Download, DollarSign, TrendingUp, TrendingDown, PieChart as PieChartIcon } from "lucide-react"
 import { formatCurrency, formatDate } from "@/lib/auth/helpers"
+import { createClient } from "@/lib/supabase/client"
+import { useToast } from "@/hooks/use-toast"
 import { StatCard } from "@/components/shared/stat-card"
 import { DataTable, type Column } from "@/components/shared/data-table"
 import { Badge } from "@/components/ui/badge"
@@ -49,14 +51,7 @@ const itemVariants = {
 
 const PIE_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444", "#6366f1", "#ec4899", "#14b8a6"]
 
-const months = [
-  { value: "2026-07", label: "July 2026" },
-  { value: "2026-06", label: "June 2026" },
-  { value: "2026-05", label: "May 2026" },
-  { value: "2026-04", label: "April 2026" },
-  { value: "2026-03", label: "March 2026" },
-  { value: "2026-02", label: "February 2026" },
-]
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
 
 interface SalesRow {
   id: string
@@ -97,51 +92,71 @@ interface PaymentRow {
   status: string
 }
 
-const salesData: SalesRow[] = [
-  { id: "1", projectName: "Greenwood Residence", customer: "Rajesh Mehta", totalAmount: 850000, paidAmount: 595000, balance: 255000, status: "Partial" },
-  { id: "2", projectName: "Lakeview Apartments", customer: "Priya Sharma", totalAmount: 1200000, paidAmount: 1200000, balance: 0, status: "Paid" },
-  { id: "3", projectName: "Oakwood Heights", customer: "Amit Verma", totalAmount: 675000, paidAmount: 337500, balance: 337500, status: "Partial" },
-  { id: "4", projectName: "Maple Towers", customer: "Sunil Patel", totalAmount: 2100000, paidAmount: 2100000, balance: 0, status: "Paid" },
-  { id: "5", projectName: "Cedar Villa", customer: "Neha Gupta", totalAmount: 960000, paidAmount: 480000, balance: 480000, status: "Partial" },
-  { id: "6", projectName: "Willow Creek", customer: "Vikram Singh", totalAmount: 1540000, paidAmount: 0, balance: 1540000, status: "Unpaid" },
-]
+interface ProjectData {
+  id: string
+  project_name: string
+  status: string | null
+  customer_price: number | null
+  contractor_cost: number | null
+  created_at: string
+  customers: { full_name: string | null }[]
+}
 
-const profitData: ProfitRow[] = [
-  { id: "1", projectName: "Greenwood Residence", revenue: 850000, contractorCost: 340000, materialCost: 212500, expenses: 85000, netProfit: 212500, margin: 25 },
-  { id: "2", projectName: "Lakeview Apartments", revenue: 1200000, contractorCost: 480000, materialCost: 300000, expenses: 120000, netProfit: 300000, margin: 25 },
-  { id: "3", projectName: "Oakwood Heights", revenue: 675000, contractorCost: 286875, materialCost: 168750, expenses: 67500, netProfit: 151875, margin: 22.5 },
-  { id: "4", projectName: "Maple Towers", revenue: 2100000, contractorCost: 840000, materialCost: 525000, expenses: 210000, netProfit: 525000, margin: 25 },
-  { id: "5", projectName: "Cedar Villa", revenue: 960000, contractorCost: 432000, materialCost: 240000, expenses: 96000, netProfit: 192000, margin: 20 },
-  { id: "6", projectName: "Willow Creek", revenue: 1540000, contractorCost: 693000, materialCost: 385000, expenses: 154000, netProfit: 308000, margin: 20 },
-]
+interface CustomerPaymentData {
+  project_id: string
+  amount: number | null
+  payment_type: string | null
+  payment_date: string | null
+  customers: { full_name: string | null }[]
+  projects: { project_name: string | null }[]
+}
 
-const expenseData: ExpenseRow[] = [
-  { id: "1", date: "2026-07-01", category: "Materials", description: "Plywood sheets - 5mm", amount: 45000 },
-  { id: "2", date: "2026-07-03", category: "Labor", description: "Carpenter wages - Week 1", amount: 28000 },
-  { id: "3", date: "2026-07-05", category: "Transport", description: "Material delivery charges", amount: 8500 },
-  { id: "4", date: "2026-07-08", category: "Materials", description: "Hardware fittings - Premium", amount: 32000 },
-  { id: "5", date: "2026-07-10", category: "Utilities", description: "Workshop electricity bill", amount: 12000 },
-  { id: "6", date: "2026-07-12", category: "Labor", description: "Painter wages - Kitchen", amount: 22000 },
-  { id: "7", date: "2026-07-15", category: "Maintenance", description: "Equipment servicing", amount: 15000 },
-  { id: "8", date: "2026-07-18", category: "Transport", description: "Site visit - fuel reimbursement", amount: 4500 },
-]
+interface ContractorPaymentData {
+  amount: number | null
+  status: string | null
+  paid_date: string | null
+  created_at: string
+  contractors: { company_name: string | null }[]
+  projects: { project_name: string | null }[]
+}
 
-const expenseAggregation = [
-  { name: "Materials", value: 77000 },
-  { name: "Labor", value: 50000 },
-  { name: "Transport", value: 13000 },
-  { name: "Utilities", value: 12000 },
-  { name: "Maintenance", value: 15000 },
-]
+interface BusinessExpenseData {
+  id: string
+  category: string
+  description: string
+  amount: number | null
+  date: string | null
+  project_id: string | null
+}
 
-const paymentData: PaymentRow[] = [
-  { id: "1", paymentDate: "2026-07-02", entity: "Rajesh Mehta", project: "Greenwood Residence", amount: 200000, type: "Advance", status: "Completed" },
-  { id: "2", paymentDate: "2026-07-05", entity: "Priya Sharma", project: "Lakeview Apartments", amount: 600000, type: "Milestone", status: "Completed" },
-  { id: "3", paymentDate: "2026-07-10", entity: "Sunil Patel", project: "Maple Towers", amount: 1050000, type: "Milestone", status: "Completed" },
-  { id: "4", paymentDate: "2026-07-15", entity: "Amit Verma", project: "Oakwood Heights", amount: 150000, type: "Advance", status: "Pending" },
-  { id: "5", paymentDate: "2026-07-18", entity: "Neha Gupta", project: "Cedar Villa", amount: 240000, type: "Milestone", status: "Completed" },
-  { id: "6", paymentDate: "2026-07-20", entity: "Vikram Singh", project: "Willow Creek", amount: 0, type: "Advance", status: "Pending" },
-]
+interface ProjectExpenseData {
+  id: string
+  project_id: string
+  expense_type: string
+  description: string | null
+  amount: number | null
+  created_at: string
+}
+
+interface ProjectMaterialData {
+  project_id: string
+  total_price: number | null
+}
+
+function capitalize(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s
+}
+
+function monthLabel(key: string): string {
+  const [y, m] = key.split("-")
+  return `${MONTH_NAMES[Number(m) - 1]} ${y}`
+}
+
+function salesStatus(total: number, paid: number): string {
+  if (total <= 0 || paid <= 0) return "Unpaid"
+  if (paid >= total) return "Paid"
+  return "Partial"
+}
 
 function statusBadge(status: string) {
   const map: Record<string, { label: string; variant: "success" | "warning" | "destructive" | "default" | "secondary" }> = {
@@ -156,16 +171,232 @@ function statusBadge(status: string) {
 }
 
 export default function FinanceReportsPage() {
-  const [selectedMonth, setSelectedMonth] = useState("2026-07")
+  const supabase = createClient()
+  const { addToast: toast } = useToast()
+  const [selectedMonth, setSelectedMonth] = useState("all")
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [projects, setProjects] = useState<ProjectData[]>([])
+  const [customerPayments, setCustomerPayments] = useState<CustomerPaymentData[]>([])
+  const [contractorPayments, setContractorPayments] = useState<ContractorPaymentData[]>([])
+  const [businessExpenses, setBusinessExpenses] = useState<BusinessExpenseData[]>([])
+  const [projectExpenses, setProjectExpenses] = useState<ProjectExpenseData[]>([])
+  const [projectMaterials, setProjectMaterials] = useState<ProjectMaterialData[]>([])
 
-  const totalRevenue = profitData.reduce((s, r) => s + r.revenue, 0)
-  const totalCosts = profitData.reduce((s, r) => s + r.contractorCost + r.materialCost + r.expenses, 0)
-  const totalProfit = profitData.reduce((s, r) => s + r.netProfit, 0)
-  const avgMargin = Math.round(profitData.reduce((s, r) => s + r.margin, 0) / profitData.length)
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      setLoading(true)
+      setError(null)
+      try {
+        const [p, cp, ctp, be, pe, pm] = await Promise.all([
+          supabase.from("projects").select("id, project_name, status, customer_price, contractor_cost, created_at, customers(full_name)"),
+          supabase.from("customer_payments").select("project_id, amount, payment_type, payment_date, customers(full_name), projects(project_name)"),
+          supabase.from("contractor_payments").select("amount, status, paid_date, created_at, contractors(company_name), projects(project_name)"),
+          supabase.from("business_expenses").select("id, category, description, amount, date, project_id"),
+          supabase.from("project_expenses").select("id, project_id, expense_type, description, amount, created_at"),
+          supabase.from("project_materials").select("project_id, total_price"),
+        ])
+        const dbError = [p.error, cp.error, ctp.error, be.error, pe.error, pm.error].find(Boolean)
+        if (dbError) throw dbError
+        if (cancelled) return
+        setProjects(p.data ?? [])
+        setCustomerPayments(cp.data ?? [])
+        setContractorPayments(ctp.data ?? [])
+        setBusinessExpenses(be.data ?? [])
+        setProjectExpenses(pe.data ?? [])
+        setProjectMaterials(pm.data ?? [])
+      } catch (err) {
+        if (cancelled) return
+        const message = err instanceof Error ? err.message : "Failed to load finance report data"
+        setError(message)
+        toast({ title: "Error loading finance reports", description: message, variant: "destructive" })
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  const totalCollected = paymentData.filter((p) => p.status === "Completed").reduce((s, p) => s + p.amount, 0)
-  const totalPaid = paymentData.filter((p) => p.type === "Milestone").reduce((s, p) => s + p.amount, 0)
-  const pendingAmount = paymentData.filter((p) => p.status === "Pending").reduce((s, p) => s + p.amount, 0)
+  const monthOptions = useMemo(() => {
+    const keys = new Set<string>()
+    customerPayments.forEach((p) => p.payment_date && keys.add(p.payment_date.slice(0, 7)))
+    contractorPayments.forEach((p) => (p.paid_date ?? p.created_at) && keys.add((p.paid_date ?? p.created_at).slice(0, 7)))
+    businessExpenses.forEach((e) => e.date && keys.add(e.date.slice(0, 7)))
+    projectExpenses.forEach((e) => e.created_at && keys.add(e.created_at.slice(0, 7)))
+    const months = Array.from(keys).sort().reverse()
+    return [
+      { value: "all", label: "All months" },
+      ...months.map((key) => ({ value: key, label: monthLabel(key) })),
+    ]
+  }, [customerPayments, contractorPayments, businessExpenses, projectExpenses])
+
+  const filteredProjects = useMemo(() => {
+    if (selectedMonth === "all") return projects
+    return projects.filter((p) => p.created_at?.slice(0, 7) === selectedMonth)
+  }, [projects, selectedMonth])
+
+  const filteredCustomerPayments = useMemo(() => {
+    if (selectedMonth === "all") return customerPayments
+    return customerPayments.filter((p) => p.payment_date?.slice(0, 7) === selectedMonth)
+  }, [customerPayments, selectedMonth])
+
+  const filteredContractorPayments = useMemo(() => {
+    if (selectedMonth === "all") return contractorPayments
+    return contractorPayments.filter((p) => (p.paid_date ?? p.created_at)?.slice(0, 7) === selectedMonth)
+  }, [contractorPayments, selectedMonth])
+
+  const filteredBusinessExpenses = useMemo(() => {
+    if (selectedMonth === "all") return businessExpenses
+    return businessExpenses.filter((e) => e.date?.slice(0, 7) === selectedMonth)
+  }, [businessExpenses, selectedMonth])
+
+  const filteredProjectExpenses = useMemo(() => {
+    if (selectedMonth === "all") return projectExpenses
+    return projectExpenses.filter((e) => e.created_at?.slice(0, 7) === selectedMonth)
+  }, [projectExpenses, selectedMonth])
+
+  const salesData: SalesRow[] = useMemo(() => {
+    const paidByProject = new Map<string, number>()
+    filteredCustomerPayments.forEach((p) => {
+      const amount = Number(p.amount ?? 0)
+      paidByProject.set(p.project_id, (paidByProject.get(p.project_id) ?? 0) + amount)
+    })
+    return filteredProjects.map((p) => {
+      const totalAmount = Number(p.customer_price ?? 0)
+      const paidAmount = paidByProject.get(p.id) ?? 0
+      const balance = totalAmount - paidAmount
+      return {
+        id: p.id,
+        projectName: p.project_name,
+        customer: p.customers?.[0]?.full_name ?? "-",
+        totalAmount,
+        paidAmount,
+        balance,
+        status: salesStatus(totalAmount, paidAmount),
+      }
+    })
+  }, [filteredProjects, filteredCustomerPayments])
+
+  const profitData: ProfitRow[] = useMemo(() => {
+    const materialByProject = new Map<string, number>()
+    projectMaterials.forEach((m) => {
+      const value = Number(m.total_price ?? 0)
+      materialByProject.set(m.project_id, (materialByProject.get(m.project_id) ?? 0) + value)
+    })
+    const expensesByProject = new Map<string, number>()
+    projectExpenses.forEach((e) => {
+      const value = Number(e.amount ?? 0)
+      expensesByProject.set(e.project_id, (expensesByProject.get(e.project_id) ?? 0) + value)
+    })
+    const businessByProject = new Map<string, number>()
+    businessExpenses.forEach((e) => {
+      if (!e.project_id) return
+      const value = Number(e.amount ?? 0)
+      businessByProject.set(e.project_id, (businessByProject.get(e.project_id) ?? 0) + value)
+    })
+    return filteredProjects.map((p) => {
+      const revenue = Number(p.customer_price ?? 0)
+      const contractorCost = Number(p.contractor_cost ?? 0)
+      const materialCost = materialByProject.get(p.id) ?? 0
+      const expenses = (expensesByProject.get(p.id) ?? 0) + (businessByProject.get(p.id) ?? 0)
+      const netProfit = revenue - contractorCost - materialCost - expenses
+      const margin = revenue > 0 ? Math.round((netProfit / revenue) * 100) : 0
+      return {
+        id: p.id,
+        projectName: p.project_name,
+        revenue,
+        contractorCost,
+        materialCost,
+        expenses,
+        netProfit,
+        margin,
+      }
+    })
+  }, [filteredProjects, projectMaterials, projectExpenses, businessExpenses])
+
+  const expenseData: ExpenseRow[] = useMemo(() => {
+    const rows: ExpenseRow[] = filteredBusinessExpenses.map((e) => ({
+      id: `be-${e.id}`,
+      date: e.date ?? "",
+      category: capitalize(e.category),
+      description: e.description,
+      amount: Number(e.amount ?? 0),
+    }))
+    filteredProjectExpenses.forEach((e) => {
+      rows.push({
+        id: `pe-${e.id}`,
+        date: e.created_at.slice(0, 10),
+        category: capitalize(e.expense_type),
+        description: e.description ?? e.expense_type,
+        amount: Number(e.amount ?? 0),
+      })
+    })
+    return rows.sort((a, b) => (a.date < b.date ? 1 : -1))
+  }, [filteredBusinessExpenses, filteredProjectExpenses])
+
+  const expenseAggregation = useMemo(() => {
+    const totals = new Map<string, number>()
+    expenseData.forEach((e) => {
+      totals.set(e.category, (totals.get(e.category) ?? 0) + e.amount)
+    })
+    return Array.from(totals.entries())
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+  }, [expenseData])
+
+  const paymentData: PaymentRow[] = useMemo(() => {
+    const rows: PaymentRow[] = filteredCustomerPayments.map((p, i) => ({
+      id: `cp-${p.project_id}-${i}`,
+      paymentDate: p.payment_date ?? "",
+      entity: p.customers?.[0]?.full_name ?? "-",
+      project: p.projects?.[0]?.project_name ?? "-",
+      amount: Number(p.amount ?? 0),
+      type: capitalize(p.payment_type ?? "payment"),
+      status: "Completed",
+    }))
+    filteredContractorPayments.forEach((p, i) => {
+      const paid = p.status === "paid"
+      rows.push({
+        id: `ctp-${i}`,
+        paymentDate: p.paid_date ?? p.created_at.slice(0, 10),
+        entity: p.contractors?.[0]?.company_name ?? "Contractor",
+        project: p.projects?.[0]?.project_name ?? "-",
+        amount: Number(p.amount ?? 0),
+        type: "Contractor",
+        status: paid ? "Completed" : "Pending",
+      })
+    })
+    return rows.sort((a, b) => (a.paymentDate < b.paymentDate ? 1 : -1))
+  }, [filteredCustomerPayments, filteredContractorPayments])
+
+  const totalRevenue = useMemo(() => profitData.reduce((s, r) => s + r.revenue, 0), [profitData])
+  const totalCosts = useMemo(
+    () => profitData.reduce((s, r) => s + r.contractorCost + r.materialCost + r.expenses, 0),
+    [profitData]
+  )
+  const totalProfit = useMemo(() => profitData.reduce((s, r) => s + r.netProfit, 0), [profitData])
+  const avgMargin = useMemo(() => {
+    if (profitData.length === 0) return 0
+    return Math.round(profitData.reduce((s, r) => s + r.margin, 0) / profitData.length)
+  }, [profitData])
+
+  const totalCollected = useMemo(
+    () => filteredCustomerPayments.reduce((s, p) => s + Number(p.amount ?? 0), 0),
+    [filteredCustomerPayments]
+  )
+  const totalPaidOut = useMemo(
+    () => filteredContractorPayments.filter((p) => p.status === "paid").reduce((s, p) => s + Number(p.amount ?? 0), 0),
+    [filteredContractorPayments]
+  )
+  const pendingAmount = useMemo(
+    () => filteredContractorPayments.filter((p) => p.status !== "paid").reduce((s, p) => s + Number(p.amount ?? 0), 0),
+    [filteredContractorPayments]
+  )
 
   const salesColumns: Column<SalesRow>[] = [
     { key: "projectName", label: "Project Name", sortable: true },
@@ -223,7 +454,7 @@ export default function FinanceReportsPage() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {months.map((m) => (
+              {monthOptions.map((m) => (
                 <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
               ))}
             </SelectContent>
@@ -234,6 +465,12 @@ export default function FinanceReportsPage() {
           </Button>
         </div>
       </div>
+
+      {error && !loading && (
+        <motion.div variants={itemVariants} className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
+          {error}
+        </motion.div>
+      )}
 
       <Tabs defaultValue="sales" className="w-full">
         <TabsList>
@@ -251,7 +488,7 @@ export default function FinanceReportsPage() {
                 <CardDescription>Project-wise sales and payment status</CardDescription>
               </CardHeader>
               <CardContent className="p-0">
-                <DataTable columns={salesColumns} data={salesData} pagination pageSize={10} />
+                <DataTable columns={salesColumns} data={salesData} pagination pageSize={10} loading={loading} emptyMessage="No sales data found" />
               </CardContent>
             </Card>
           </motion.div>
@@ -273,15 +510,15 @@ export default function FinanceReportsPage() {
               icon={DollarSign}
               formatValue={(v) => formatCurrency(v)}
               trend="down"
-              trendValue={`${Math.round((totalCosts / totalRevenue) * 100)}% of revenue`}
+              trendValue={totalRevenue > 0 ? `${Math.round((totalCosts / totalRevenue) * 100)}% of revenue` : "No revenue"}
             />
             <StatCard
               title="Total Profit"
               value={totalProfit}
               icon={TrendingUp}
               formatValue={(v) => formatCurrency(v)}
-              trend="up"
-              trendValue={`${Math.round((totalProfit / totalRevenue) * 100)}% margin`}
+              trend={totalProfit >= 0 ? "up" : "down"}
+              trendValue={totalRevenue > 0 ? `${Math.round((totalProfit / totalRevenue) * 100)}% margin` : "No revenue"}
             />
             <StatCard
               title="Avg Margin"
@@ -300,7 +537,7 @@ export default function FinanceReportsPage() {
                 <CardDescription>Per-project profitability analysis</CardDescription>
               </CardHeader>
               <CardContent className="p-0">
-                <DataTable columns={profitColumns} data={profitData} pagination pageSize={10} />
+                <DataTable columns={profitColumns} data={profitData} pagination pageSize={10} loading={loading} emptyMessage="No profit data found" />
               </CardContent>
             </Card>
           </motion.div>
@@ -315,7 +552,7 @@ export default function FinanceReportsPage() {
                   <CardDescription>Itemized expense transactions</CardDescription>
                 </CardHeader>
                 <CardContent className="p-0">
-                  <DataTable columns={expenseColumns} data={expenseData} pagination pageSize={10} />
+                  <DataTable columns={expenseColumns} data={expenseData} pagination pageSize={10} loading={loading} emptyMessage="No expenses found" />
                 </CardContent>
               </Card>
             </motion.div>
@@ -330,36 +567,42 @@ export default function FinanceReportsPage() {
                   <CardDescription>Breakdown by category</CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <div className="h-72">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={expenseAggregation}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={50}
-                          outerRadius={90}
-                          paddingAngle={3}
-                          dataKey="value"
-                        >
-                          {expenseAggregation.map((_, i) => (
-                            <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                          ))}
-                        </Pie>
-                        <Tooltip
-                          contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))" }}
-                          formatter={(value) => [formatCurrency(Number(value)), undefined]}
-                        />
-                        <Legend
-                          layout="vertical"
-                          align="right"
-                          verticalAlign="middle"
-                          iconType="circle"
-                          iconSize={10}
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
+                  {expenseAggregation.length > 0 ? (
+                    <div className="h-72">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={expenseAggregation}
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={50}
+                            outerRadius={90}
+                            paddingAngle={3}
+                            dataKey="value"
+                          >
+                            {expenseAggregation.map((_, i) => (
+                              <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                            ))}
+                          </Pie>
+                          <Tooltip
+                            contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))" }}
+                            formatter={(value) => [formatCurrency(Number(value)), undefined]}
+                          />
+                          <Legend
+                            layout="vertical"
+                            align="right"
+                            verticalAlign="middle"
+                            iconType="circle"
+                            iconSize={10}
+                          />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                  ) : (
+                    <div className="h-72 flex items-center justify-center text-sm text-muted-foreground">
+                      No expense data available
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </motion.div>
@@ -374,23 +617,23 @@ export default function FinanceReportsPage() {
               icon={TrendingUp}
               formatValue={(v) => formatCurrency(v)}
               trend="up"
-              trendValue="Completed payments"
+              trendValue="Customer payments"
             />
             <StatCard
-              title="Total Paid (Milestones)"
-              value={totalPaid}
+              title="Total Paid Out"
+              value={totalPaidOut}
               icon={DollarSign}
               formatValue={(v) => formatCurrency(v)}
-              trend="up"
-              trendValue="Milestone payments"
+              trend="down"
+              trendValue="Contractor payments"
             />
             <StatCard
               title="Pending"
               value={pendingAmount}
               icon={TrendingDown}
               formatValue={(v) => formatCurrency(v)}
-              trend="down"
-              trendValue={pendingAmount > 0 ? `${paymentData.filter((p) => p.status === "Pending").length} payments` : "None"}
+              trend={pendingAmount > 0 ? "down" : "up"}
+              trendValue={pendingAmount > 0 ? `${filteredContractorPayments.filter((p) => p.status !== "paid").length} payments` : "None"}
             />
           </motion.div>
 
@@ -401,7 +644,7 @@ export default function FinanceReportsPage() {
                 <CardDescription>All incoming and outgoing payments</CardDescription>
               </CardHeader>
               <CardContent className="p-0">
-                <DataTable columns={paymentColumns} data={paymentData} pagination pageSize={10} />
+                <DataTable columns={paymentColumns} data={paymentData} pagination pageSize={10} loading={loading} emptyMessage="No payments found" />
               </CardContent>
             </Card>
           </motion.div>

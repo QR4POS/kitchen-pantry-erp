@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { motion } from "framer-motion"
 import {
   Users,
@@ -13,7 +13,6 @@ import {
   AlertTriangle,
   Bell,
   Activity,
-  PlusCircle,
   FileText,
   UserPlus,
   Package,
@@ -26,6 +25,7 @@ import { StatCard } from "@/components/shared/stat-card"
 import { QuickActionCard } from "@/components/shared/quick-action-card"
 import { StatusBadge } from "@/components/shared/status-badge"
 import { DataTable, type Column } from "@/components/shared/data-table"
+import Link from "next/link"
 import {
   Card,
   CardContent,
@@ -51,60 +51,53 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts"
-import { ProjectStatus, type Project, type DashboardStats } from "@/types"
 import { formatCurrency } from "@/lib/auth/helpers"
 import { createClient } from "@/lib/supabase/client"
+import { useToast } from "@/hooks/use-toast"
+import { ProjectStatus } from "@/types"
 
 const COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444", "#6366f1"]
 
-const revenueData = [
-  { month: "Feb", revenue: 420000, profit: 98000 },
-  { month: "Mar", revenue: 380000, profit: 85000 },
-  { month: "Apr", revenue: 510000, profit: 120000 },
-  { month: "May", revenue: 470000, profit: 105000 },
-  { month: "Jun", revenue: 620000, profit: 148000 },
-  { month: "Jul", revenue: 580000, profit: 135000 },
-]
+const PROJECT_STATUS_MAP: Record<string, ProjectStatus> = {
+  inquiry: ProjectStatus.NewLead,
+  site_visit: ProjectStatus.SiteVisit,
+  measuring: ProjectStatus.Measuring,
+  estimate_created: ProjectStatus.EstimateCreated,
+  quotation_sent: ProjectStatus.QuotationSent,
+  approved: ProjectStatus.Approved,
+  production: ProjectStatus.Production,
+  installation: ProjectStatus.Installation,
+  completed: ProjectStatus.Completed,
+  cancelled: ProjectStatus.Cancelled,
+}
 
-const profitData = [
-  { month: "Feb", profit: 98000, percentage: 23.3 },
-  { month: "Mar", profit: 85000, percentage: 22.4 },
-  { month: "Apr", profit: 120000, percentage: 23.5 },
-  { month: "May", profit: 105000, percentage: 22.3 },
-  { month: "Jun", profit: 148000, percentage: 23.9 },
-  { month: "Jul", profit: 135000, percentage: 23.3 },
-]
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-const projectStatusData = [
-  { name: "Inquiry", value: 8 },
-  { name: "Site Visit", value: 12 },
-  { name: "Production", value: 10 },
-  { name: "Installation", value: 7 },
-  { name: "Completed", value: 42 },
-]
+const CLOSED_STATUSES = new Set(["completed", "cancelled"])
 
-const recentProjects: Partial<Project>[] = [
-  { id: "1", name: "Modern L-Shape Kitchen", status: ProjectStatus.Completed, customer_price: 285000, created_at: "2026-07-28" },
-  { id: "2", name: "Compact U-Shape Design", status: ProjectStatus.Production, customer_price: 195000, created_at: "2026-07-25" },
-  { id: "3", name: "Premium Island Kitchen", status: ProjectStatus.Installation, customer_price: 420000, created_at: "2026-07-22" },
-  { id: "4", name: "Parallel Kitchen Reno", status: ProjectStatus.Approved, customer_price: 158000, created_at: "2026-07-20" },
-  { id: "5", name: "Straight Kitchen Setup", status: ProjectStatus.QuotationSent, customer_price: 112000, created_at: "2026-07-18" },
-]
+interface RecentProject {
+  id: string
+  name: string
+  status: string
+  customer_price: number | null
+  created_at: string
+}
 
-const inventoryAlerts = [
-  { name: "MDF Sheets 18mm", current: 12, min: 20, unit: "sheets" },
-  { name: "Acrylic Finish", current: 5, min: 10, unit: "sheets" },
-  { name: "Concealed Hinges", current: 48, min: 100, unit: "pcs" },
-  { name: "Drawer Slides 45cm", current: 15, min: 30, unit: "pairs" },
-]
+interface InventoryAlert {
+  name: string
+  current: number
+  min: number
+  unit: string | null
+}
 
-const recentActivities = [
-  { action: "Project completed", detail: "Modern L-Shape Kitchen", time: "2 hours ago", type: "success" },
-  { action: "Payment received", detail: "Rs.85,000 from Mr. Sharma", time: "4 hours ago", type: "info" },
-  { action: "New customer registered", detail: "Priya Patel", time: "6 hours ago", type: "default" },
-  { action: "Inventory low", detail: "MDF Sheets below threshold", time: "8 hours ago", type: "warning" },
-  { action: "Quotation sent", detail: "Project #1042 - Premium Island", time: "1 day ago", type: "default" },
-]
+type ActivityType = "success" | "info" | "warning" | "default"
+
+interface Activity {
+  action: string
+  detail: string
+  time: string
+  type: ActivityType
+}
 
 const activityIcons: Record<string, React.ElementType> = {
   success: CheckCircle2,
@@ -133,111 +126,218 @@ const itemVariants = {
   visible: { opacity: 1, y: 0 },
 }
 
-export default function AdminDashboard() {
-  const [stats, setStats] = useState<DashboardStats | null>(null)
-  const [loading, setLoading] = useState(true)
+function monthKeyOf(value: string | null | undefined): string {
+  return value?.slice(0, 7) ?? ""
+}
 
+function lastSixMonthKeys(): string[] {
+  const now = new Date()
+  return Array.from({ length: 6 }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
+  }).reverse()
+}
+
+function timeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 60) return mins <= 1 ? "just now" : `${mins} minutes ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs} hour${hrs > 1 ? "s" : ""} ago`
+  const days = Math.floor(hrs / 24)
+  return `${days} day${days > 1 ? "s" : ""} ago`
+}
+
+export default function AdminDashboard() {
   const supabase = createClient()
+  const { addToast: toast } = useToast()
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const [customers, setCustomers] = useState<{ created_at: string }[]>([])
+  const [projects, setProjects] = useState<{ status: string | null; created_at: string }[]>([])
+  const [pendingQuotations, setPendingQuotations] = useState(0)
+  const [customerPayments, setCustomerPayments] = useState<{ amount: number | null; payment_date: string | null }[]>([])
+  const [estimates, setEstimates] = useState<{ profit_amount: number | null; created_at: string }[]>([])
+  const [pendingSchedules, setPendingSchedules] = useState<{ amount: number | null }[]>([])
+  const [contractorPayments, setContractorPayments] = useState<{ amount: number | null }[]>([])
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([])
+  const [materials, setMaterials] = useState<InventoryAlert[]>([])
+  const [activities, setActivities] = useState<Activity[]>([])
 
   useEffect(() => {
-    async function fetchStats() {
+    let cancelled = false
+    async function fetchData() {
+      setLoading(true)
+      setError(null)
       try {
-        const { count: totalCustomers } = await supabase
-          .from("customers")
-          .select("*", { count: "exact", head: true })
+        const now = new Date()
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
 
-        const { count: totalProjects } = await supabase
-          .from("projects")
-          .select("*", { count: "exact", head: true })
+        const [cust, proj, quo, cp, est, ps, ctp, rp, mat, comp, rpay, rcust, rq] = await Promise.all([
+          supabase.from("customers").select("created_at"),
+          supabase.from("projects").select("status, created_at"),
+          supabase.from("quotations").select("id", { count: "exact", head: true }).in("status", ["draft", "sent"]),
+          supabase.from("customer_payments").select("amount, payment_date").order("payment_date", { ascending: false }).limit(1000),
+          supabase.from("estimates").select("profit_amount, created_at").order("created_at", { ascending: false }).limit(1000),
+          supabase.from("payment_schedules").select("amount").neq("status", "paid"),
+          supabase.from("contractor_payments").select("amount, created_at").gte("created_at", monthStart),
+          supabase.from("projects").select("id, project_name, status, customer_price, created_at").order("created_at", { ascending: false }).limit(5),
+          supabase.from("materials").select("name, stock_quantity, minimum_stock, unit").limit(200),
+          supabase.from("projects").select("project_name, completed_date").eq("status", "completed").not("completed_date", "is", null).order("completed_date", { ascending: false }).limit(3),
+          supabase.from("customer_payments").select("amount, payment_date, customers(full_name)").order("payment_date", { ascending: false }).limit(3),
+          supabase.from("customers").select("full_name, created_at").order("created_at", { ascending: false }).limit(3),
+          supabase.from("quotations").select("quotation_number, created_at").order("created_at", { ascending: false }).limit(3),
+        ])
 
-        const { count: activeProjects } = await supabase
-          .from("projects")
-          .select("*", { count: "exact", head: true })
-          .not("status", "in", `("${ProjectStatus.Completed}","${ProjectStatus.Cancelled}")`)
+        const dbError = [cust.error, proj.error, quo.error, cp.error, est.error, ps.error, ctp.error, rp.error, mat.error, comp.error, rpay.error, rcust.error, rq.error].find(Boolean)
+        if (dbError) throw dbError
+        if (cancelled) return
 
-        const { count: completedProjects } = await supabase
-          .from("projects")
-          .select("*", { count: "exact", head: true })
-          .eq("status", ProjectStatus.Completed)
+        setCustomers(cust.data ?? [])
+        setProjects(proj.data ?? [])
+        setPendingQuotations(quo.count ?? 0)
+        setCustomerPayments(cp.data ?? [])
+        setEstimates(est.data ?? [])
+        setPendingSchedules(ps.data ?? [])
+        setContractorPayments(ctp.data ?? [])
+        setRecentProjects(
+          (rp.data ?? []).map((p) => ({
+            id: p.id,
+            name: p.project_name,
+            status: p.status,
+            customer_price: p.customer_price,
+            created_at: p.created_at,
+          }))
+        )
+        setMaterials(
+          (mat.data ?? [])
+            .filter((m) => Number(m.stock_quantity) < Number(m.minimum_stock))
+            .map((m) => ({ name: m.name, current: Number(m.stock_quantity), min: Number(m.minimum_stock), unit: m.unit }))
+        )
 
-        const { count: pendingQuotations } = await supabase
-          .from("quotations")
-          .select("*", { count: "exact", head: true })
-          .in("status", ["draft", "sent"])
-
-        const { data: payments } = await supabase
-          .from("payments")
-          .select("amount, status")
-          .gte("created_at", new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString())
-
-        type PaymentRow = { amount: number; status: string | null }
-        const paymentData = (payments ?? []) as unknown as PaymentRow[]
-        const monthlyRevenue = paymentData.reduce((sum, p) => sum + p.amount, 0)
-        const pendingPayments = paymentData
-          .filter(p => p.status !== "paid")
-          .reduce((sum, p) => sum + p.amount, 0)
-
-        const { data: contractorPayments } = await supabase
-          .from("payments")
-          .select("amount")
-          .eq("payment_type", "CONTRACTOR_PAYMENT")
-          .gte("created_at", new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString())
-
-        const contractorData = (contractorPayments ?? []) as unknown as PaymentRow[]
-        const contractorTotal = contractorData.reduce((sum, p) => sum + p.amount, 0)
-
-        setStats({
-          total_customers: totalCustomers ?? 0,
-          total_projects: totalProjects ?? 0,
-          active_projects: activeProjects ?? 0,
-          completed_projects: completedProjects ?? 0,
-          pending_quotations: pendingQuotations ?? 0,
-          monthly_revenue: monthlyRevenue,
-          monthly_profit: Math.round(monthlyRevenue * 0.23),
-          pending_payments: pendingPayments,
-          contractor_payments: contractorTotal,
+        const activityList: Activity[] = []
+        ;(comp.data ?? []).forEach((p) => {
+          if (!p.completed_date) return
+          activityList.push({ action: "Project completed", detail: p.project_name, time: timeAgo(p.completed_date), type: "success" })
         })
-      } catch {
-        setStats(null)
+        ;(rpay.data ?? []).forEach((p) => {
+          const name = p.customers?.[0]?.full_name
+          activityList.push({
+            action: "Payment received",
+            detail: `${formatCurrency(Number(p.amount ?? 0))}${name ? ` from ${name}` : ""}`,
+            time: timeAgo(p.payment_date ?? ""),
+            type: "info",
+          })
+        })
+        ;(rcust.data ?? []).forEach((c) => {
+          activityList.push({ action: "New customer registered", detail: c.full_name ?? "Customer", time: timeAgo(c.created_at), type: "default" })
+        })
+        ;(rq.data ?? []).forEach((q) => {
+          activityList.push({ action: "Quotation created", detail: q.quotation_number, time: timeAgo(q.created_at), type: "default" })
+        })
+        setActivities(activityList.sort((a, b) => (a.time < b.time ? 1 : -1)))
+      } catch (err) {
+        if (cancelled) return
+        const message = err instanceof Error ? err.message : "Failed to load dashboard data"
+        setError(message)
+        toast({ title: "Error loading dashboard", description: message, variant: "destructive" })
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
     }
+    fetchData()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-    fetchStats()
-  }, [supabase])
+  const stats = useMemo(() => {
+    const now = new Date()
+    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`
+    const totalCustomers = customers.length
+    const newCustomersMonth = customers.filter((c) => monthKeyOf(c.created_at) === currentMonthKey).length
+    const totalProjects = projects.length
+    const activeProjects = projects.filter((p) => !CLOSED_STATUSES.has(p.status ?? "")).length
+    const completedProjects = projects.filter((p) => p.status === "completed").length
+    const newProjectsMonth = projects.filter((p) => monthKeyOf(p.created_at) === currentMonthKey).length
+    const monthlyRevenue = customerPayments
+      .filter((p) => monthKeyOf(p.payment_date) === currentMonthKey)
+      .reduce((s, p) => s + Number(p.amount ?? 0), 0)
+    const monthlyProfit = estimates
+      .filter((e) => monthKeyOf(e.created_at) === currentMonthKey)
+      .reduce((s, e) => s + Number(e.profit_amount ?? 0), 0)
+    const pendingPayments = pendingSchedules.reduce((s, p) => s + Number(p.amount ?? 0), 0)
+    const contractorPaymentsTotal = contractorPayments.reduce((s, p) => s + Number(p.amount ?? 0), 0)
+    return {
+      totalCustomers,
+      newCustomersMonth,
+      totalProjects,
+      activeProjects,
+      completedProjects,
+      newProjectsMonth,
+      pendingQuotations,
+      monthlyRevenue,
+      monthlyProfit,
+      pendingPayments,
+      contractorPaymentsTotal,
+    }
+  }, [customers, projects, pendingQuotations, customerPayments, estimates, pendingSchedules, contractorPayments])
 
-  if (loading) {
-    return (
-      <div className="space-y-6">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 7 }).map((_, i) => (
-            <Skeleton key={i} className="h-32 rounded-xl" />
-          ))}
-        </div>
-      </div>
-    )
-  }
+  const monthlyData = useMemo(() => {
+    const keys = lastSixMonthKeys()
+    return keys.map((key) => {
+      const revenue = customerPayments
+        .filter((p) => monthKeyOf(p.payment_date) === key)
+        .reduce((s, p) => s + Number(p.amount ?? 0), 0)
+      const profit = estimates
+        .filter((e) => monthKeyOf(e.created_at) === key)
+        .reduce((s, e) => s + Number(e.profit_amount ?? 0), 0)
+      const percentage = revenue > 0 ? Math.round((profit / revenue) * 100) : 0
+      const [, m] = key.split("-")
+      return { month: MONTH_NAMES[Number(m) - 1], revenue, profit, percentage }
+    })
+  }, [customerPayments, estimates])
+
+  const hasMonthlyData = useMemo(
+    () => monthlyData.some((m) => m.revenue > 0 || m.profit > 0),
+    [monthlyData]
+  )
+
+  const revenueData = useMemo(() => monthlyData.map(({ month, revenue, profit }) => ({ month, revenue, profit })), [monthlyData])
+  const profitChartData = useMemo(() => monthlyData.map(({ month, profit, percentage }) => ({ month, profit, percentage })), [monthlyData])
+
+  const projectStatusData = useMemo(() => {
+    const counts = new Map<string, number>()
+    projects.forEach((p) => {
+      const label = p.status ? p.status.charAt(0).toUpperCase() + p.status.slice(1) : "Unknown"
+      counts.set(label, (counts.get(label) ?? 0) + 1)
+    })
+    return Array.from(counts.entries())
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+  }, [projects])
 
   const statCards = [
-    { title: "Total Customers", value: stats?.total_customers ?? 0, icon: Users, trend: "up" as const, trendValue: "+12%", description: "vs last month" },
-    { title: "Total Projects", value: stats?.total_projects ?? 0, icon: FolderKanban, trend: "up" as const, trendValue: "+15%", description: "all time" },
-    { title: "Active Projects", value: stats?.active_projects ?? 0, icon: Activity, trend: "up" as const, trendValue: "+8%", description: "in progress" },
-    { title: "Completed Projects", value: stats?.completed_projects ?? 0, icon: CheckCircle2, trend: "up" as const, trendValue: "+23%", description: "this year" },
-    { title: "Pending Quotations", value: stats?.pending_quotations ?? 0, icon: FileText, trend: "down" as const, trendValue: "pending" },
-    { title: "Monthly Revenue", value: stats?.monthly_revenue ?? 0, icon: TrendingUp, formatValue: (v: number) => formatCurrency(v) },
-    { title: "Monthly Profit", value: stats?.monthly_profit ?? 0, icon: Banknote, formatValue: (v: number) => formatCurrency(v) },
-    { title: "Pending Payments", value: stats?.pending_payments ?? 0, icon: Clock, trend: "down" as const, trendValue: "to collect" },
-    { title: "Contractor Payments", value: stats?.contractor_payments ?? 0, icon: Wrench, formatValue: (v: number) => formatCurrency(v) },
+    { title: "Total Customers", value: stats.totalCustomers, icon: Users, trend: stats.newCustomersMonth > 0 ? "up" as const : undefined, trendValue: `${stats.newCustomersMonth} new this month` },
+    { title: "Total Projects", value: stats.totalProjects, icon: FolderKanban, trend: stats.newProjectsMonth > 0 ? "up" as const : undefined, trendValue: `${stats.newProjectsMonth} new this month` },
+    { title: "Active Projects", value: stats.activeProjects, icon: Activity, description: "in progress" },
+    { title: "Completed Projects", value: stats.completedProjects, icon: CheckCircle2, description: "all time" },
+    { title: "Pending Quotations", value: stats.pendingQuotations, icon: FileText, trend: "down" as const, trendValue: "awaiting response" },
+    { title: "Monthly Revenue", value: stats.monthlyRevenue, icon: TrendingUp, formatValue: (v: number) => formatCurrency(v) },
+    { title: "Monthly Profit", value: stats.monthlyProfit, icon: Banknote, formatValue: (v: number) => formatCurrency(v) },
+    { title: "Pending Payments", value: stats.pendingPayments, icon: Clock, formatValue: (v: number) => formatCurrency(v), trend: "down" as const, trendValue: "to collect" },
+    { title: "Contractor Payments", value: stats.contractorPaymentsTotal, icon: Wrench, formatValue: (v: number) => formatCurrency(v) },
   ]
 
-  const projectColumns: Column<Partial<Project>>[] = [
+  const projectColumns: Column<RecentProject>[] = [
     { key: "name", label: "Project", sortable: true },
     {
       key: "status",
       label: "Status",
       sortable: true,
-      render: (row) => row.status ? <StatusBadge status={row.status} /> : "-",
+      render: (row) => row.status ? <StatusBadge status={PROJECT_STATUS_MAP[row.status] ?? ProjectStatus.NewLead} /> : "-",
     },
     {
       key: "customer_price",
@@ -253,6 +353,18 @@ export default function AdminDashboard() {
     },
   ]
 
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 7 }).map((_, i) => (
+            <Skeleton key={i} className="h-32 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <motion.div
       variants={containerVariants}
@@ -264,6 +376,12 @@ export default function AdminDashboard() {
         <h1 className="text-2xl font-bold tracking-tight">Admin Dashboard</h1>
         <p className="text-muted-foreground">Overview of your kitchen pantry business</p>
       </div>
+
+      {error && (
+        <motion.div variants={itemVariants} className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
+          {error}
+        </motion.div>
+      )}
 
       <motion.div variants={itemVariants} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {statCards.map((card) => (
@@ -279,22 +397,28 @@ export default function AdminDashboard() {
               <CardDescription>Revenue and profit trend over 6 months</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="h-80">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={revenueData}>
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                    <XAxis dataKey="month" className="text-xs" tick={{ fontSize: 12 }} />
-                    <YAxis className="text-xs" tick={{ fontSize: 12 }} tickFormatter={(v) => `Rs.${(v / 1000).toFixed(0)}K`} />
-                    <Tooltip
-                      contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))" }}
-                      formatter={(value) => [formatCurrency(Number(value)), undefined]}
-                    />
-                    <Legend />
-                    <Line type="monotone" dataKey="revenue" name="Revenue" stroke="#3b82f6" strokeWidth={2} dot={{ r: 4 }} activeDot={{ r: 6 }} />
-                    <Line type="monotone" dataKey="profit" name="Profit" stroke="#10b981" strokeWidth={2} dot={{ r: 4 }} activeDot={{ r: 6 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+              {hasMonthlyData ? (
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={revenueData}>
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                      <XAxis dataKey="month" className="text-xs" tick={{ fontSize: 12 }} />
+                      <YAxis className="text-xs" tick={{ fontSize: 12 }} tickFormatter={(v) => `Rs.${(v / 1000).toFixed(0)}K`} />
+                      <Tooltip
+                        contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))" }}
+                        formatter={(value) => [formatCurrency(Number(value)), undefined]}
+                      />
+                      <Legend />
+                      <Line type="monotone" dataKey="revenue" name="Revenue" stroke="#3b82f6" strokeWidth={2} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                      <Line type="monotone" dataKey="profit" name="Profit" stroke="#10b981" strokeWidth={2} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-80 flex items-center justify-center text-sm text-muted-foreground">
+                  No sales data available yet
+                </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
@@ -306,23 +430,29 @@ export default function AdminDashboard() {
               <CardDescription>Profit amount & percentage</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="h-80">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={profitData}>
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                    <XAxis dataKey="month" className="text-xs" tick={{ fontSize: 12 }} />
-                    <YAxis yAxisId="left" className="text-xs" tick={{ fontSize: 12 }} tickFormatter={(v) => `Rs.${(v / 1000).toFixed(0)}K`} />
-                    <YAxis yAxisId="right" orientation="right" className="text-xs" tick={{ fontSize: 12 }} tickFormatter={(v) => `${v}%`} />
-                    <Tooltip
-                      contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))" }}
-                      formatter={(value, name) => [name === "percentage" ? `${value}%` : formatCurrency(Number(value)), undefined]}
-                    />
-                    <Legend />
-                    <Bar yAxisId="left" dataKey="profit" name="Profit" fill="#10b981" radius={[4, 4, 0, 0]} />
-                    <Line yAxisId="right" type="monotone" dataKey="percentage" name="Margin %" stroke="#8b5cf6" strokeWidth={2} dot={{ r: 3 }} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+              {hasMonthlyData ? (
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={profitChartData}>
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                      <XAxis dataKey="month" className="text-xs" tick={{ fontSize: 12 }} />
+                      <YAxis yAxisId="left" className="text-xs" tick={{ fontSize: 12 }} tickFormatter={(v) => `Rs.${(v / 1000).toFixed(0)}K`} />
+                      <YAxis yAxisId="right" orientation="right" className="text-xs" tick={{ fontSize: 12 }} tickFormatter={(v) => `${v}%`} />
+                      <Tooltip
+                        contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))" }}
+                        formatter={(value, name) => [name === "percentage" ? `${value}%` : formatCurrency(Number(value)), undefined]}
+                      />
+                      <Legend />
+                      <Bar yAxisId="left" dataKey="profit" name="Profit" fill="#10b981" radius={[4, 4, 0, 0]} />
+                      <Line yAxisId="right" type="monotone" dataKey="percentage" name="Margin %" stroke="#8b5cf6" strokeWidth={2} dot={{ r: 3 }} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-80 flex items-center justify-center text-sm text-muted-foreground">
+                  No profit data available yet
+                </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
@@ -336,35 +466,41 @@ export default function AdminDashboard() {
               <CardDescription>Distribution by current stage</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="h-72 flex items-center justify-center">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={projectStatusData}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={60}
-                      outerRadius={100}
-                      paddingAngle={3}
-                      dataKey="value"
-                    >
-                      {projectStatusData.map((_, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))" }}
-                    />
-                    <Legend
-                      layout="vertical"
-                      align="right"
-                      verticalAlign="middle"
-                      iconType="circle"
-                      iconSize={10}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
+              {projectStatusData.length > 0 ? (
+                <div className="h-72 flex items-center justify-center">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={projectStatusData}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={60}
+                        outerRadius={100}
+                        paddingAngle={3}
+                        dataKey="value"
+                      >
+                        {projectStatusData.map((_, index) => (
+                          <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={{ borderRadius: 8, border: "1px solid hsl(var(--border))" }}
+                      />
+                      <Legend
+                        layout="vertical"
+                        align="right"
+                        verticalAlign="middle"
+                        iconType="circle"
+                        iconSize={10}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-72 flex items-center justify-center text-sm text-muted-foreground">
+                  No projects yet
+                </div>
+              )}
             </CardContent>
           </Card>
         </motion.div>
@@ -399,13 +535,17 @@ export default function AdminDashboard() {
                 <CardTitle>Recent Projects</CardTitle>
                 <CardDescription>Latest 5 projects</CardDescription>
               </div>
-              <Button variant="outline" size="sm">View All</Button>
+              <Button variant="outline" size="sm" asChild>
+                <Link href="/admin/projects">View All</Link>
+              </Button>
             </CardHeader>
             <CardContent>
               <DataTable
                 columns={projectColumns}
                 data={recentProjects}
                 pagination={false}
+                loading={loading}
+                emptyMessage="No projects found"
               />
             </CardContent>
           </Card>
@@ -421,19 +561,25 @@ export default function AdminDashboard() {
               <CardDescription>Items below minimum stock</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {inventoryAlerts.map((item) => (
-                <div key={item.name} className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
-                  <div className="space-y-0.5">
-                    <p className="text-sm font-medium">{item.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {item.current} {item.unit} left (min: {item.min})
-                    </p>
+              {materials.length > 0 ? (
+                materials.map((item) => (
+                  <div key={item.name} className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">{item.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {item.current} {item.unit ?? "units"} left (min: {item.min})
+                      </p>
+                    </div>
+                    <Badge variant="destructive" className="shrink-0">
+                      {item.current}/{item.min}
+                    </Badge>
                   </div>
-                  <Badge variant="destructive" className="shrink-0">
-                    {item.current}/{item.min}
-                  </Badge>
-                </div>
-              ))}
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground py-4 text-center">
+                  All items are above their minimum stock
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -446,24 +592,30 @@ export default function AdminDashboard() {
               <CardDescription>Latest updates</CardDescription>
             </CardHeader>
             <CardContent className="space-y-0">
-              {recentActivities.map((activity, i) => {
-                const Icon = activityIcons[activity.type] || Activity
-                return (
-                  <div
-                    key={i}
-                    className="flex items-start gap-3 py-3 border-b last:border-b-0"
-                  >
-                    <div className={`p-1.5 rounded-full ${activityColors[activity.type]}`}>
-                      <Icon className="size-3.5" />
+              {activities.length > 0 ? (
+                activities.slice(0, 6).map((activity, i) => {
+                  const Icon = activityIcons[activity.type] || Activity
+                  return (
+                    <div
+                      key={i}
+                      className="flex items-start gap-3 py-3 border-b last:border-b-0"
+                    >
+                      <div className={`p-1.5 rounded-full ${activityColors[activity.type]}`}>
+                        <Icon className="size-3.5" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium">{activity.action}</p>
+                        <p className="text-xs text-muted-foreground truncate">{activity.detail}</p>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground whitespace-nowrap">{activity.time}</span>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium">{activity.action}</p>
-                      <p className="text-xs text-muted-foreground truncate">{activity.detail}</p>
-                    </div>
-                    <span className="text-[10px] text-muted-foreground whitespace-nowrap">{activity.time}</span>
-                  </div>
-                )
-              })}
+                  )
+                })
+              ) : (
+                <p className="text-sm text-muted-foreground py-4 text-center">
+                  No recent activity
+                </p>
+              )}
             </CardContent>
           </Card>
         </motion.div>
