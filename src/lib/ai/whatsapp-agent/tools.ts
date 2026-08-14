@@ -6,6 +6,7 @@
 
 import { createAdminClient } from '@/lib/supabase/admin'
 import { logAgent } from '@/lib/ai/agent-provider'
+import { canonicalPhone } from '@/lib/phone'
 import { incomingDedupKey, outgoingDedupKey } from './dedup'
 import { createHash } from 'node:crypto'
 import type { LeadStatus, LeadRow, WhatsappMessageRow } from '@/types/database'
@@ -14,12 +15,17 @@ const admin = () => createAdminClient()
 
 // ── Customer lookup / create / update ──
 export async function searchCustomerByPhone(phone: string) {
-  const digits = phone.replace(/\D/g, '')
-  const { data } = await admin()
+  const phoneE164 = canonicalPhone(phone)
+  if (!phoneE164) return []
+  const { data, error } = await admin()
     .from('customers')
     .select('*')
-    .ilike('phone', `%${digits}%`)
+    .eq('phone_canonical', phoneE164)
     .limit(5)
+  if (error) {
+    await logAgent('search_customer_by_phone_error', null, 'error', { phone: phoneE164 }, error.message)
+    return []
+  }
   return (data ?? []) as unknown as Record<string, unknown>[]
 }
 
@@ -229,6 +235,7 @@ export async function getRecentWhatsAppHistory(phone: string, limit = 12) {
     .from('whatsapp_messages')
     .select('direction,message,created_at,ai_generated')
     .eq('phone_number', phone)
+    .eq('is_sensitive', false)
     .order('created_at', { ascending: false })
     .limit(Math.min(Math.max(limit, 1), 20))
 

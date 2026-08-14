@@ -65,6 +65,7 @@ function baseConversation(overrides: Record<string, unknown> = {}) {
     ai_suppressed: false,
     handoff_reason: null,
     support_mode_at: null,
+    identity_confirmed_at: null,
     paused_until: null,
     language_code: null,
     turn_count: 0,

@@ -31,9 +31,10 @@ export interface ProfileRow {
 
 export interface CustomerRow {
   id: string
-  profile_id: string
+  profile_id: string | null
   full_name: string | null
   phone: string | null
+  phone_canonical?: string | null
   email: string | null
   address: string | null
   city: string | null
@@ -282,6 +283,7 @@ export interface AiConversationRow {
   ai_suppressed: boolean
   handoff_reason: string | null
   support_mode_at: string | null
+  identity_confirmed_at: string | null
   paused_until: string | null
   language_code: string | null
   turn_count: number
@@ -309,7 +311,41 @@ export interface WhatsappMessageRow {
   conversation_id: string | null
   decision_action: ConversationAction | null
   post_send_state: AiConversationStatus | null
+  is_sensitive: boolean
   created_at: string
+}
+
+export type ProvisioningStatus =
+  | 'ready'
+  | 'identity_confirmed'
+  | 'auth_created'
+  | 'customer_linked'
+  | 'credential_pending'
+  | 'credential_sent'
+  | 'blocked'
+  | 'failed_retryable'
+
+export interface WhatsappCustomerAccountProvisioningRow {
+  id: string
+  phone_e164: string
+  conversation_id: string | null
+  customer_id: string | null
+  profile_id: string | null
+  auth_user_id: string | null
+  login_email: string | null
+  full_name: string | null
+  city: string | null
+  address: string | null
+  identity_data: Record<string, unknown> | null
+  status: ProvisioningStatus
+  identity_verified_at: string | null
+  credential_outbox_id: string | null
+  credentials_sent_at: string | null
+  attempt_count: number
+  last_error: string | null
+  blocked_reason: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface AiAgentLogRow {
@@ -369,6 +405,7 @@ export interface Database {
       whatsapp_messages: { Row: WhatsappMessageRow; Insert: Partial<WhatsappMessageRow>; Update: Partial<WhatsappMessageRow> }
       ai_agent_logs: { Row: AiAgentLogRow; Insert: Partial<AiAgentLogRow>; Update: Partial<AiAgentLogRow> }
       leads: { Row: LeadRow; Insert: Partial<LeadRow>; Update: Partial<LeadRow> }
+      whatsapp_customer_account_provisioning: { Row: WhatsappCustomerAccountProvisioningRow; Insert: Partial<WhatsappCustomerAccountProvisioningRow>; Update: Partial<WhatsappCustomerAccountProvisioningRow> }
     }
     Functions: {
       get_user_role: { Args: never; Returns: UserRole }

@@ -4,6 +4,8 @@ import { isWorkerAuthorized, unauthorized } from '@/lib/whatsapp/worker-auth'
 import { getAgentSettings } from '@/lib/ai/whatsapp-agent/engine'
 import { logAgent } from '@/lib/ai/agent-provider'
 
+const CREDENTIAL_DEDUP_PREFIX = 'customer-account-credentials:'
+
 // Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
 // only — when unset there is no behavior change and no extra logs.
 const PERF = process.env.WHATSAPP_PERF === '1'
@@ -111,7 +113,7 @@ export async function POST(request: Request) {
           .update({ status: 'sent', sent_at: now, claimed_at: null, error_message: null })
           .eq('id', r.id)
           .eq('status', 'processing')
-          .select('id,conversation_id,post_send_state')
+          .select('id,conversation_id,post_send_state,dedup_key')
           .maybeSingle()
 
         console.log(`[OUTBOX_ACK] id=${r.id} status=sent row_found=${Boolean(sentRow)} conversation_id=${sentRow?.conversation_id ?? 'none'}`)
@@ -119,6 +121,29 @@ export async function POST(request: Request) {
           messageId: r.id,
           conversationId: sentRow?.conversation_id ?? null,
         })
+
+        // Credential messages: update the provisioning record so the system
+        // knows credentials were delivered and does not retry/re-generate.
+        if (sentRow?.dedup_key?.startsWith(CREDENTIAL_DEDUP_PREFIX)) {
+          const provisioningId = sentRow.dedup_key.slice(CREDENTIAL_DEDUP_PREFIX.length)
+          if (provisioningId) {
+            await admin
+              .from('whatsapp_customer_account_provisioning')
+              .update({
+                status: 'credential_sent',
+                credentials_sent_at: now,
+                credential_outbox_id: sentRow.id,
+                updated_at: now,
+              })
+              .eq('id', provisioningId)
+              .in('status', ['credential_pending', 'credential_sent'])
+            await logAgent('credential_message_acked', null, 'success', {
+              messageId: r.id,
+              provisioningId,
+              conversationId: sentRow.conversation_id ?? null,
+            })
+          }
+        }
 
         // Move conversation state after confirmed send (reply_queued → controller's post_send_state)
         if (sentRow?.conversation_id && sentRow.post_send_state) {

@@ -44,6 +44,42 @@ import {
 } from './types'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
 
+const ADDRESS_STEP = 'collect_address'
+const CONFIRM_STEP = 'confirm_identity'
+
+function isIdentityConfirmed(conversation: AiConversationRow): boolean {
+  return Boolean(conversation.identity_confirmed_at)
+}
+
+function buildIdentitySummary(collected: Record<string, unknown>): string {
+  const name = collected.name ?? ''
+  const email = collected.email ?? ''
+  const city = collected.location ?? ''
+  const address = collected.address ?? ''
+  return `Please confirm your details:
+
+Name: ${name}
+Email: ${email}
+City: ${city}
+Address: ${address}
+
+Reply YES to confirm, or tell me what to change.`
+}
+
+function parseConfirmationReply(text: string): 'yes' | 'no' | 'unclear' {
+  const normalized = text.toLowerCase().trim()
+  if (/^(yes|yeah|yep|yup|ok|okay|confirm|sure|\u2713|\u2714)(\s|$|[,.])/i.test(normalized)) {
+    return 'yes'
+  }
+  if (
+    /^(no|nope|nah|change|edit|wrong|incorrect|cancel)(\s|$|[,.])/i.test(normalized) ||
+    /\b(change|wrong|incorrect|update|edit)\b/i.test(normalized)
+  ) {
+    return 'no'
+  }
+  return 'unclear'
+}
+
 const admin = () => createAdminClient()
 
 // ── Emergency fallback prompts (legacy form flow) ──
@@ -238,6 +274,14 @@ export async function runOnboardingTurn(input: {
 }): Promise<OnboardingTurnResult> {
   const { conversation, phone, incomingText, providerMessageId, settings, isReturning, lastInteractionAt, isNewConversation } = input
 
+  if (conversation.current_step === ADDRESS_STEP) {
+    return handleCollectAddressTurn(input)
+  }
+
+  if (conversation.current_step === CONFIRM_STEP) {
+    return handleConfirmationTurn(input)
+  }
+
   if (conversation.ai_suppressed || conversation.conversation_status === 'human_active') {
     await logAgent('ai_reply_suppressed', null, 'info', {
       phone,
@@ -332,7 +376,7 @@ async function applyControllerDecision(input: {
   const declined = decideInput.declinedFields
   const customerName = decideInput.customerName
 
-  const nextCollected = {
+  const nextCollected: Record<string, unknown> = {
     ...collected,
     ...decision.extracted_fields,
     _declined_fields: Array.from(new Set([
@@ -341,14 +385,96 @@ async function applyControllerDecision(input: {
     ])),
   }
 
-  // Onboarding finished → hand control to the engine so completion.ts runs.
-  if (isOnboardingComplete(nextCollected) && !conversation.support_mode_at) {
-    // Persist the collected data now so it survives even if completion.ts
-    // fails mid-way; status stays 'processing' until completion sets it.
+  // Onboarding fields finished → before account creation we require explicit
+  // confirmation of identity details, plus a structured address if missing.
+  if (isOnboardingComplete(nextCollected) && !conversation.support_mode_at && !isIdentityConfirmed(conversation)) {
+    // If the customer hasn't provided a detailed address yet, ask for it now.
+    if (!nextCollected.address) {
+      const addressQuestion = 'Thank you! Before we create your account, please provide your detailed address (street, area, etc.).'
+      await admin()
+        .from('ai_conversations')
+        .update({
+          conversation_status: 'reply_queued',
+          collected_data: nextCollected,
+          current_step: ADDRESS_STEP,
+          last_intent: decision.intent,
+          last_action: decision.action,
+          last_question: addressQuestion,
+          turn_count: (conversation.turn_count ?? 0) + 1,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', conversation.id)
+
+      if (settings.auto_reply_enabled) {
+        await queueOutgoingMessage(phone, addressQuestion, true, {
+          conversationId: conversation.id,
+          sourceInboundMessageId: providerMessageId ?? null,
+          decisionAction: 'reply',
+          postSendState: 'waiting_customer',
+        })
+      }
+
+      return {
+        mode: 'onboarding',
+        complete: false,
+        reply: addressQuestion,
+        nextState: 'waiting_customer',
+        replyQueued: settings.auto_reply_enabled,
+        collected: nextCollected,
+        decisionAction: 'reply',
+        conversationId: conversation.id,
+      }
+    }
+
+    // All identity fields present — ask for explicit confirmation.
+    const confirmationMessage = buildIdentitySummary(nextCollected)
+    await admin()
+      .from('ai_conversations')
+      .update({
+        conversation_status: 'reply_queued',
+        collected_data: nextCollected,
+        current_step: CONFIRM_STEP,
+        last_intent: decision.intent,
+        last_action: decision.action,
+        last_question: confirmationMessage,
+        turn_count: (conversation.turn_count ?? 0) + 1,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', conversation.id)
+
+    if (settings.auto_reply_enabled) {
+      await queueOutgoingMessage(phone, confirmationMessage, true, {
+        conversationId: conversation.id,
+        sourceInboundMessageId: providerMessageId ?? null,
+        decisionAction: 'reply',
+        postSendState: 'waiting_customer',
+      })
+    }
+
+    await logAgent('onboarding_awaiting_identity_confirmation', null, 'info', {
+      phone,
+      conversationId: conversation.id,
+    })
+
+    return {
+      mode: 'onboarding',
+      complete: false,
+      reply: confirmationMessage,
+      nextState: 'waiting_customer',
+      replyQueued: settings.auto_reply_enabled,
+      collected: nextCollected,
+      decisionAction: 'reply',
+      conversationId: conversation.id,
+    }
+  }
+
+  // Identity confirmed → hand control to the engine so completion.ts runs.
+  if (isIdentityConfirmed(conversation) && !conversation.support_mode_at) {
     await admin()
       .from('ai_conversations')
       .update({
         collected_data: nextCollected,
+        current_step: null,
         last_intent: decision.intent,
         last_action: decision.action,
         turn_count: (conversation.turn_count ?? 0) + 1,
@@ -491,6 +617,175 @@ async function applyControllerDecision(input: {
     replyQueued: Boolean(queued),
     collected: nextCollected,
     decisionAction: decision.action,
+    conversationId: conversation.id,
+  }
+}
+
+// ── Deterministic address collection turn ──
+async function handleCollectAddressTurn(input: {
+  conversation: AiConversationRow
+  phone: string
+  incomingText: string
+  providerMessageId?: string | null
+  settings: AiAgentSettingsRow
+}): Promise<OnboardingTurnResult> {
+  const { conversation, phone, incomingText, providerMessageId, settings } = input
+  const collected = (conversation.collected_data ?? {}) as Record<string, unknown>
+  const address = incomingText.trim()
+
+  if (!address) {
+    const retry = 'Please provide your detailed address so we can create your account.'
+    if (settings.auto_reply_enabled) {
+      await queueOutgoingMessage(phone, retry, true, {
+        conversationId: conversation.id,
+        sourceInboundMessageId: providerMessageId ?? null,
+        decisionAction: 'reply',
+        postSendState: 'waiting_customer',
+      })
+    }
+    return {
+      mode: 'onboarding',
+      complete: false,
+      reply: retry,
+      nextState: 'waiting_customer',
+      replyQueued: settings.auto_reply_enabled,
+      collected,
+      decisionAction: 'reply',
+      conversationId: conversation.id,
+    }
+  }
+
+  const nextCollected = { ...collected, address }
+  const confirmationMessage = buildIdentitySummary(nextCollected)
+
+  await admin()
+    .from('ai_conversations')
+    .update({
+      conversation_status: 'reply_queued',
+      collected_data: nextCollected,
+      current_step: CONFIRM_STEP,
+      last_question: confirmationMessage,
+      turn_count: (conversation.turn_count ?? 0) + 1,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', conversation.id)
+
+  if (settings.auto_reply_enabled) {
+    await queueOutgoingMessage(phone, confirmationMessage, true, {
+      conversationId: conversation.id,
+      sourceInboundMessageId: providerMessageId ?? null,
+      decisionAction: 'reply',
+      postSendState: 'waiting_customer',
+    })
+  }
+
+  return {
+    mode: 'onboarding',
+    complete: false,
+    reply: confirmationMessage,
+    nextState: 'waiting_customer',
+    replyQueued: settings.auto_reply_enabled,
+    collected: nextCollected,
+    decisionAction: 'reply',
+    conversationId: conversation.id,
+  }
+}
+
+// ── Deterministic identity confirmation turn ──
+async function handleConfirmationTurn(input: {
+  conversation: AiConversationRow
+  phone: string
+  incomingText: string
+  providerMessageId?: string | null
+  settings: AiAgentSettingsRow
+}): Promise<OnboardingTurnResult> {
+  const { conversation, phone, incomingText, providerMessageId, settings } = input
+  const collected = (conversation.collected_data ?? {}) as Record<string, unknown>
+  const answer = parseConfirmationReply(incomingText)
+
+  if (answer === 'yes') {
+    const now = new Date().toISOString()
+    await admin()
+      .from('ai_conversations')
+      .update({
+        collected_data: collected,
+        current_step: null,
+        identity_confirmed_at: now,
+        turn_count: (conversation.turn_count ?? 0) + 1,
+        updated_at: now,
+      })
+      .eq('id', conversation.id)
+
+    await logAgent('onboarding_identity_confirmed', null, 'info', {
+      phone,
+      conversationId: conversation.id,
+    })
+
+    return {
+      mode: 'onboarding',
+      complete: true,
+      reply: null,
+      nextState: 'completed',
+      replyQueued: false,
+      collected,
+      decisionAction: 'reply',
+      conversationId: conversation.id,
+    }
+  }
+
+  if (answer === 'no') {
+    const clarify = 'No problem. Which detail would you like to change, or please provide the correct information.'
+    await admin()
+      .from('ai_conversations')
+      .update({
+        conversation_status: 'waiting_customer',
+        current_step: null,
+        last_question: clarify,
+        turn_count: (conversation.turn_count ?? 0) + 1,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', conversation.id)
+
+    if (settings.auto_reply_enabled) {
+      await queueOutgoingMessage(phone, clarify, true, {
+        conversationId: conversation.id,
+        sourceInboundMessageId: providerMessageId ?? null,
+        decisionAction: 'reply',
+        postSendState: 'waiting_customer',
+      })
+    }
+
+    return {
+      mode: 'onboarding',
+      complete: false,
+      reply: clarify,
+      nextState: 'waiting_customer',
+      replyQueued: settings.auto_reply_enabled,
+      collected,
+      decisionAction: 'reply',
+      conversationId: conversation.id,
+    }
+  }
+
+  // Unclear — re-send confirmation summary.
+  const confirmationMessage = buildIdentitySummary(collected)
+  if (settings.auto_reply_enabled) {
+    await queueOutgoingMessage(phone, confirmationMessage, true, {
+      conversationId: conversation.id,
+      sourceInboundMessageId: providerMessageId ?? null,
+      decisionAction: 'reply',
+      postSendState: 'waiting_customer',
+    })
+  }
+
+  return {
+    mode: 'onboarding',
+    complete: false,
+    reply: confirmationMessage,
+    nextState: 'waiting_customer',
+    replyQueued: settings.auto_reply_enabled,
+    collected,
+    decisionAction: 'reply',
     conversationId: conversation.id,
   }
 }

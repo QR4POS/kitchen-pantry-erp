@@ -889,6 +889,12 @@ async function saveSendFailure(page) {
   }
 }
 
+// For sensitive messages (e.g. credentials), never capture the screen because
+// the composer may still contain plaintext secrets.
+async function saveSafeSendFailure(_page, reason) {
+  console.error(`[worker] sensitive send failure logged (no screenshot): ${reason}`)
+}
+
 async function waitForOpenChat(page, identifier, timeout = 8000) {
   const digits = identifier.replace(/[^\d]/g, '')
   const tail = digits.slice(-8)
@@ -953,6 +959,8 @@ async function openChatByIdentifier(page, identifier) {
 async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
   const tSend = Date.now()
   const identifier = (phoneNumber || '').trim()
+  const sensitive = Boolean(opts.sensitive)
+  const onFailure = sensitive ? saveSafeSendFailure : saveSendFailure
   if (!identifier) {
     console.error('[worker] opening chat: empty chat identifier')
     return { ok: false, error: 'empty chat identifier' }
@@ -962,7 +970,7 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
   const opened = await openChatByIdentifier(page, identifier)
   if (!opened) {
     console.error(`[worker] opening chat: chat not locatable (${identifier}), giving up`)
-    await saveSendFailure(page)
+    await onFailure(page, `chat not locatable (${identifier})`)
     return { ok: false, error: `chat not locatable (${identifier})` }
   }
 
@@ -985,7 +993,7 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
   if (!headerMatches && !urlMatches) {
     console.log(`[CHAT_IDENTITY_MISMATCH] requested=${identifier} url=${urlMatches ? 'match' : 'mismatch'} header="${activeTitle}" headerDigits=${activeDigits} reason=outbox_pre_send_guard`)
     console.error(`[worker] send aborted: active chat identity does not match recipient (${identifier})`)
-    await saveSendFailure(page)
+    await onFailure(page, `active chat identity does not match recipient (${identifier})`)
     return { ok: false, error: `active chat identity does not match recipient (${identifier})` }
   }
 
@@ -998,14 +1006,14 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
     const sent = await sendMediaToChat(page, opts.mediaUrl, text)
     if (!sent) {
       console.error('[worker] media send failed')
-      await saveSendFailure(page)
+      await onFailure(page, 'image send failed')
       return { ok: false, error: 'image send failed' }
     }
   } else {
     const input = await waitForMessageInput(page, 10000)
     if (!input) {
       console.error('[worker] message input not found (WhatsApp DOM changed)')
-      await saveSendFailure(page)
+      await onFailure(page, 'message input not found')
       return { ok: false, error: 'message input not found' }
     }
 
@@ -1016,7 +1024,7 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
     if (expectedDigits && preTypeDigits && !preTypeDigits.endsWith(expectedDigits.slice(-8)) && !expectedDigits.endsWith(preTypeDigits.slice(-8))) {
       console.log(`[CHAT_IDENTITY_MISMATCH] requested=${identifier} header="${preTypeTitle}" headerDigits=${preTypeDigits} reason=pre_type_guard`)
       console.error(`[worker] send aborted: active chat changed before typing (${identifier})`)
-      await saveSendFailure(page)
+      await onFailure(page, `active chat changed before typing (${identifier})`)
       return { ok: false, error: `active chat changed before typing (${identifier})` }
     }
 
@@ -1054,7 +1062,7 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
     }
     if (!verified) {
       console.error(`[worker] send verification failed: composer still holds text (path=${sendPath})`)
-      await saveSendFailure(page)
+      await onFailure(page, 'send not verified (composer not cleared)')
       return { ok: false, error: 'send not verified (composer not cleared)' }
     }
   }
@@ -1333,6 +1341,7 @@ async function processOutbox(page, messageState) {
       const outcome = await sendMessageToChat(page, msg.phone_number, msg.message, messageState, {
         mediaUrl: msg.media_url || null,
         messageType: msg.message_type || 'text',
+        sensitive: Boolean(msg.is_sensitive),
       })
       if (outcome.ok) {
         result.sent += 1

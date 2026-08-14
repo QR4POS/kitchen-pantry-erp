@@ -17,7 +17,7 @@ import {
   createNotification,
 } from '@/lib/ai/whatsapp-agent/tools'
 import { logAgent } from '@/lib/ai/agent-provider'
-import { syncCustomerForCollected } from './customer-sync'
+import { provisionCustomerAccount } from '@/lib/customer-management/provisionCustomerAccount'
 import { upsertLeadForCollected } from './lead-sync'
 import { ONBOARDING_CONFIRMATION, findAdminId, type CompletionResult } from './types'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
@@ -40,8 +40,53 @@ export async function runOnboardingCompletion(input: {
     return { customerId: conversation.customer_id, leadId: null, confirmationQueued: false }
   }
 
-  // 1. Customer
-  const customerId = await syncCustomerForCollected({ phone, collected, settings })
+  // Identity confirmation is mandatory for automatic account creation.
+  if (!conversation.identity_confirmed_at) {
+    await admin
+      .from('ai_conversations')
+      .update({
+        conversation_status: 'waiting_customer',
+        current_step: null,
+        handoff_reason: 'Onboarding completed without identity confirmation',
+        updated_at: now,
+      })
+      .eq('id', conversation.id)
+    await logAgent('onboarding_completion_no_identity_confirmation', null, 'error', {
+      phone,
+      conversationId: conversation.id,
+    })
+    return { customerId: null, leadId: null, confirmationQueued: false }
+  }
+
+  // 1. Provision the customer account (Auth + CRM) idempotently.
+  //    The verified WhatsApp phone is the authoritative identity.
+  const provisionResult = await provisionCustomerAccount({
+    phone,
+    fullName: String(collected.name ?? '').trim(),
+    email: String(collected.email ?? '').trim().toLowerCase(),
+    city: collected.location ? String(collected.location).trim() : null,
+    address: collected.address ? String(collected.address).trim() : null,
+    conversationId: conversation.id,
+    confirmedAt: conversation.identity_confirmed_at,
+  })
+
+  if (!provisionResult.success) {
+    const reason = provisionResult.blockedReason ?? provisionResult.error ?? 'Account provisioning failed'
+    await admin
+      .from('ai_conversations')
+      .update({
+        conversation_status: 'human_active',
+        ai_suppressed: true,
+        current_step: null,
+        handoff_reason: reason,
+        updated_at: now,
+      })
+      .eq('id', conversation.id)
+    await logAgent('onboarding_provisioning_failed', null, 'error', { phone, conversationId: conversation.id }, reason)
+    return { customerId: null, leadId: null, confirmationQueued: false }
+  }
+
+  const customerId = provisionResult.customerId ?? null
 
   // 2. Lead
   const lead = await upsertLeadForCollected({
@@ -104,6 +149,7 @@ export async function runOnboardingCompletion(input: {
     customerId: customerId ?? null,
     leadId: lead?.id ?? null,
     confirmationQueued,
+    credentialsSent: provisionResult.password ? true : false,
   })
 
   return {
