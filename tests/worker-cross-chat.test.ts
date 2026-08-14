@@ -46,6 +46,7 @@ let fn: {
   isAlreadyProcessedBoundary: (msg: Record<string, unknown>, storedLastId: string | null, storedLastText: string | null) => boolean
   previewSuggestsNewer: (expectedPreview: string | null | undefined, storedLastText: string | null | undefined) => boolean
   isRowUnchangedTerminal: (lastOutcome: string | null | undefined) => boolean
+  isTerminalSkipReason: (skipReason: string | null | undefined) => boolean
   hasSentExactText: (meta: Record<string, unknown> | undefined, text: string, phone: string) => boolean
 }
 
@@ -77,6 +78,7 @@ beforeAll(() => {
     extractFunction(src, 'isAlreadyProcessedBoundary'),
     extractFunction(src, 'previewSuggestsNewer'),
     extractFunction(src, 'isRowUnchangedTerminal'),
+    extractFunction(src, 'isTerminalSkipReason'),
     extractFunction(src, 'hasSentExactText'),
   ].join('\n')
 
@@ -84,7 +86,7 @@ beforeAll(() => {
     'saveMessageState',
     'DEBUG',
     'createHash',
-    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, hasSentExactText };`
+    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, isTerminalSkipReason, hasSentExactText };`
   )
   // Deterministic fake createHash so generateFallbackId produces distinct ids
   // for distinct (chat, text, timestamp) inputs.
@@ -303,11 +305,26 @@ describe('rowSig permanent-skip recovery', () => {
     // Old/never-handled chats have no lastOutcome (or not_handled) → eligible for recovery.
     expect(fn.isRowUnchangedTerminal(undefined)).toBe(false)
     expect(fn.isRowUnchangedTerminal('not_handled')).toBe(false)
+    expect(fn.isRowUnchangedTerminal('extract_giveup')).toBe(false)
+    expect(fn.isRowUnchangedTerminal('no_reply_terminal')).toBe(false)
   })
 
   it('a chat whose last message reached a terminal outcome IS skipped as row_unchanged', () => {
     expect(fn.isRowUnchangedTerminal('handled')).toBe(true)
-    expect(fn.isRowUnchangedTerminal('no_reply_terminal')).toBe(true)
+  })
+
+  it('terminal skip reasons allow rowSig fast-path without a queued reply', () => {
+    expect(fn.isTerminalSkipReason('already_replied')).toBe(true)
+    expect(fn.isTerminalSkipReason('matches_outgoing')).toBe(true)
+    expect(fn.isTerminalSkipReason('duplicate')).toBe(true)
+    expect(fn.isTerminalSkipReason('own_reply')).toBe(true)
+  })
+
+  it('non-terminal skip reasons keep the chat eligible for reprocessing', () => {
+    expect(fn.isTerminalSkipReason('agent_disabled')).toBe(false)
+    expect(fn.isTerminalSkipReason('processing_error')).toBe(false)
+    expect(fn.isTerminalSkipReason(undefined)).toBe(false)
+    expect(fn.isTerminalSkipReason('wait')).toBe(false)
   })
 
   it('a successfully replied message remains protected from duplicate processing', () => {

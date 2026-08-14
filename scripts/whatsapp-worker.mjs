@@ -396,7 +396,12 @@ function previewSuggestsNewer(expectedPreview, storedLastText) {
 // message was never confirmed handled → the chat must stay eligible for
 // recovery/reprocessing instead of being permanently skipped.
 function isRowUnchangedTerminal(lastOutcome) {
-  return lastOutcome === 'handled' || lastOutcome === 'no_reply_terminal'
+  return lastOutcome === 'handled'
+}
+
+// Outcomes that legitimately end a turn even though no reply was queued.
+function isTerminalSkipReason(skipReason) {
+  return skipReason === 'already_replied' || skipReason === 'matches_outgoing' || skipReason === 'duplicate' || skipReason === 'own_reply'
 }
 
 // True when this account already SENT the exact normalized text to this chat
@@ -681,7 +686,8 @@ async function openChatByPhone(page, digits) {
     //    number. Works for saved contacts (name titles) and unsaved numbers
     //    alike because the NUMBER, not a DOM title, drives the navigation. Tries
     //    a pure-SPA hash change first (no reload), then a full deep-link
-    //    navigation as fallback.
+    //    navigation as fallback. The URL attempt is only considered successful
+    //    when confirmChatOpenedByUrl() verifies the active header matches.
     const openedViaUrl = await openChatByPhoneViaUrl(page, normalized)
     if (openedViaUrl) return openedViaUrl
   }
@@ -689,6 +695,7 @@ async function openChatByPhone(page, digits) {
   // 1. Primary: find a chat title span whose digits match the target number
   //    and click it directly — works for phone-number and contact-name titles.
   //    The clickable target is the row ancestor, never the bare title span.
+  //    After clicking, verify the active conversation actually changed.
   const anchors = page.locator('span[title]')
   const count = await anchors.count().catch(() => 0)
   for (let i = 0; i < count; i++) {
@@ -696,7 +703,10 @@ async function openChatByPhone(page, digits) {
     if (title.replace(/\D/g, '').endsWith(digits.slice(-8))) {
       const clickTarget = await clickableRowOf(anchors.nth(i))
       await clickTarget.click({ timeout: 3000 }).catch(() => {})
-      return title
+      await sleep(400)
+      const confirmed = await waitForOpenChat(page, digits, 4000)
+      if (confirmed) return title
+      console.log(`[worker] detect failure: row click did not open ${digits} (title="${title}")`)
     }
   }
 
@@ -720,7 +730,10 @@ async function openChatByPhone(page, digits) {
       if (t.replace(/\D/g, '').endsWith(digits.slice(-8))) {
         const clickTarget = await clickableRowOf(results.nth(i))
         await clickTarget.click({ timeout: 3000 }).catch(() => {})
-        return t
+        await sleep(400)
+        const confirmed = await waitForOpenChat(page, digits, 4000)
+        if (confirmed) return t
+        console.log(`[worker] detect failure: search result click did not open ${digits} (title="${t}")`)
       }
     }
   }
@@ -740,21 +753,40 @@ async function openChatByPhoneViaUrl(page, digits) {
     if (viaHash) return viaHash
   } catch { /* ignore */ }
 
+  // Fallback to the classic /send?phone= deep link if the SPA hash did not
+  // produce a verifiable open chat.
+  try {
+    await page.goto(`${WHATSAPP_WEB}/send?phone=${digits}`, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await sleep(1500)
+    const viaDeepLink = await confirmChatOpenedByUrl(page, digits)
+    if (viaDeepLink) return viaDeepLink
+  } catch { /* ignore */ }
+
   return ''
 }
 
-// Confirm the target chat is actually open after a URL navigation: the URL hash
-// must carry the target digits AND the open-chat header must resolve to a real
-// title. Polls briefly because WhatsApp renders the chat asynchronously.
+// Confirm the target chat is actually open after a URL navigation.
+// The URL hash must carry the target digits AND the active header must match
+// the requested number. A header from a stale/incorrect conversation is NOT
+// accepted.
 async function confirmChatOpenedByUrl(page, digits) {
   const tail = digits.slice(-10)
   const deadline = Date.now() + 5000
   while (Date.now() < deadline) {
     try {
-      const u = page.url().match(/#p\/\+?(\d+)/)
-      if (u && tail && u[1].includes(tail)) {
+      const u = page.url().match(/#p\/\+?(\d+)/) || page.url().match(/[?&]phone=(\d+)/)
+      const urlDigits = u && u[1] ? u[1].replace(/\D/g, '') : ''
+      if (urlDigits && tail && urlDigits.includes(tail)) {
         const title = await readOpenChatTitle(page, '')
-        if (title) return title
+        const headerDigits = (title || '').replace(/\D/g, '')
+        // Header must contain the requested number, OR the title itself must be
+        // the requested number.
+        if (title && (headerDigits.includes(tail) || (title.replace(/\D/g, '').endsWith(tail)))) {
+          return title
+        }
+        if (title) {
+          console.log(`[CHAT_IDENTITY_MISMATCH] requested=${digits} url=${urlDigits} header="${title}" headerDigits=${headerDigits} reason=url_header_mismatch`)
+        }
       }
     } catch { /* keep polling */ }
     await sleep(500)
@@ -890,8 +922,10 @@ async function openChatByIdentifier(page, identifier) {
   const found = await target.count().catch(() => 0) > 0
   if (found) {
     await target.click({ timeout: 3000 }).catch(() => {})
+    await sleep(400)
     const confirmed = await waitForOpenChat(page, identifier)
     if (confirmed) return confirmed
+    console.log(`[worker] detect failure: exact title click did not open "${identifier}"`)
   }
   // 3. aria-label / text-based fallbacks (newer builds expose the contact name
   //    or number via the row aria-label or visible text).
@@ -899,15 +933,19 @@ async function openChatByIdentifier(page, identifier) {
     const byAria = page.locator(`div[id="side"] [aria-label*="${digits}"]`).first()
     if ((await byAria.count().catch(() => 0)) > 0) {
       await byAria.click({ timeout: 3000 }).catch(() => {})
+      await sleep(400)
       const confirmed = await waitForOpenChat(page, identifier)
       if (confirmed) return confirmed
+      console.log(`[worker] detect failure: aria-label click did not open "${identifier}"`)
     }
   }
   const byText = page.getByText(identifier, { exact: true }).first()
   if ((await byText.count().catch(() => 0)) > 0) {
     await byText.click({ timeout: 3000 }).catch(() => {})
+    await sleep(400)
     const confirmed = await waitForOpenChat(page, identifier)
     if (confirmed) return confirmed
+    console.log(`[worker] detect failure: text click did not open "${identifier}"`)
   }
   return ''
 }
@@ -927,6 +965,30 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
     await saveSendFailure(page)
     return { ok: false, error: `chat not locatable (${identifier})` }
   }
+
+  // Final recipient-safety guard: the active WhatsApp conversation MUST match
+  // the intended recipient before any typing or sending happens.
+  const expectedDigits = identifier.replace(/\D/g, '')
+  const activeTitle = await readOpenChatTitle(page, identifier)
+  const activeDigits = (activeTitle || '').replace(/\D/g, '')
+  const headerMatches = expectedDigits && activeDigits && (
+    activeDigits.endsWith(expectedDigits.slice(-8)) || expectedDigits.endsWith(activeDigits.slice(-8))
+  )
+  const urlMatches = await (async () => {
+    try {
+      const u = page.url().match(/#p\/\+?(\d+)/) || page.url().match(/[?&]phone=(\d+)/)
+      if (!u || !u[1]) return false
+      const urlDigits = u[1].replace(/\D/g, '')
+      return expectedDigits && urlDigits && urlDigits.endsWith(expectedDigits.slice(-8))
+    } catch { return false }
+  })()
+  if (!headerMatches && !urlMatches) {
+    console.log(`[CHAT_IDENTITY_MISMATCH] requested=${identifier} url=${urlMatches ? 'match' : 'mismatch'} header="${activeTitle}" headerDigits=${activeDigits} reason=outbox_pre_send_guard`)
+    console.error(`[worker] send aborted: active chat identity does not match recipient (${identifier})`)
+    await saveSendFailure(page)
+    return { ok: false, error: `active chat identity does not match recipient (${identifier})` }
+  }
+
   console.log(`[OUTBOX_CHAT_RESOLVED] chat=${canonicalPhone(identifier) || identifier}`)
   await sleep(1200)
 
@@ -945,6 +1007,17 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
       console.error('[worker] message input not found (WhatsApp DOM changed)')
       await saveSendFailure(page)
       return { ok: false, error: 'message input not found' }
+    }
+
+    // Re-validate immediately before typing: the composer we found must belong
+    // to the intended recipient. If the active header changed, abort.
+    const preTypeTitle = await readOpenChatTitle(page, identifier)
+    const preTypeDigits = (preTypeTitle || '').replace(/\D/g, '')
+    if (expectedDigits && preTypeDigits && !preTypeDigits.endsWith(expectedDigits.slice(-8)) && !expectedDigits.endsWith(preTypeDigits.slice(-8))) {
+      console.log(`[CHAT_IDENTITY_MISMATCH] requested=${identifier} header="${preTypeTitle}" headerDigits=${preTypeDigits} reason=pre_type_guard`)
+      console.error(`[worker] send aborted: active chat changed before typing (${identifier})`)
+      await saveSendFailure(page)
+      return { ok: false, error: `active chat changed before typing (${identifier})` }
     }
 
     console.log('[worker] typing message')
@@ -999,6 +1072,12 @@ async function sendMessageToChat(page, phoneNumber, text, state, opts = {}) {
     const chatKey = canonicalPhone(phoneNumber) || (phoneNumber || '').toLowerCase().replace(/[^a-z0-9]/g, '')
     if (chatKey && state.chats && state.chats[chatKey]) {
       state.chats[chatKey].lastSentText = normalizeMessageText(text)
+      // Store the verified chat title for this phone so the outbox can open
+      // saved-contact chats by name when the numeric search fails.
+      const verifiedTitle = await readOpenChatTitle(page, phoneNumber)
+      if (verifiedTitle) {
+        state.chats[chatKey].verifiedTitle = verifiedTitle
+      }
       saveMessageState(state)
     }
   }
@@ -1946,47 +2025,121 @@ async function scanChatRows(page) {
   return candidates
 }
 
-// ── Chat identifier resolution ──
-// Never silently skip a detected chat. Priority: message DOM data-id (…@c.us)
-// → URL hash (#p/<digits>) → title digits → data-pre-plain-text sender phone →
-// final fallback: the clean chat title (never empty).
-async function resolveChatPhone(page, title, messageDataId) {
+// ── Chat identity resolution ──
+// Returns the canonical phone for the CURRENTLY ACTIVE conversation, or ''
+// when no verified identity can be established.
+//
+// Authority order (most trusted first):
+//   1. Verified numeric active-chat header / title.
+//   2. Current incoming bubble's aria-label sender phone.
+//   3. data-id values scoped to #main (the active conversation).
+//   4. URL hash, but ONLY when it agrees with the active header.
+//   5. The chat-list title digits (for unsaved numbers).
+//   6. data-pre-plain-text sender phone scoped to #main.
+//
+// A stored phone number is NEVER allowed to override a freshly detected
+// active-chat identity. If the stored value disagrees with the active
+// conversation, an [IDENTITY_MISMATCH] log is emitted and resolution fails
+// safe (returns '') so the chat is skipped rather than misrouted.
+async function resolveChatPhone(page, title, messageDataId, bubbleSenderPhone = '', storedPhone = '') {
+  const titleDigits = canonicalPhone(title)
+  const storedDigits = canonicalPhone(storedPhone)
+  const expectedDigits = titleDigits || storedDigits
+
+  // 1. Active numeric header is the primary authority.
+  const headerTitle = await readOpenChatTitle(page, title)
+  const headerDigits = canonicalPhone(headerTitle)
+  if (headerDigits) {
+    if (!expectedDigits || headerDigits === expectedDigits) {
+      return headerDigits
+    }
+    console.log(`[IDENTITY_MISMATCH] chat=${title} resolvedPhone=${headerDigits} source=active_header expected=${expectedDigits}`)
+  }
+
+  // 2. Current bubble aria-label sender phone (strong for saved contacts).
+  const bubbleDigits = canonicalPhone(bubbleSenderPhone)
+  if (bubbleDigits) {
+    if (!expectedDigits || bubbleDigits === expectedDigits) {
+      return bubbleDigits
+    }
+    console.log(`[IDENTITY_MISMATCH] chat=${title} resolvedPhone=${bubbleDigits} source=current_bubble_aria expected=${expectedDigits}`)
+  }
+
+  // 3. data-id values scoped to the active conversation (#main) only.
+  // Page-wide data-id scans are intentionally NOT used — stale bubbles from
+  // previously opened chats must never leak into the current chat identity.
   if (messageDataId) {
     const m = messageDataId.match(/(\d+)@c\.us/)
-    if (m) return m[1]
+    if (m) {
+      const digits = m[1]
+      if (!expectedDigits || canonicalPhone(digits) === expectedDigits) {
+        return digits
+      }
+      console.log(`[IDENTITY_MISMATCH] chat=${title} resolvedPhone=${digits} source=message_data_id expected=${expectedDigits}`)
+    }
   }
-  const dataIds = page.locator('[data-id*="@c.us"]')
-  const count = await dataIds.count().catch(() => 0)
+  const dataIds = page.locator('#main [data-id*="@c.us"]')
+  let count = await dataIds.count().catch(() => 0)
+  let firstMainId = ''
   for (let i = 0; i < count; i++) {
     const id = (await dataIds.nth(i).getAttribute('data-id', { timeout: 100 }).catch(() => '')) || ''
     const m = id.match(/(\d+)@c\.us/)
-    if (m) return m[1]
+    if (!m) continue
+    const digits = m[1]
+    if (!firstMainId) firstMainId = digits
+    if (!expectedDigits || canonicalPhone(digits) === expectedDigits) {
+      return digits
+    }
   }
+  if (firstMainId && expectedDigits) {
+    console.log(`[IDENTITY_MISMATCH] chat=${title} resolvedPhone=${firstMainId} source=main_data_id expected=${expectedDigits}`)
+  }
+
+  // 4. URL hash — only trusted when it matches the active numeric header.
   try {
-    // WhatsApp URL hash is #p/+94760544773 (leading '+' before digits). Some
-    // builds use #chat/<jid> / #wa/<jid>, or embed the number elsewhere in the
-    // URL. Fall back to a standalone 10-14 digit run so saved-contact-name
-    // chats (whose title and data-pre-plain-text show a name, not a number) can
-    // still resolve a numeric phone identity from the open chat's URL.
     const u = page.url()
     const m = u.match(/#p\/\+?(\d+)/) ||
       u.match(/#chat\/?\+?(\d+)/) ||
       u.match(/#wa\/?\+?(\d+)/) ||
       u.match(/[#/?&](?:phone|tel|id)=(\d{10,14})/) ||
       u.match(/\/(\d{10,14})(?:[/#@]|$)/)
-    if (m) return m[1]
+    if (m) {
+      const digits = m[1]
+      if (headerDigits && headerDigits === canonicalPhone(digits)) {
+        return digits
+      }
+      if (!expectedDigits || canonicalPhone(digits) === expectedDigits) {
+        console.log(`[IDENTITY_RESOLVE] chat=${title} phone=${digits} source=validated_url`)
+        return digits
+      }
+      console.log(`[IDENTITY_MISMATCH] chat=${title} resolvedPhone=${digits} source=validated_url expected=${expectedDigits}`)
+    }
   } catch { /* ignore */ }
-  const digits = canonicalPhone(title)
-  if (digits) return digits
-  // For non-saved contacts, data-pre-plain-text shows the sender's number.
-  const prePlain = page.locator('[data-pre-plain-text]')
+
+  // 5. Title digits (unsaved numbers).
+  if (titleDigits) {
+    return titleDigits
+  }
+
+  // 6. Sender phone from current conversation bubbles only.
+  const prePlain = page.locator('#main [data-pre-plain-text]')
   const pc = await prePlain.count().catch(() => 0)
+  let firstPreSender = ''
   for (let i = 0; i < pc; i++) {
     const v = (await prePlain.nth(i).getAttribute('data-pre-plain-text', { timeout: 100 }).catch(() => '')) || ''
     const sender = v.split('] ').pop() || ''
     const m = sender.match(/(\d{7,14})/)
-    if (m) return m[1]
+    if (!m) continue
+    const digits = m[1]
+    if (!firstPreSender) firstPreSender = digits
+    if (!expectedDigits || canonicalPhone(digits) === expectedDigits) {
+      return digits
+    }
   }
+  if (firstPreSender && expectedDigits) {
+    console.log(`[IDENTITY_MISMATCH] chat=${title} resolvedPhone=${firstPreSender} source=pre_plain_sender expected=${expectedDigits}`)
+  }
+
   // Unresolved. Callers must NOT fall back to a contact name as the phone —
   // that would break per-customer identity on the AI side.
   return ''
@@ -2238,6 +2391,19 @@ async function extractIncomingBubblesInPage(page) {
         return (n.innerText || '').replace(/\s*\n+\s*/g, ' ').trim()
       }
 
+      const readAriaSender = (n) => {
+        // WhatsApp Web puts the sender's phone/name in an aria-label on a span
+        // inside the bubble (e.g. aria-label="+94 77 716 3564:"). This is the
+        // strongest current-bubble identity signal for saved-contact chats.
+        const els = n.querySelectorAll('span[aria-label]')
+        for (const el of els) {
+          const label = (el.getAttribute('aria-label') || '').trim()
+          const m = label.match(/(\d{7,15})/)
+          if (m) return m[1]
+        }
+        return ''
+      }
+
       // Cap the work to the NEWEST bubbles only. WhatsApp can render a large
       // (virtualized) history in #main; processing every bubble — each with a
       // cloneNode for text — is what could blow past the evaluate timeout on a
@@ -2277,7 +2443,8 @@ async function extractIncomingBubblesInPage(page) {
         const hasMedia = Boolean(
           n.querySelector('img, video, audio, [data-testid*="image"], [data-testid*="video"], [data-testid*="ptt"], [data-testid*="sticker"], [data-testid*="document"], [data-icon*="ptt"]')
         )
-        out.push({ text, id, pre, dir, isSystem, hasMedia, hasAudio, audioSrc, audioMime })
+        const ariaSender = readAriaSender(n)
+        out.push({ text, id, pre, dir, isSystem, hasMedia, hasAudio, audioSrc, audioMime, ariaSender })
       }
       return out
     }, BUBBLE_ROOT_SELECTOR)
@@ -2449,7 +2616,11 @@ async function rowToIncomingMessage(page, row, dirCtx, phoneKey) {
   // ingest API as an empty string — the backend 400s on a falsy message.
   if (!cleanText(text)) text = '[voice note]'
 
-  return finalizeMessageIdentity(text, row.id || null, ts, phoneKey)
+  const identity = finalizeMessageIdentity(text, row.id || null, ts, phoneKey)
+  // Preserve current-bubble sender identity so the downstream phone resolver
+  // can use it for saved contacts and cross-chat verification.
+  identity.senderPhone = canonicalPhone(row.ariaSender) || null
+  return identity
 }
 
 // Fetch a page-scoped blob URL as a base64 string. WhatsApp renders voice notes
@@ -2831,6 +3002,8 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
     const NEWEST_RETRY_INTERVAL_MS = 300
     let retries = 0
     let boundaryText = storedLastText || ''
+    let previousNewestId = storedLastId || ''
+    let previousNewestText = boundaryText
 
     while (true) {
       const { found, boundaryHit } = await scanPass(rows)
@@ -2841,16 +3014,26 @@ async function readNewIncomingMessages(page, storedLastId, storedLastText, meta,
       // Newest extracted message is the already-processed boundary but the
       // preview shows a newer message that has not rendered yet — retry briefly.
       retries += 1
-      if (retries === 1) {
-        console.log(`[NEWEST_MISMATCH] chat=${phoneKey} preview="${String(expectedPreview).slice(0, 60)}" previousId=${storedLastId ?? 'none'} previousText="${boundaryText.slice(0, 60)}" retry=true`)
+      // Identify what the current extraction actually returned as its newest
+      // incoming message so the mismatch is observable in the log.
+      let newestId = previousNewestId
+      let newestText = previousNewestText
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const candidate = await rowToIncomingMessage(page, rows[i], dirCtx, phoneKey)
+        if (candidate) {
+          newestId = candidate.id || ''
+          newestText = candidate.text || ''
+          break
+        }
       }
+      console.log(`[NEWEST_MISMATCH] chat=${phoneKey} extractedId=${newestId || 'none'} extractedText="${String(newestText).slice(0, 60)}" preview="${String(expectedPreview).slice(0, 60)}" previousId=${storedLastId ?? 'none'} previousText="${boundaryText.slice(0, 60)}" attempt=${retries}`)
       await sleep(NEWEST_RETRY_INTERVAL_MS)
       rows = await extractIncomingBubblesInPage(page)
       if (rows === null) rows = []
     }
 
     if (retries > 0 && collected.length > 0) {
-      console.log(`[NEWEST_RECOVERED] chat=${phoneKey} preview="${String(expectedPreview).slice(0, 60)}" extractedText="${(collected[0].text || '').slice(0, 60)}" attempt=${retries + 1}`)
+      console.log(`[NEWEST_RECOVERED] chat=${phoneKey} extractedId=${collected[0].id || 'none'} extractedText="${(collected[0].text || '').slice(0, 60)}" preview="${String(expectedPreview).slice(0, 60)}" attempt=${retries + 1}`)
     }
 
     // Return ALL newly detected incoming messages (newest-first). The caller
@@ -3322,23 +3505,30 @@ async function detectAndForwardIncoming(page, state) {
         // Extraction failed (voice note / element not loaded in time). NEVER
         // advance the row signature here — doing so would make the fast-path
         // dedup permanently skip this chat and silently lose the message.
-        // Instead, bump a bounded retry counter; only after the limit is hit do
-        // we advance rowSig and give up on this unreadable chat.
+        // Instead, bump a bounded retry counter. Even after the limit is hit, the
+        // chat is marked with a NON-terminal outcome so row_unchanged never
+        // permanently suppresses an unread/unanswered message.
         const retries = (stored?.extractRetries ?? 0) + 1
         const giveUp = retries >= EXTRACT_RETRY_LIMIT
         state.chats[key] = {
           ...(stored || {}),
           title: chat.title,
           preview: stored?.preview || chat.preview,
-          rowSig: giveUp ? chat.raw || stored?.rowSig || null : stored?.rowSig || null,
+          // rowSig is intentionally left unchanged on extraction failure so the
+          // chat remains eligible for recovery. Only advance it when a message is
+          // actually processed.
+          rowSig: stored?.rowSig || null,
           extractRetries: giveUp ? 0 : retries,
+          // Use a non-terminal outcome; a previously terminal lastOutcome must
+          // never survive an extraction failure.
+          lastOutcome: giveUp ? 'extract_giveup' : 'not_handled',
           conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
           updatedAt: new Date().toISOString(),
         }
         saveMessageState(state)
         console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=no_message attempt=${retries} giveUp=${giveUp}`)
         if (giveUp) {
-          console.log(`[worker] giving up on unreadable chat ${chat.title} after ${EXTRACT_RETRY_LIMIT} attempts`)
+          console.log(`[worker] giving up on unreadable chat ${chat.title} after ${EXTRACT_RETRY_LIMIT} attempts (will still retry if row changes)`)
         } else {
           console.log(`[worker] extraction failed for ${chat.title} (attempt ${retries}), will retry`)
         }
@@ -3365,17 +3555,40 @@ async function detectAndForwardIncoming(page, state) {
       //    which would break per-customer identity on the AI side. It is retried
       //    on the next poll (rowSig is not advanced).
       if (!phone) {
-        phone = opened ? await resolveChatPhone(page, chat.title, last.id || '') : (chat.title || '').replace(/\D/g, '')
+        phone = opened
+          ? await resolveChatPhone(page, chat.title, last.id || '', last.senderPhone || '', stored?.phone || '')
+          : canonicalPhone(chat.title)
       }
-      // Canonicalize, and fall back to a previously-resolved phone for this chat
-      // (e.g. saved-contact-name chats whose URL/sender did not expose the number
-      // on this poll). Never guess a phone from a name.
-      phone = canonicalPhone(phone) || canonicalPhone(stored?.phone)
+      // A stored phone may only be reused after validating it against current
+      // active-chat evidence. resolveChatPhone already enforces this; the
+      // fallback here is a final safety net.
+      if (!phone && stored?.phone) {
+        const storedKey = canonicalPhone(stored.phone)
+        const headerTitle = opened ? await readOpenChatTitle(page, chat.title) : chat.title
+        const headerDigits = canonicalPhone(headerTitle)
+        if (storedKey && headerDigits && storedKey === headerDigits) {
+          phone = storedKey
+          console.log(`[IDENTITY_RESOLVE] chat=${title} phone=${phone} source=stored_state`)
+        }
+      }
+      phone = canonicalPhone(phone)
       if (!phone) {
         console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=phone_unresolved`)
+        // Do NOT advance rowSig — the chat must remain eligible for retry once
+        // a verified identity becomes available.
         await resetChatView(page)
         continue
       }
+      // Final cross-check against stored state. A mismatch means a previous
+      // corruption or stale-page leak; fail safe rather than ingest under the
+      // wrong customer.
+      if (stored?.phone && canonicalPhone(stored.phone) && canonicalPhone(stored.phone) !== phone) {
+        console.log(`[IDENTITY_MISMATCH] chat=${key} resolvedPhone=${phone} source=final_check expected=${canonicalPhone(stored.phone)}`)
+        console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=identity_mismatch`)
+        await resetChatView(page)
+        continue
+      }
+      console.log(`[IDENTITY_RESOLVE] chat=${key} phone=${phone} source=${opened ? 'active_conversation' : 'title_digits'}`)
       console.log(`[CUSTOMER_RESOLVED] chat=${phone}`)
       console.log(`[worker] resolved chat id: ${phone}`)
 
@@ -3562,6 +3775,29 @@ async function detectAndForwardIncoming(page, state) {
             rowSig: giveUp ? chat.raw || stored?.rowSig || null : stored?.rowSig || null,
             extractRetries: giveUp ? 0 : retries,
             lastOutcome: giveUp ? 'no_reply_terminal' : 'not_handled',
+            conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
+            updatedAt: new Date().toISOString(),
+          }
+          saveMessageState(state)
+          continue
+        }
+
+        // If the ingest result says handled but no reply was queued and it was not
+        // a legitimately terminal skip, do NOT treat this as a completed turn.
+        // This prevents row_unchanged from permanently dropping a chat that the
+        // AI decided not to answer yet.
+        const replyQueued = res?.replyQueued === true
+        const terminalSkip = isTerminalSkipReason(res?.skipReason || res?.reason)
+        if (!replyQueued && !terminalSkip) {
+          console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=handled_but_no_reply`)
+          state.chats[key] = {
+            ...(stored || {}),
+            title: chat.title,
+            phone,
+            preview: chat.preview,
+            rowSig: stored?.rowSig || null,
+            extractRetries: 0,
+            lastOutcome: 'not_handled',
             conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
             updatedAt: new Date().toISOString(),
           }
