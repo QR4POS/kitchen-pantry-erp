@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useMemo } from "react"
+import { use, useState, useEffect, useMemo } from "react"
 import { useRouter } from "next/navigation"
 import { motion } from "framer-motion"
 import {
@@ -197,7 +197,8 @@ function getFileIcon(fileType: string) {
   return File
 }
 
-export default function CustomerProfilePage({ params }: { params: { id: string } }) {
+export default function CustomerProfilePage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params)
   const router = useRouter()
   const supabase = createClient()
 
@@ -214,7 +215,7 @@ export default function CustomerProfilePage({ params }: { params: { id: string }
         const { data: customerData } = await supabase
           .from("customers")
           .select("*")
-          .eq("id", params.id)
+          .eq("id", id)
           .single()
 
         if (customerData) {
@@ -224,7 +225,7 @@ export default function CustomerProfilePage({ params }: { params: { id: string }
         const { data: projectRows } = await supabase
           .from("projects")
           .select("*")
-          .eq("customer_id", params.id)
+          .eq("customer_id", id)
           .order("created_at", { ascending: false })
 
         if (projectRows && projectRows.length > 0) {
@@ -234,7 +235,7 @@ export default function CustomerProfilePage({ params }: { params: { id: string }
         const { data: paymentRows } = await supabase
           .from("payments")
           .select("*")
-          .eq("customer_id", params.id)
+          .eq("customer_id", id)
           .order("created_at", { ascending: false })
 
         if (paymentRows && paymentRows.length > 0) {
@@ -244,7 +245,7 @@ export default function CustomerProfilePage({ params }: { params: { id: string }
         const { data: projectFileRows } = await supabase
           .from("project_files")
           .select("*, projects!inner(customer_id, project_name)")
-          .eq("projects.customer_id", params.id)
+          .eq("projects.customer_id", id)
           .order("created_at", { ascending: false })
 
         if (projectFileRows && projectFileRows.length > 0) {
@@ -263,7 +264,7 @@ export default function CustomerProfilePage({ params }: { params: { id: string }
         const { data: messageRows } = await supabase
           .from("messages")
           .select("*, conversations!inner(project_id), projects!inner(customer_id)")
-          .eq("projects.customer_id", params.id)
+          .eq("projects.customer_id", id)
           .order("created_at", { ascending: true })
 
         if (messageRows && messageRows.length > 0) {
@@ -284,7 +285,7 @@ export default function CustomerProfilePage({ params }: { params: { id: string }
     }
 
     fetchData()
-  }, [params.id, supabase])
+  }, [id, supabase])
 
   const displayCustomer = useMemo(() => {
     if (customer) return customer
