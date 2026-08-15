@@ -54,11 +54,11 @@ interface AgentSettings {
 }
 
 const DEFAULT_SETTINGS: AgentSettings = {
-  whatsapp_agent_enabled: false,
+  whatsapp_agent_enabled: true,
   auto_reply_enabled: true,
   auto_lead_creation: true,
   auto_customer_creation: true,
-  auto_project_creation: false,
+  auto_project_creation: true,
   auto_notification_enabled: true,
   admin_approval_required: true,
   primary_provider: "gemini",

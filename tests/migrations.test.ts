@@ -21,4 +21,19 @@ describe('migrations', () => {
     expect(sql).toMatch(/ADD COLUMN IF NOT EXISTS source_onboarding_id UUID/)
     expect(sql).toMatch(/idx_projects_source_onboarding_id/)
   })
+
+  it('enables lead, customer, and project auto-creation on the settings row', () => {
+    const sql = migration('20260818000000_enable_auto_creations.sql')
+    expect(sql).toMatch(/UPDATE ai_agent_settings/)
+    expect(sql).toMatch(/auto_project_creation = true/)
+    expect(sql).toMatch(/auto_lead_creation = true/)
+    expect(sql).toMatch(/ALTER COLUMN auto_project_creation SET DEFAULT true/)
+  })
+
+  it('enables the WhatsApp agent on the settings row', () => {
+    const sql = migration('20260818000001_enable_whatsapp_agent.sql')
+    expect(sql).toMatch(/UPDATE ai_agent_settings/)
+    expect(sql).toMatch(/whatsapp_agent_enabled = true/)
+    expect(sql).toMatch(/ALTER COLUMN whatsapp_agent_enabled SET DEFAULT true/)
+  })
 })

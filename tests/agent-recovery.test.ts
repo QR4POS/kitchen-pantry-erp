@@ -214,6 +214,31 @@ describe('isAutomatedHandoff / recoverAutomatedHandoffConversation', () => {
     expect(capturedUpdate.handoff_reason).toBeNull()
   })
 
+  it('recovers an automatically-suppressed conversation stuck in waiting_customer', async () => {
+    const capturedUpdate: Record<string, unknown> = {}
+    mockDb.on('ai_conversations', (q) => {
+      if (q.mode === 'update' && q.inFilters.conversation_status) {
+        Object.assign(capturedUpdate, q.payload)
+        return { data: { id: 'conv-1' }, error: null }
+      }
+      return { data: null, error: null }
+    })
+
+    const recovered = await recoverAutomatedHandoffConversation({
+      phone: '+94760000000',
+      conversation: {
+        id: 'conv-1',
+        conversation_status: 'waiting_customer',
+        ai_suppressed: true,
+        handoff_reason: 'AI reply could not be queued; staff response required',
+      },
+    })
+
+    expect(recovered).toBe(true)
+    expect(capturedUpdate.conversation_status).toBe('waiting_customer')
+    expect(capturedUpdate.ai_suppressed).toBe(false)
+  })
+
   it('does NOT recover a real staff takeover conversation', async () => {
     const recovered = await recoverAutomatedHandoffConversation({
       phone: '+94760000000',

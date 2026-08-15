@@ -583,11 +583,16 @@ async function applyControllerDecision(input: {
     })
   }
 
-  const immediateState = decision.reply
-    ? settings.auto_reply_enabled
-      ? 'reply_queued'
-      : 'human_active'
-    : decision.next_state
+  // A suppressed conversation must always land in 'human_active' (never in
+  // waiting_customer / paused / reply_queued), otherwise the agent would stay
+  // silenced forever — automated-handoff recovery only rescues that state.
+  const immediateState = suppressAi
+    ? 'human_active'
+    : decision.reply
+      ? settings.auto_reply_enabled
+        ? 'reply_queued'
+        : 'human_active'
+      : decision.next_state
 
   await admin()
     .from('ai_conversations')

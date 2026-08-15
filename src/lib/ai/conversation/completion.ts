@@ -186,16 +186,24 @@ export async function runOnboardingCompletion(input: {
 
   // 2. Lead
   let lead: Awaited<ReturnType<typeof upsertLeadForCollected>> | null = null
-  try {
-    lead = await upsertLeadForCollected({
+  if (!settings.auto_lead_creation) {
+    await logAgent('onboarding_lead_creation_skipped', null, 'info', {
       phone,
-      collected,
       conversationId: conversation.id,
-      customerId,
-      settings,
+      reason: 'auto_lead_creation disabled',
     })
-  } catch (e) {
-    await logAgent('lead_sync_error', null, 'error', { phone, conversationId: conversation.id }, (e as Error).message)
+  } else {
+    try {
+      lead = await upsertLeadForCollected({
+        phone,
+        collected,
+        conversationId: conversation.id,
+        customerId,
+        settings,
+      })
+    } catch (e) {
+      await logAgent('lead_sync_error', null, 'error', { phone, conversationId: conversation.id }, (e as Error).message)
+    }
   }
 
   // 3. Optional idempotent project creation from onboarding data.
@@ -205,6 +213,12 @@ export async function runOnboardingCompletion(input: {
       customerId,
       conversationId: conversation.id,
       collected,
+    })
+  } else if (!settings.auto_project_creation) {
+    await logAgent('onboarding_project_creation_skipped', null, 'info', {
+      phone,
+      conversationId: conversation.id,
+      reason: 'auto_project_creation disabled',
     })
   }
 
@@ -373,39 +387,61 @@ async function maybeCreateOnboardingProject(input: {
   const estimatedCost = parseBudget(collected.budget)
   const timeline = collected.timeline ? String(collected.timeline) : null
 
-  const { data, error } = await admin
+  const notes = [
+    `Auto-created from WhatsApp onboarding ${conversationId}`,
+    timeline ? `Timeline: ${timeline}` : null,
+    collected.kitchen_size ? `Size: ${String(collected.kitchen_size)}` : null,
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  const basePayload = {
+    customer_id: customerId,
+    project_name: projectName,
+    description: descriptionFromCollected(collected),
+    kitchen_type: kitchenType,
+    material_type: collected.material_preference ? String(collected.material_preference) : null,
+    length,
+    width,
+    estimated_cost: estimatedCost,
+    city: collected.location ? String(collected.location) : null,
+    address: collected.address ? String(collected.address) : null,
+    status: 'inquiry',
+    priority: priorityFromTimeline(timeline),
+    notes,
+  }
+
+  let result = await admin
     .from('projects')
-    .insert({
-      customer_id: customerId,
-      project_name: projectName,
-      description: descriptionFromCollected(collected),
-      kitchen_type: kitchenType,
-      material_type: collected.material_preference ? String(collected.material_preference) : null,
-      length,
-      width,
-      estimated_cost: estimatedCost,
-      city: collected.location ? String(collected.location) : null,
-      address: collected.address ? String(collected.address) : null,
-      status: 'inquiry',
-      priority: priorityFromTimeline(timeline),
-      source_onboarding_id: conversationId,
-      notes: [
-        `Auto-created from WhatsApp onboarding ${conversationId}`,
-        timeline ? `Timeline: ${timeline}` : null,
-        collected.kitchen_size ? `Size: ${String(collected.kitchen_size)}` : null,
-      ]
-        .filter(Boolean)
-        .join('\n'),
-    })
+    .insert({ ...basePayload, source_onboarding_id: conversationId })
     .select('id')
     .single()
 
-  if (error) {
-    await logAgent('onboarding_project_create_error', null, 'error', { customerId, conversationId }, error.message)
-    return null
+  if (result.error) {
+    // The source_onboarding_id column is added by migration
+    // 20260817000001. If it is not applied yet, retry without the column so
+    // project creation still succeeds (idempotency then relies on the
+    // project_name + customer match rather than the unique index).
+    if (/source_onboarding_id/.test(result.error.message ?? '')) {
+      await logAgent('onboarding_project_fallback', null, 'warn', {
+        customerId,
+        conversationId,
+        reason: 'source_onboarding_id column missing — retrying without it',
+      })
+      result = await admin
+        .from('projects')
+        .insert(basePayload)
+        .select('id')
+        .single()
+    }
+
+    if (result.error) {
+      await logAgent('onboarding_project_create_error', null, 'error', { customerId, conversationId }, result.error.message)
+      return null
+    }
   }
 
-  return (data?.id as string | null) ?? null
+  return (result.data?.id as string | null) ?? null
 }
 
 function descriptionFromCollected(collected: Record<string, unknown>): string | null {

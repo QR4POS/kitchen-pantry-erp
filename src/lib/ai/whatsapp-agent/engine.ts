@@ -252,9 +252,11 @@ export async function processWhatsAppMessage(
   // A transient send/provider failure must never permanently stop AI replies.
   // Only handoffs set by an automated path are recovered here; a REAL staff
   // takeover (admin control route, reason 'Manual staff takeover' / free-form)
-  // stays suppressed. If we recover, the local copy is updated so the lock can
-  // be acquired below.
-  if (conversation.ai_suppressed && conversation.conversation_status === 'human_active') {
+  // stays suppressed. We check ANY suppressed conversation, not just
+  // 'human_active' — a handoff whose next_state was 'waiting_customer' would
+  // otherwise sit suppressed forever and never reply. If we recover, the local
+  // copy is updated so the lock can be acquired below.
+  if (conversation.ai_suppressed) {
     const recovered = await recoverAutomatedHandoffConversation({
       phone: normalizedPhone,
       conversation,

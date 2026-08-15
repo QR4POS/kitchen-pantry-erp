@@ -56,7 +56,7 @@ export async function recoverAutomatedHandoffConversation(input: {
 }): Promise<boolean> {
   const { phone, conversation } = input
   if (
-    conversation.conversation_status !== 'human_active' ||
+    !['human_active', 'waiting_customer'].includes(conversation.conversation_status) ||
     conversation.ai_suppressed !== true ||
     !isAutomatedHandoff(conversation.handoff_reason)
   ) {
@@ -73,7 +73,7 @@ export async function recoverAutomatedHandoffConversation(input: {
       updated_at: now,
     })
     .eq('id', conversation.id)
-    .in('conversation_status', ['human_active'])
+    .in('conversation_status', ['human_active', 'waiting_customer'])
     .select('id')
     .maybeSingle()
 

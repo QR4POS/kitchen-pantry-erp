@@ -326,16 +326,18 @@ async function handleDeterministicSupportTurn(
   // customer must still receive → hand the conversation to staff instead of
   // silently swallowing the acknowledgement.
   const autoReplyDisabled = Boolean(decision.reply && !settings.auto_reply_enabled)
-  const resolvedState = autoReplyDisabled ? 'human_active' : nextState
-  const resolvedHandoffReason = autoReplyDisabled
-    ? 'Auto reply is disabled; staff response required'
-    : decision.handoff_reason
   const resolvedSuppressed =
     autoReplyDisabled ||
     decision.action === 'handoff' ||
     (decision.action === 'close' && decision.reply === null)
       ? true
       : conversation.ai_suppressed
+  // A suppressed conversation must always land in 'human_active' (never in
+  // waiting_customer), otherwise automated-handoff recovery cannot rescue it.
+  const resolvedState = resolvedSuppressed ? 'human_active' : nextState
+  const resolvedHandoffReason = autoReplyDisabled
+    ? 'Auto reply is disabled; staff response required'
+    : decision.handoff_reason
 
   if (autoReplyDisabled) {
     await logAgent('auto_reply_disabled', null, 'warn', {
