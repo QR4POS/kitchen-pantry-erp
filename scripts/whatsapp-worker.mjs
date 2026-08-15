@@ -3996,6 +3996,7 @@ async function run() {
 
   async function launch() {
     context = await chromium.launchPersistentContext(SESSION_DIR, {
+      channel: 'chromium',
       headless: HEADLESS_MODE,
       viewport: { width: 1280, height: 800 },
       args: ['--disable-blink-features=AutomationControlled'],
