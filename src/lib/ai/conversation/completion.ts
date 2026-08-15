@@ -112,6 +112,34 @@ export async function runOnboardingCompletion(input: {
       })
     }
 
+    // Even though full account provisioning failed, the CRM customer exists —
+    // still create the lead and the project so no automation is lost.
+    let fallbackLeadId: string | null = null
+    let fallbackProjectId: string | null = null
+    if (fallbackCustomerId) {
+      if (settings.auto_lead_creation) {
+        try {
+          const lead = await upsertLeadForCollected({
+            phone,
+            collected,
+            conversationId: conversation.id,
+            customerId: fallbackCustomerId,
+            settings,
+          })
+          fallbackLeadId = lead?.id ?? null
+        } catch (e) {
+          await logAgent('lead_sync_error', null, 'error', { phone, conversationId: conversation.id }, (e as Error).message)
+        }
+      }
+      if (settings.auto_project_creation && collected.kitchen_type) {
+        fallbackProjectId = await maybeCreateOnboardingProject({
+          customerId: fallbackCustomerId,
+          conversationId: conversation.id,
+          collected,
+        })
+      }
+    }
+
     // Surface the failure to admins so it is visible in-app instead of only in
     // the agent logs.
     const adminId = await findAdminId()
@@ -167,10 +195,10 @@ export async function runOnboardingCompletion(input: {
       .eq('id', conversation.id)
 
     if (fallbackQueued) {
-      return { customerId: fallbackCustomerId, leadId: null, confirmationQueued: true }
+      return { customerId: fallbackCustomerId, leadId: fallbackLeadId, projectId: fallbackProjectId, confirmationQueued: true }
     }
 
-    return { customerId: fallbackCustomerId, leadId: null, confirmationQueued: false }
+    return { customerId: fallbackCustomerId, leadId: fallbackLeadId, projectId: fallbackProjectId, confirmationQueued: false }
   }
 
   const customerId = provisionResult?.customerId ?? null
@@ -214,11 +242,16 @@ export async function runOnboardingCompletion(input: {
       conversationId: conversation.id,
       collected,
     })
-  } else if (!settings.auto_project_creation) {
+  } else {
+    const reason = !settings.auto_project_creation
+      ? 'auto_project_creation disabled'
+      : !customerId
+        ? 'customer creation returned no id'
+        : 'kitchen_type missing'
     await logAgent('onboarding_project_creation_skipped', null, 'info', {
       phone,
       conversationId: conversation.id,
-      reason: 'auto_project_creation disabled',
+      reason,
     })
   }
 
@@ -347,20 +380,33 @@ async function createCrmOnlyCustomerFallback(input: {
 }
 
 function normalizeKitchenType(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const raw = value.trim()
+  if (!raw) return null
+
   const map: Record<string, string> = {
     straight: 'straight',
+    singleline: 'straight',
+    single_line: 'straight',
     'l-shape': 'l_shape',
     lshape: 'l_shape',
-    'l shape': 'l_shape',
+    lshaped: 'l_shape',
+    lshapekitchen: 'l_shape',
     'u-shape': 'u_shape',
     ushape: 'u_shape',
-    'u shape': 'u_shape',
+    ushaped: 'u_shape',
+    ushapekitchen: 'u_shape',
     island: 'island',
     parallel: 'parallel',
+    galley: 'galley',
+    custom: 'custom',
   }
-  if (typeof value !== 'string') return null
-  const key = value.toLowerCase().replace(/[-\s]/g, '')
-  return map[key] ?? null
+
+  const key = raw.toLowerCase().replace(/[\s-]/g, '').replace(/kitchen$/, '')
+  // Never return null for a non-empty type: an unrecognised layout still creates
+  // the project (the column is free TEXT), so auto-creation is never silently
+  // skipped just because the layout name is not in the known map.
+  return map[key] ?? raw.toLowerCase()
 }
 
 async function maybeCreateOnboardingProject(input: {

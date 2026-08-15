@@ -301,6 +301,55 @@ describe('runOnboardingCompletion', () => {
     )
   })
 
+  it('still creates the lead and project when provisioning fails but the CRM fallback succeeds', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      phone: '+94760000000',
+      location: 'Matara',
+      address: 'No36, Matara',
+      kitchen_type: 'L-Shape',
+      kitchen_size: '10x12',
+      budget: 650000,
+      material_preference: 'HPL',
+      timeline: 'in 2 months',
+    }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    provisionCustomerAccount.mockRejectedValue(new Error('auth service down'))
+
+    mockDb.on('customers', (q) => {
+      if (q.mode === 'select') return { data: null, error: null }
+      if (q.mode === 'insert') return { data: { id: 'cust-fallback' }, error: null }
+      return { data: null, error: null }
+    })
+    mockDb.on('leads', (q) => {
+      if (q.mode === 'select') return { data: null, error: null }
+      if (q.mode === 'insert') return { data: { id: 'lead-1' }, error: null }
+      return { data: null, error: null }
+    })
+    mockDb.on('projects', (q) => {
+      if (q.mode === 'select') return { data: null, error: null }
+      if (q.mode === 'insert') return { data: { id: 'proj-1' }, error: null }
+      return { data: null, error: null }
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings: { ...settings, auto_project_creation: true },
+      providerMessageId: 'wa-fallback-all',
+    })
+
+    expect(result.customerId).toBe('cust-fallback')
+    expect(result.leadId).toBe('lead-1')
+    expect(result.projectId).toBe('proj-1')
+  })
+
   it('does not auto-create a CRM customer when provisioning is blocked', async () => {
     const collected = { name: 'Kaveesha', email: 'vihangakaveeshavg@gmail.com' }
     const conversation = baseConversation({
@@ -463,6 +512,37 @@ describe('runOnboardingCompletion', () => {
       status: 'inquiry',
     })
     expect(String(payload.notes ?? '')).toContain('Timeline: urgent')
+  })
+
+  it('creates a project even for an unrecognised kitchen layout', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      phone: '+94760000000',
+      location: 'Matara',
+      address: 'No36, Matara',
+      kitchen_type: 'Galley',
+      kitchen_size: '10x12',
+      budget: 650000,
+      material_preference: 'HPL',
+      timeline: 'urgent',
+    }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings: { ...settings, auto_project_creation: true },
+      providerMessageId: 'wa-proj-galley',
+    })
+
+    expect(result.projectId).toBe('proj-1')
+    const projectInsert = mockDb.queries.find((q) => q.table === 'projects' && q.mode === 'insert')
+    expect((projectInsert?.payload as Record<string, unknown>).kitchen_type).toBe('galley')
   })
 
   it('does not duplicate a project already created for the same conversation', async () => {
