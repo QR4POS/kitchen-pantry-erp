@@ -23,10 +23,19 @@ import {
   FileSpreadsheet,
   Send,
   Paperclip,
+  ClipboardList,
+  KeyRound,
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
-import type { Customer, Project, Payment } from "@/types"
-import { ProjectStatus } from "@/types"
+import type {
+  CustomerRow,
+  ProjectRow,
+  CustomerPaymentRow,
+  WhatsappCustomerAccountProvisioningRow,
+  LeadRow,
+  AiConversationRow,
+} from "@/types/database"
+import { canonicalPhone } from "@/lib/phone"
 import { formatCurrency, formatDate } from "@/lib/auth/helpers"
 import { cn } from "@/utils/cn"
 import { DataTable, type Column } from "@/components/shared/data-table"
@@ -101,11 +110,14 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
   const router = useRouter()
   const supabase = createClient()
 
-  const [customer, setCustomer] = useState<Customer | null>(null)
-  const [projects, setProjects] = useState<Project[]>([])
-  const [payments, setPayments] = useState<Payment[]>([])
+  const [customer, setCustomer] = useState<CustomerRow | null>(null)
+  const [projects, setProjects] = useState<ProjectRow[]>([])
+  const [payments, setPayments] = useState<CustomerPaymentRow[]>([])
   const [documents, setDocuments] = useState<CustomerDocument[]>([])
   const [messages, setMessages] = useState<CustomerMessage[]>([])
+  const [provisioning, setProvisioning] = useState<WhatsappCustomerAccountProvisioningRow | null>(null)
+  const [lead, setLead] = useState<LeadRow | null>(null)
+  const [conversation, setConversation] = useState<AiConversationRow | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -122,7 +134,7 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
 
         if (customerError) throw customerError
         if (customerData) {
-          setCustomer(customerData as unknown as Customer)
+          setCustomer(customerData as CustomerRow)
         }
 
         const { data: projectRows, error: projectError } = await supabase
@@ -132,16 +144,16 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
           .order("created_at", { ascending: false })
 
         if (projectError) throw projectError
-        setProjects((projectRows ?? []) as unknown as Project[])
+        setProjects((projectRows ?? []) as ProjectRow[])
 
         const { data: paymentRows, error: paymentError } = await supabase
-          .from("payments")
+          .from("customer_payments")
           .select("*")
           .eq("customer_id", id)
           .order("created_at", { ascending: false })
 
         if (paymentError) throw paymentError
-        setPayments((paymentRows ?? []) as unknown as Payment[])
+        setPayments((paymentRows ?? []) as CustomerPaymentRow[])
 
         const { data: projectFileRows, error: fileError } = await supabase
           .from("project_files")
@@ -157,28 +169,59 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
             project_name: (r.projects as Record<string, unknown>)?.project_name as string ?? undefined,
             file_name: r.file_name as string,
             file_url: r.file_url as string,
-            file_type: r.file_type as string ?? "",
+            file_type: (r.file_type as string) ?? "",
             created_at: r.created_at as string,
           }))
           setDocuments(docs)
         }
 
-        const { data: messageRows, error: messageError } = await supabase
-          .from("messages")
-          .select("*, conversations!inner(project_id), projects!inner(customer_id)")
-          .eq("projects.customer_id", id)
-          .order("created_at", { ascending: true })
+        const customerPhone = customerData?.phone ? String(customerData.phone) : null
+        if (customerPhone) {
+          // Real WhatsApp conversation history for this customer.
+          const { data: waRows, error: waError } = await supabase
+            .from("whatsapp_messages")
+            .select("id,phone_number,direction,message,ai_generated,created_at")
+            .eq("phone_number", customerPhone)
+            .order("created_at", { ascending: true })
 
-        if (messageError) throw messageError
-        if (messageRows && messageRows.length > 0) {
-          const msgs: CustomerMessage[] = (messageRows as unknown as Record<string, unknown>[]).map((r) => ({
-            id: r.id as string,
-            sender: (r.sender_id as string) === "current-user" ? "You" : "Customer",
-            content: r.message as string ?? "",
-            created_at: r.created_at as string,
-            is_outgoing: (r.sender_id as string) !== "customer",
-          }))
-          setMessages(msgs)
+          if (waError) throw waError
+          if (waRows && waRows.length > 0) {
+            const msgs: CustomerMessage[] = (waRows as unknown as Record<string, unknown>[]).map((r) => ({
+              id: r.id as string,
+              sender: r.direction === "outgoing" ? "LUXUS Assistant" : "Customer",
+              content: (r.message as string) ?? "",
+              created_at: r.created_at as string,
+              is_outgoing: r.direction === "outgoing",
+            }))
+            setMessages(msgs)
+          }
+
+          // Onboarding / provisioning metadata.
+          const phoneCanonical = canonicalPhone(customerPhone) || customerPhone
+          const { data: provRow } = await supabase
+            .from("whatsapp_customer_account_provisioning")
+            .select("*")
+            .eq("phone_e164", phoneCanonical)
+            .maybeSingle()
+          setProvisioning((provRow as WhatsappCustomerAccountProvisioningRow | null) ?? null)
+
+          const { data: leadRow } = await supabase
+            .from("leads")
+            .select("*")
+            .eq("phone", customerPhone)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle()
+          setLead((leadRow as LeadRow | null) ?? null)
+
+          const { data: convRow } = await supabase
+            .from("ai_conversations")
+            .select("*")
+            .eq("phone_number", customerPhone)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle()
+          setConversation((convRow as AiConversationRow | null) ?? null)
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load customer details")
@@ -192,27 +235,22 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
 
   const stats = useMemo(() => {
     const totalProjects = projects.length
-    const completedProjects = projects.filter(
-      (p) => p.status === ProjectStatus.Completed
-    ).length
-    const totalPayments = payments.reduce((sum, p) => sum + p.amount, 0)
-    const pendingAmount = payments
-      .filter((p) => p.status !== "paid")
-      .reduce((sum, p) => sum + p.amount, 0)
-    return { totalProjects, completedProjects, totalPayments, pendingAmount }
+    const completedProjects = projects.filter((p) => p.status === "completed").length
+    const totalPayments = payments.reduce((sum, p) => sum + Number(p.amount ?? 0), 0)
+    return { totalProjects, completedProjects, totalPayments }
   }, [projects, payments])
 
   const statusDistribution = useMemo(() => {
     const counts: Record<string, number> = {}
     projects.forEach((p) => {
-      const key = p.status.replace(/([a-z])([A-Z])/g, "$1 $2")
+      const key = p.status.replace(/_/g, " ")
       counts[key] = (counts[key] ?? 0) + 1
     })
     return Object.entries(counts).map(([name, value]) => ({ name, value }))
   }, [projects])
 
-  const projectColumns: Column<Project>[] = [
-    { key: "name", label: "Project Name", sortable: true },
+  const projectColumns: Column<ProjectRow>[] = [
+    { key: "project_name", label: "Project Name", sortable: true },
     {
       key: "status",
       label: "Status",
@@ -234,7 +272,7 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
     },
   ]
 
-  const paymentColumns: Column<Payment>[] = [
+  const paymentColumns: Column<CustomerPaymentRow>[] = [
     {
       key: "amount",
       label: "Amount",
@@ -258,23 +296,10 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
       render: (r) => r.payment_method ?? "-",
     },
     {
-      key: "status",
-      label: "Status",
-      sortable: true,
-      render: (r) => (
-        <Badge
-          variant={r.status === "paid" ? "success" : r.status === "pending" ? "warning" : "outline"}
-          className="capitalize"
-        >
-          {r.status ?? "-"}
-        </Badge>
-      ),
-    },
-    {
-      key: "paid_date",
+      key: "payment_date",
       label: "Date",
       sortable: true,
-      render: (r) => (r.paid_date ? formatDate(r.paid_date) : r.created_at ? formatDate(r.created_at) : "-"),
+      render: (r) => (r.payment_date ? formatDate(r.payment_date) : "-"),
     },
   ]
 
@@ -323,7 +348,7 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
     )
   }
 
-  const customerName = customer.full_name ?? customer.company ?? "Unnamed Customer"
+  const customerName = customer.full_name ?? customer.phone ?? "Unnamed Customer"
   const initials = getInitials(customerName)
 
   return (
@@ -367,9 +392,7 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                   {(customer.address || customer.city) && (
                     <span className="flex items-center gap-1.5 text-muted-foreground">
                       <MapPin className="size-3.5" />
-                      {[customer.address, customer.city, customer.state]
-                        .filter(Boolean)
-                        .join(", ")}
+                      {[customer.address, customer.city].filter(Boolean).join(", ")}
                     </span>
                   )}
                 </div>
@@ -403,11 +426,10 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
         </Card>
       </motion.div>
 
-      <motion.div variants={itemVariants} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <motion.div variants={itemVariants} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard title="Total Projects" value={stats.totalProjects} icon={FolderKanban} />
         <StatCard title="Completed Projects" value={stats.completedProjects} icon={CheckCircle2} />
         <StatCard title="Total Payments" value={stats.totalPayments} icon={Banknote} formatValue={(v) => formatCurrency(v)} />
-        <StatCard title="Pending Amount" value={stats.pendingAmount} icon={Clock} formatValue={(v) => formatCurrency(v)} />
       </motion.div>
 
       <motion.div variants={itemVariants}>
@@ -420,6 +442,10 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                   <TabsTrigger value="payments">Payments</TabsTrigger>
                   <TabsTrigger value="documents">Documents</TabsTrigger>
                   <TabsTrigger value="communication">Communication</TabsTrigger>
+                  <TabsTrigger value="onboarding" className="gap-1.5">
+                    <ClipboardList className="size-3.5" />
+                    Onboarding
+                  </TabsTrigger>
                 </TabsList>
               </div>
 
@@ -564,9 +590,95 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                 ) : (
                   <div className="text-center py-12 text-muted-foreground">
                     <MessageSquare className="size-8 mx-auto mb-2 opacity-40" />
-                    <p>No messages found</p>
+                    <p>No WhatsApp messages found</p>
                   </div>
                 )}
+              </TabsContent>
+
+              <TabsContent value="onboarding" className="space-y-6 px-6 pb-6">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-sm flex items-center gap-1.5">
+                        <KeyRound className="size-4 text-muted-foreground" />
+                        WhatsApp Account Provisioning
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2 text-sm">
+                      {provisioning ? (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <span className="text-muted-foreground">Status:</span>
+                            <Badge variant="outline" className="capitalize">{provisioning.status.replace(/_/g, " ")}</Badge>
+                          </div>
+                          <p>
+                            <span className="text-muted-foreground">Login email:</span>{" "}
+                            <span className="font-medium">{provisioning.login_email ?? "-"}</span>
+                          </p>
+                          <p>
+                            <span className="text-muted-foreground">Identity verified:</span>{" "}
+                            {provisioning.identity_verified_at ? formatDate(provisioning.identity_verified_at) : "-"}
+                          </p>
+                          <p>
+                            <span className="text-muted-foreground">Credentials sent:</span>{" "}
+                            {provisioning.credentials_sent_at ? formatDate(provisioning.credentials_sent_at) : "No"}
+                          </p>
+                          {provisioning.blocked_reason && (
+                            <p className="text-destructive">{provisioning.blocked_reason}</p>
+                          )}
+                          {provisioning.last_error && (
+                            <p className="text-destructive">Last error: {provisioning.last_error}</p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-muted-foreground">No WhatsApp account provisioning record found for this customer.</p>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-sm">Onboarding / Lead</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2 text-sm">
+                      {conversation?.identity_confirmed_at ? (
+                        <p className="flex items-center gap-2">
+                          <CheckCircle2 className="size-4 text-emerald-500" />
+                          Identity confirmed on {formatDate(conversation.identity_confirmed_at)}
+                        </p>
+                      ) : (
+                        <p className="flex items-center gap-2 text-muted-foreground">
+                          <Clock className="size-4" />
+                          Identity not confirmed
+                        </p>
+                      )}
+                      <p>
+                        <span className="text-muted-foreground">Conversation status:</span>{" "}
+                        <span className="font-medium">{conversation?.conversation_status ?? "-"}</span>
+                      </p>
+                      {lead && (
+                        <>
+                          <p className="flex items-center gap-2">
+                            <span className="text-muted-foreground">Lead status:</span>
+                            <Badge variant="outline" className="capitalize">{lead.status.replace(/_/g, " ")}</Badge>
+                          </p>
+                          <p>
+                            <span className="text-muted-foreground">Budget:</span>{" "}
+                            {lead.budget ? formatCurrency(Number(lead.budget)) : "-"}
+                          </p>
+                        </>
+                      )}
+                      {conversation?.collected_data && Object.keys(conversation.collected_data as Record<string, unknown>).length > 0 && (
+                        <div>
+                          <p className="font-medium mb-1">Collected data</p>
+                          <pre className="text-xs bg-muted rounded-md p-2 overflow-auto max-h-48">
+                            {JSON.stringify(conversation.collected_data, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
               </TabsContent>
             </Tabs>
           </CardContent>

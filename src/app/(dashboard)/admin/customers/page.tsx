@@ -55,13 +55,28 @@ export default function CustomersPage() {
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [formData, setFormData] = useState({ full_name: "", phone: "", email: "", city: "", address: "", password: "" })
   const [saving, setSaving] = useState(false)
-  const [createdAccount, setCreatedAccount] = useState<{ email: string; password: string } | null>(null)
+  const [createdAccount, setCreatedAccount] = useState<{ email: string } | null>(null)
   const supabase = createClient()
   const { addToast: toast } = useToast()
 
   useEffect(() => {
     // Initial data load on mount.
     fetchCustomers()
+
+    // WhatsApp-provisioned customers are created server-side without this page
+    // being reloaded, so refetch whenever the admin returns to the tab/window.
+    const onFocus = () => {
+      fetchCustomers()
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") fetchCustomers()
+    }
+    window.addEventListener("focus", onFocus)
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => {
+      window.removeEventListener("focus", onFocus)
+      document.removeEventListener("visibilitychange", onVisibility)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -154,8 +169,8 @@ export default function CustomersPage() {
 
         const result = await createCustomerAccount(accountForm)
         if (!result.success) throw new Error(result.error || "Failed to save customer")
-        if (result.email && result.password) {
-          setCreatedAccount({ email: result.email, password: result.password })
+        if (result.email) {
+          setCreatedAccount({ email: result.email })
         }
         await fetchCustomers()
         toast({ title: "Customer added", description: "Customer account has been created." })
@@ -294,8 +309,7 @@ export default function CustomersPage() {
             <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm space-y-1">
               <p className="font-medium text-emerald-600">Customer account created</p>
               <p>Email: <span className="font-mono">{createdAccount.email}</span></p>
-              <p>Password: <span className="font-mono">{createdAccount.password}</span></p>
-              <p className="text-xs text-muted-foreground">Share these credentials with the customer. They can log in at /login.</p>
+              <p className="text-xs text-muted-foreground">Share the login credentials with the customer securely (e.g. via WhatsApp). They can log in at /login.</p>
             </div>
           )}
           <DialogFooter>

@@ -326,10 +326,20 @@ async function queueCredentialDelivery(
   }
 
   // Mark sensitive so history/screenshots stay safe.
-  await createAdminClient()
+  const { error: sensitiveError } = await createAdminClient()
     .from('whatsapp_messages')
     .update({ is_sensitive: true })
     .eq('id', queued.id)
+    .select('id')
+    .single()
+
+  if (sensitiveError) {
+    await logAgent('provision_credential_sensitive_flag_failed', null, 'error', {
+      provisioningId: provisioning.id,
+      phone: provisioning.phone_e164,
+      messageId: queued.id,
+    }, sensitiveError.message)
+  }
 
   return queued.id
 }
@@ -557,10 +567,13 @@ export async function provisionCustomerAccount(
       })
     }
 
-    // 6. Ensure profile has force_password_change = true.
-    await setForcePasswordChange(authUserId)
+    // 6. Ensure profile has force_password_change = true only when we actually
+    //    set a new password (new account or admin-requested reset). Existing
+    //    accounts must not be force-logged-out by a WhatsApp re-onboarding.
+    if (password) {
+      await setForcePasswordChange(authUserId)
+    }
 
-    // 7. Create or link customer row.
     let customerId: string | null = provisioning.customer_id ?? existingCustomer?.id ?? null
     if (!customerId) {
       const created = await createCustomerRow({
@@ -597,25 +610,22 @@ export async function provisionCustomerAccount(
     // 8. Queue credential delivery exactly once.
     if (provisioning.status !== 'credential_sent' && provisioning.status !== 'credential_pending') {
       if (!password) {
-        // We reused an existing Auth user without resetting the password,
-        // so we cannot deliver credentials. Staff must handle this case.
-        const reason = 'Existing account found; credentials cannot be delivered automatically'
-        await updateProvisioningState(provisioning.id, {
-          status: 'blocked',
-          blocked_reason: reason,
-        })
-        await logAgent('provision_blocked_existing_auth', null, 'warn', {
+        // We reused an existing Auth user without resetting the password, so no
+        // credentials can be generated. The customer is fully linked — this is a
+        // SUCCESS, not a block: no duplicate account was created and the existing
+        // credentials keep working.
+        await logAgent('provision_existing_auth_linked', null, 'info', {
           phone: phoneE164,
           authUserId,
         })
         return {
-          success: false,
-          status: 'blocked',
-          blockedReason: reason,
+          success: true,
+          status: 'customer_linked',
           customerId,
           profileId: authUserId,
           authUserId,
           email: normalizedEmail,
+          password: null,
         }
       }
 
@@ -634,6 +644,8 @@ export async function provisionCustomerAccount(
       }
 
       provisioning = await updateProvisioningState(provisioning.id, {
+        status: 'credential_sent',
+        credentials_sent_at: new Date().toISOString(),
         credential_outbox_id: outboxId,
       })
     }

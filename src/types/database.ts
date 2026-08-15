@@ -68,9 +68,22 @@ export interface ProjectRow {
   description: string | null
   status: ProjectStatus
   priority: ProjectPriority
+  kitchen_type: KitchenType | null
+  material_type: string | null
+  length: number | null
+  width: number | null
+  height: number | null
+  estimated_cost: number | null
+  contractor_cost: number | null
+  customer_price: number | null
+  profit_margin: number | null
   start_date: string | null
   expected_completion: string | null
   completed_date: string | null
+  address: string | null
+  city: string | null
+  notes: string | null
+  source_onboarding_id: string | null
   created_by: string | null
   created_at: string
   updated_at: string

@@ -46,8 +46,9 @@ export async function runOnboardingCompletion(input: {
       .from('ai_conversations')
       .update({
         conversation_status: 'waiting_customer',
-        current_step: null,
+        current_step: 'confirm_identity',
         handoff_reason: 'Onboarding completed without identity confirmation',
+        ai_suppressed: false,
         updated_at: now,
       })
       .eq('id', conversation.id)
@@ -83,11 +84,16 @@ export async function runOnboardingCompletion(input: {
 
   if (!provisionResult.success) {
     const reason = provisionResult.blockedReason ?? provisionResult.error ?? 'Account provisioning failed'
+    const isBlocked = provisionResult.status === 'blocked'
+
+    // Blocked (duplicate phone/email/etc.) needs a real staff handoff.
+    // Transient/retryable failures must keep the conversation alive so the
+    // next customer message triggers a retry.
     await admin
       .from('ai_conversations')
       .update({
-        conversation_status: 'human_active',
-        ai_suppressed: true,
+        conversation_status: isBlocked ? 'human_active' : 'waiting_customer',
+        ai_suppressed: isBlocked,
         current_step: null,
         handoff_reason: reason,
         updated_at: now,
@@ -103,7 +109,7 @@ export async function runOnboardingCompletion(input: {
         conversationId: conversation.id,
         sourceInboundMessageId: providerMessageId ?? null,
         decisionAction: 'handoff',
-        postSendState: 'human_active',
+        postSendState: isBlocked ? 'human_active' : 'waiting_customer',
       })
       if (queued) {
         return { customerId: null, leadId: null, confirmationQueued: true }
@@ -129,20 +135,36 @@ export async function runOnboardingCompletion(input: {
     await logAgent('lead_sync_error', null, 'error', { phone, conversationId: conversation.id }, (e as Error).message)
   }
 
-  // 3. Mark complete + persist collected data
-  await admin
-    .from('ai_conversations')
-    .update({
-      conversation_status: 'completed',
-      support_mode_at: now,
-      current_step: null,
-      last_question: null,
-      collected_data: collected,
-      customer_id: customerId ?? conversation.customer_id,
-      turn_count: (conversation.turn_count ?? 0) + 1,
-      updated_at: now,
+  // 3. Optional idempotent project creation from onboarding data.
+  let projectId: string | null = null
+  if (settings.auto_project_creation && customerId && collected.kitchen_type) {
+    projectId = await maybeCreateOnboardingProject({
+      customerId,
+      conversationId: conversation.id,
+      collected,
     })
-    .eq('id', conversation.id)
+  }
+
+  // 4. Mark complete + persist collected data
+  try {
+    await admin
+      .from('ai_conversations')
+      .update({
+        conversation_status: 'completed',
+        support_mode_at: now,
+        current_step: null,
+        last_question: null,
+        collected_data: collected,
+        customer_id: customerId ?? conversation.customer_id,
+        turn_count: (conversation.turn_count ?? 0) + 1,
+        updated_at: now,
+      })
+      .eq('id', conversation.id)
+  } catch (e) {
+    await logAgent('onboarding_completion_state_error', null, 'error', { phone, conversationId: conversation.id }, (e as Error).message)
+    // The confirmation was already queued idempotently by source inbound id,
+    // so a state-update failure must not crash the response.
+  }
 
   // 4. One-time confirmation
   let confirmationQueued = false
@@ -187,6 +209,69 @@ export async function runOnboardingCompletion(input: {
   return {
     customerId: customerId ?? conversation.customer_id,
     leadId: lead?.id ?? null,
+    projectId,
     confirmationQueued,
   }
+}
+
+function normalizeKitchenType(value: unknown): string | null {
+  const map: Record<string, string> = {
+    straight: 'straight',
+    'l-shape': 'l_shape',
+    lshape: 'l_shape',
+    'l shape': 'l_shape',
+    'u-shape': 'u_shape',
+    ushape: 'u_shape',
+    'u shape': 'u_shape',
+    island: 'island',
+    parallel: 'parallel',
+  }
+  if (typeof value !== 'string') return null
+  const key = value.toLowerCase().replace(/[-\s]/g, '')
+  return map[key] ?? null
+}
+
+async function maybeCreateOnboardingProject(input: {
+  customerId: string
+  conversationId: string
+  collected: Record<string, unknown>
+}): Promise<string | null> {
+  const { customerId, conversationId, collected } = input
+  const kitchenType = normalizeKitchenType(collected.kitchen_type)
+  if (!kitchenType) return null
+
+  const admin = createAdminClient()
+
+  const { data: existing } = await admin
+    .from('projects')
+    .select('id')
+    .eq('source_onboarding_id', conversationId)
+    .maybeSingle()
+
+  if (existing?.id) return existing.id as string
+
+  const projectName = `${collected.name ? String(collected.name) : 'Customer'} Kitchen Project`
+  const { data, error } = await admin
+    .from('projects')
+    .insert({
+      customer_id: customerId,
+      project_name: projectName,
+      kitchen_type: kitchenType,
+      material_type: collected.material_preference ? String(collected.material_preference) : null,
+      city: collected.location ? String(collected.location) : null,
+      address: collected.address ? String(collected.address) : null,
+      status: 'inquiry',
+      priority: 'medium',
+      source_onboarding_id: conversationId,
+      notes: `Auto-created from WhatsApp onboarding ${conversationId}`,
+    })
+    .select('id')
+    .single()
+
+  if (error) {
+    await logAgent('onboarding_project_create_error', null, 'error', { customerId, conversationId }, error.message)
+    return null
+  }
+
+  return (data?.id as string | null) ?? null
 }

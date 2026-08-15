@@ -114,6 +114,11 @@ beforeEach(() => {
     if (q.mode === 'update') return { data: { id: 'conv-1' }, error: null }
     return { data: null, error: null }
   })
+  mockDb.on('projects', (q) => {
+    if (q.mode === 'select') return { data: null, error: null }
+    if (q.mode === 'insert') return { data: { id: 'proj-1', ...(q.payload as Record<string, unknown>) }, error: null }
+    return { data: null, error: null }
+  })
 })
 
 describe('runOnboardingCompletion', () => {
@@ -278,6 +283,95 @@ describe('runOnboardingCompletion', () => {
       expect.anything(),
       'lead DB timeout'
     )
+  })
+
+  it('keeps the conversation recoverable when provisioning fails transiently', async () => {
+    const collected = { name: 'Kaveesha', email: 'vihangakaveeshavg@gmail.com' }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    provisionCustomerAccount.mockRejectedValue(new Error('connect ECONNREFUSED'))
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings,
+      providerMessageId: 'wa-retry',
+    })
+
+    expect(result.confirmationQueued).toBe(true)
+
+    const convUpdate = mockDb.queries.find(
+      (q) => q.table === 'ai_conversations' && q.mode === 'update' && (q.payload as Record<string, unknown>)?.conversation_status === 'waiting_customer'
+    )
+    expect(convUpdate).toBeTruthy()
+    expect(convUpdate?.payload as Record<string, unknown>).toMatchObject({ ai_suppressed: false })
+  })
+
+  it('creates an idempotent onboarding project when auto_project_creation is enabled', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      kitchen_type: 'L-Shape',
+      material_preference: 'HPL',
+      location: 'Matara',
+      address: 'No36, Matara',
+    }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings: { ...settings, auto_project_creation: true },
+      providerMessageId: 'wa-proj',
+    })
+
+    expect(result.projectId).toBe('proj-1')
+
+    const projectInsert = mockDb.queries.find((q) => q.table === 'projects' && q.mode === 'insert')
+    expect(projectInsert).toBeTruthy()
+    expect(projectInsert?.payload as Record<string, unknown>).toMatchObject({
+      customer_id: 'cust-1',
+      source_onboarding_id: 'conv-1',
+      kitchen_type: 'l_shape',
+      status: 'inquiry',
+    })
+  })
+
+  it('does not duplicate a project already created for the same conversation', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      kitchen_type: 'Straight',
+    }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    mockDb.on('projects', (q) => {
+      if (q.mode === 'select') return { data: { id: 'proj-existing' }, error: null }
+      return { data: null, error: null }
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings: { ...settings, auto_project_creation: true },
+      providerMessageId: 'wa-proj2',
+    })
+
+    expect(result.projectId).toBe('proj-existing')
+    const projectInsert = mockDb.queries.find((q) => q.table === 'projects' && q.mode === 'insert')
+    expect(projectInsert).toBeFalsy()
   })
 
   it('skips provisioning when the conversation is already in support mode', async () => {

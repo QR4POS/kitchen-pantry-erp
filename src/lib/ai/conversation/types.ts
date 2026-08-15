@@ -68,6 +68,7 @@ export interface SupportTurnResult {
 export interface CompletionResult {
   customerId: string | null
   leadId: string | null
+  projectId?: string | null
   confirmationQueued: boolean
 }
 
