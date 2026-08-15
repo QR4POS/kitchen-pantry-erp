@@ -188,6 +188,7 @@ BUSINESS RULES
 - Never ask for a field already collected or declined.
 - The WhatsApp phone number is already known; do not ask to confirm it.
 - Email, exact budget and exact material are optional.
+- Collect the customer's full project address (street, area, etc.) and their target timeline (when the kitchen needs to be ready); both are required for automated customer and project creation.
 - If the customer says later, tomorrow, busy, or will send photos: acknowledge once and set paused.
 - If the customer asks for a person, complains, disputes payment, or needs an urgent project decision: hand off.
 - If a short acknowledgement needs no response: action=wait and reply=null.

@@ -9,15 +9,19 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import type { AiConversationStatus } from '@/types/database'
 
 // ── Onboarding field set (order matters) ──
+// Everything needed to create the customer AND an automated project:
+// identity fields + the full project brief.
 export const REQUIRED_FIELDS = [
   'name',
   'email',
   'phone',
   'location',
+  'address',
   'kitchen_type',
   'kitchen_size',
   'budget',
   'material_preference',
+  'timeline',
 ] as const
 
 export type RequiredField = (typeof REQUIRED_FIELDS)[number]
@@ -27,10 +31,12 @@ export const FIELD_QUESTIONS: Record<string, string> = {
   email: 'What is your email address?',
   phone: 'What is your phone number?',
   location: 'What is your city or location?',
+  address: 'What is your project / delivery address? (street, area, etc.)',
   kitchen_type: 'What kitchen layout do you prefer? (Straight, L-Shape, U-Shape, Island, Parallel)',
   kitchen_size: 'What is your kitchen size? (approx length x width in feet)',
   budget: 'What is your approximate budget in Rupees?',
   material_preference: 'Do you have a material preference? (MDF, Plywood, Acrylic, Melamine, HPL, PVC)',
+  timeline: 'When do you need your kitchen ready? (e.g. in 2 months, or a target date)',
 }
 
 // ── One-time onboarding confirmation (sent exactly once) ──

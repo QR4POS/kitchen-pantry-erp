@@ -255,4 +255,37 @@ describe('provisionCustomerAccount', () => {
     expect(result.status).toBe('failed_retryable')
     expect(result.error).toMatch(/Failed to queue credential message/)
   })
+
+  it('regenerates and delivers credentials on a failed_retryable retry', async () => {
+    provRecord = {
+      id: 'prov-1',
+      phone_e164: PHONE_E164,
+      status: 'failed_retryable',
+      auth_user_id: 'auth-1',
+      profile_id: 'auth-1',
+      customer_id: 'cust-1',
+      login_email: EMAIL,
+      credentials_sent_at: null,
+      attempt_count: 1,
+    }
+    customersState = [
+      { id: 'cust-1', phone: PHONE, phone_canonical: PHONE_E164, profile_id: 'auth-1', email: EMAIL },
+    ]
+
+    const result = await provisionCustomerAccount(baseInput())
+
+    expect(result.success).toBe(true)
+    expect(result.status).toBe('credential_sent')
+    expect(updateUserByIdFn).toHaveBeenCalledWith(
+      'auth-1',
+      expect.objectContaining({ password: expect.any(String) })
+    )
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(1)
+    expect(queueOutgoingMessage).toHaveBeenCalledWith(
+      PHONE_E164,
+      expect.stringContaining('Temporary password'),
+      false,
+      expect.any(Object)
+    )
+  })
 })

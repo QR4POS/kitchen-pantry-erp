@@ -491,6 +491,78 @@ describe('runOnboardingCompletion', () => {
     expect(projectInsert).toBeFalsy()
   })
 
+  it('skips customer provisioning when auto_customer_creation is disabled', async () => {
+    const collected = { name: 'Kaveesha', email: 'vihangakaveeshavg@gmail.com' }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings: { ...settings, auto_customer_creation: false },
+      providerMessageId: 'wa-no-cust',
+    })
+
+    expect(provisionCustomerAccount).not.toHaveBeenCalled()
+    expect(result.customerId).toBeNull()
+    expect(result.confirmationQueued).toBe(true)
+    expect(logAgent).toHaveBeenCalledWith(
+      'onboarding_customer_creation_skipped',
+      null,
+      'info',
+      expect.objectContaining({ phone: '+94760000000' })
+    )
+  })
+
+  it('maps all collected details into the automated project row', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      phone: '+94760000000',
+      location: 'Matara',
+      address: 'No36, Beach Road, Matara',
+      kitchen_type: 'L-Shape',
+      kitchen_size: '10.5 x 12',
+      budget: 650000,
+      material_preference: 'HPL',
+      timeline: 'urgent',
+    }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings: { ...settings, auto_project_creation: true },
+      providerMessageId: 'wa-proj-details',
+    })
+
+    expect(result.projectId).toBe('proj-1')
+
+    const projectInsert = mockDb.queries.find((q) => q.table === 'projects' && q.mode === 'insert')
+    const payload = projectInsert?.payload as Record<string, unknown>
+    expect(payload).toMatchObject({
+      customer_id: 'cust-1',
+      source_onboarding_id: 'conv-1',
+      kitchen_type: 'l_shape',
+      material_type: 'HPL',
+      city: 'Matara',
+      address: 'No36, Beach Road, Matara',
+      length: 10.5,
+      width: 12,
+      estimated_cost: 650000,
+      priority: 'urgent',
+      status: 'inquiry',
+    })
+    expect(String(payload.notes ?? '')).toContain('Timeline: urgent')
+  })
+
   it('skips provisioning when the conversation is already in support mode', async () => {
     const conversation = baseConversation({
       identity_confirmed_at: new Date().toISOString(),

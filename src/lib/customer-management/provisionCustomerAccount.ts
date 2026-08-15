@@ -364,6 +364,66 @@ async function linkExistingOrphanCustomer(
 }
 
 /**
+ * Ensure credential delivery for a provisioning record.
+ *
+ * - credential_sent / credential_pending → already handled, nothing to do.
+ * - allowReset + auth_user_id + no credentials delivered → a previous attempt
+ *   created the Auth user but the queue failed (status 'failed_retryable').
+ *   The old password is never persisted, so we generate a fresh one, reset the
+ *   user, and queue delivery.
+ * - Otherwise, if a password is available, queue the credential message.
+ *
+ * Returns the (possibly updated) provisioning record and the delivered password
+ * (or null when nothing was/will be delivered).
+ */
+async function ensureCredentialDelivery(input: {
+  provisioning: WhatsappCustomerAccountProvisioningRow
+  email: string
+  password: string | null
+  allowReset: boolean
+}): Promise<{ provisioning: WhatsappCustomerAccountProvisioningRow; password: string | null }> {
+  let provisioning = input.provisioning
+  let password = input.password
+
+  if (provisioning.status === 'credential_sent' || provisioning.status === 'credential_pending') {
+    return { provisioning, password }
+  }
+
+  if (!password && input.allowReset && provisioning.auth_user_id && !provisioning.credentials_sent_at) {
+    password = generateSecureTemporaryPassword()
+    const resetOk = await resetAuthUserPassword(provisioning.auth_user_id, password)
+    if (resetOk) {
+      await setForcePasswordChange(provisioning.auth_user_id)
+      await logAgent('provision_retry_credentials', null, 'info', {
+        phone: provisioning.phone_e164,
+        provisioningId: provisioning.id,
+        reason: 'regenerated_after_failed_queue',
+      })
+    } else {
+      password = null
+    }
+  }
+
+  if (password) {
+    const outboxId = await queueCredentialDelivery(provisioning, input.email, password)
+    if (!outboxId) {
+      provisioning = await updateProvisioningState(provisioning.id, {
+        status: 'failed_retryable',
+        last_error: 'Failed to queue credential message',
+      })
+      return { provisioning, password: null }
+    }
+    provisioning = await updateProvisioningState(provisioning.id, {
+      status: 'credential_sent',
+      credentials_sent_at: new Date().toISOString(),
+      credential_outbox_id: outboxId,
+    })
+  }
+
+  return { provisioning, password }
+}
+
+/**
  * Main entry point. Idempotent: safe to call repeatedly for the same verified
  * phone. Returns a plaintext password only on the first successful creation of
  * a new Auth user.
@@ -491,6 +551,11 @@ export async function provisionCustomerAccount(
         return { success: false, status: 'blocked', blockedReason: reason }
       }
 
+      // Only a retry after our own failed credential queue may reset the
+      // password; a genuine pre-existing account is never touched. Captured
+      // before the status is advanced to customer_linked below.
+      const credentialRetryPending = provisioning.status === 'failed_retryable'
+
       provisioning = await updateProvisioningState(provisioning.id, {
         status: 'customer_linked',
         customer_id: existingCustomer.id,
@@ -503,13 +568,21 @@ export async function provisionCustomerAccount(
         customerId: existingCustomer.id,
         profileId: existingCustomer.profile_id,
       })
+      const delivered = await ensureCredentialDelivery({
+        provisioning,
+        email: existingEmail || normalizedEmail,
+        password: null,
+        allowReset: credentialRetryPending,
+      })
       return {
-        success: true,
-        status: 'customer_linked',
+        success: delivered.provisioning.status !== 'failed_retryable',
+        status: delivered.provisioning.status,
         customerId: existingCustomer.id,
         profileId: existingCustomer.profile_id,
         authUserId: existingCustomer.profile_id,
         email: existingEmail || normalizedEmail,
+        password: delivered.password,
+        error: delivered.provisioning.status === 'failed_retryable' ? (delivered.provisioning.last_error ?? 'Failed to queue credential message') : undefined,
       }
     }
 
@@ -609,45 +682,26 @@ export async function provisionCustomerAccount(
 
     // 8. Queue credential delivery exactly once.
     if (provisioning.status !== 'credential_sent' && provisioning.status !== 'credential_pending') {
-      if (!password) {
-        // We reused an existing Auth user without resetting the password, so no
-        // credentials can be generated. The customer is fully linked — this is a
-        // SUCCESS, not a block: no duplicate account was created and the existing
-        // credentials keep working.
-        await logAgent('provision_existing_auth_linked', null, 'info', {
-          phone: phoneE164,
-          authUserId,
-        })
+      const delivered = await ensureCredentialDelivery({
+        provisioning,
+        email: provisioning.login_email ?? normalizedEmail,
+        password,
+        allowReset: provisioning.status === 'failed_retryable',
+      })
+      provisioning = delivered.provisioning
+      password = delivered.password
+
+      if (provisioning.status === 'failed_retryable') {
         return {
-          success: true,
-          status: 'customer_linked',
+          success: false,
+          status: 'failed_retryable',
+          error: provisioning.last_error ?? 'Failed to queue credential message',
           customerId,
           profileId: authUserId,
           authUserId,
           email: normalizedEmail,
-          password: null,
         }
       }
-
-      provisioning = await updateProvisioningState(provisioning.id, {
-        status: 'credential_pending',
-      })
-
-      const outboxId = await queueCredentialDelivery(provisioning, normalizedEmail, password)
-      if (!outboxId) {
-        const reason = 'Failed to queue credential message'
-        await updateProvisioningState(provisioning.id, {
-          status: 'failed_retryable',
-          last_error: reason,
-        })
-        return { success: false, status: 'failed_retryable', error: reason }
-      }
-
-      provisioning = await updateProvisioningState(provisioning.id, {
-        status: 'credential_sent',
-        credentials_sent_at: new Date().toISOString(),
-        credential_outbox_id: outboxId,
-      })
     }
 
     return {

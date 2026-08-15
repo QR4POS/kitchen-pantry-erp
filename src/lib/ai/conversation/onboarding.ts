@@ -54,14 +54,27 @@ function isIdentityConfirmed(conversation: AiConversationRow): boolean {
 function buildIdentitySummary(collected: Record<string, unknown>): string {
   const name = collected.name ?? ''
   const email = collected.email ?? ''
+  const phone = collected.phone ?? ''
   const city = collected.location ?? ''
   const address = collected.address ?? ''
+  const kitchenType = collected.kitchen_type ?? ''
+  const kitchenSize = collected.kitchen_size ?? ''
+  const budget = typeof collected.budget === 'number' ? `Rs. ${collected.budget.toLocaleString()}` : (collected.budget ?? '')
+  const material = collected.material_preference ?? ''
+  const timeline = collected.timeline ?? ''
   return `Please confirm your details:
 
 Name: ${name}
 Email: ${email}
+Phone: ${phone}
 City: ${city}
 Address: ${address}
+
+Kitchen layout: ${kitchenType}
+Kitchen size: ${kitchenSize}
+Budget: ${budget}
+Material: ${material}
+Timeline: ${timeline}
 
 Reply YES to confirm, or tell me what to change.`
 }
@@ -113,10 +126,12 @@ Your ONLY job right now is to collect these customer details (do NOT answer unre
 2. email
 3. phone (confirm their number)
 4. location (city / project location)
-5. kitchen_type (Straight, L-Shape, U-Shape, Island, Parallel — or their description)
-6. kitchen_size (approx length x width in feet, or total square feet)
-7. budget (amount in Rupees, a number)
-8. material_preference (MDF, Plywood, Melamine, Acrylic, HPL, PVC, or their preference)
+5. address (full project/delivery address — street, area, etc.)
+6. kitchen_type (Straight, L-Shape, U-Shape, Island, Parallel — or their description)
+7. kitchen_size (approx length x width in feet, or total square feet)
+8. budget (amount in Rupees, a number)
+9. material_preference (MDF, Plywood, Melamine, Acrylic, HPL, PVC, or their preference)
+10. timeline (when the customer needs the kitchen ready — e.g. a number of weeks/months or a target date)
 
 RULES:
 - Ask ONE question at a time. Never ask multiple questions in a single message.
@@ -133,7 +148,7 @@ ${missing.join(', ')}`
 }
 
 function buildExtractionPrompt(collected: Record<string, unknown>): string {
-  return `Extract kitchen customer details from the conversation. Return ONLY a JSON object (no markdown, no code fences) with these keys where found: name, email, phone, location, kitchen_type, kitchen_size, budget (number), material_preference. Merge with existing data — do not overwrite provided existing values unless the conversation clearly gives a new value.
+  return `Extract kitchen customer details from the conversation. Return ONLY a JSON object (no markdown, no code fences) with these keys where found: name, email, phone, location, address, kitchen_type, kitchen_size, budget (number), material_preference, timeline. Merge with existing data — do not overwrite provided existing values unless the conversation clearly gives a new value.
 
 Existing collected data:
 ${JSON.stringify(collected)}
@@ -156,6 +171,8 @@ function computeSlotPriority(
     budget: /budget|price|cost|rupees|rs\.?\s*\d+|\d+\s*(k|lakh|lac)/i,
     material_preference: /material|mdf|plywood|acrylic|melamine|hpl|pvc/i,
     location: /colombo|gampaha|kandy|negombo|moratuwa|dehiwala|nugegoda|kotte|jaffna|galle|matara|kurunegala/i,
+    address: /(street|road|lane|no\.?\s*\d|house|home|flat|apt|colony|villa)/i,
+    timeline: /(week|month|day|soon|urgent|asap|ready|complete|install|date|june|july|august|september|october|november|december|january|february|march|april|may)/i,
     name: /my name is|i'?m |i am/i,
     email: /@/,
     phone: /^[\d\s+-]{7,15}$/,
@@ -163,8 +180,10 @@ function computeSlotPriority(
 
   const prerequisites: Record<string, string[]> = {
     email: ['name'],
+    address: ['location'],
     kitchen_size: ['kitchen_type'],
     material_preference: ['budget'],
+    timeline: ['budget'],
   }
 
   const RECOMMENDATION_UNLOCKERS = new Set(['budget', 'kitchen_type', 'material_preference'])

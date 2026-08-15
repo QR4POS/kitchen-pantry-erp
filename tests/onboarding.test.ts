@@ -129,10 +129,12 @@ describe('onboarding — identity confirmation', () => {
       email: 'john@example.com',
       phone: '+94760000000',
       location: 'Colombo',
+      address: '123 Galle Road, Colombo 03',
       kitchen_type: 'Straight',
       kitchen_size: '10x12',
       budget: 500000,
       material_preference: 'Plywood',
+      timeline: 'in 2 months',
     }
   }
 
@@ -144,8 +146,21 @@ describe('onboarding — identity confirmation', () => {
     })
   })
 
-  it('asks for address when all required fields are collected but address is missing', async () => {
-    decideControllerExtracted(completeCollected())
+  it('collects address as the next required field when it is missing', async () => {
+    const withoutAddress: Record<string, unknown> = { ...completeCollected(), timeline: 'in 2 months' }
+    delete withoutAddress.address
+
+    decideConversationTurn.mockResolvedValue({
+      action: 'reply',
+      next_state: 'waiting_customer',
+      intent: 'provide_detail',
+      reply: 'What is your project / delivery address? (street, area, etc.)',
+      extracted_fields: withoutAddress,
+      declined_fields: [],
+      next_question: null,
+      handoff_reason: null,
+      confidence: 0.95,
+    })
 
     const result = await runOnboardingTurn({
       conversation: baseConversation(),
@@ -161,16 +176,16 @@ describe('onboarding — identity confirmation', () => {
     })
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('detailed address')
+    expect(result.reply).toContain('delivery address')
     expect(queueOutgoingMessage).toHaveBeenCalledWith(
       '+94760000000',
-      expect.stringContaining('detailed address'),
+      expect.stringContaining('delivery address'),
       true,
       expect.objectContaining({ conversationId: 'conv-1', postSendState: 'waiting_customer' }),
     )
 
     const update = lastAiConversationUpdate()
-    expect(update?.current_step).toBe('collect_address')
+    expect(update?.current_step).toBe('address')
   })
 
   it('sends confirmation summary once address is provided', async () => {
@@ -427,7 +442,7 @@ describe('onboarding — controller path state persistence', () => {
     expect(result.replyQueued).toBe(true)
     const update = lastAiConversationUpdate()
     expect(update?.collected_data).toMatchObject({ email: 'vihangakaveeshavg@gmail.com' })
-    expect(update?.current_step).toBe('material_preference')
+    expect(update?.current_step).toBe('address')
     expect(update?.last_question).toContain('material')
   })
 })

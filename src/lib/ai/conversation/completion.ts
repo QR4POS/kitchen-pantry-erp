@@ -66,24 +66,34 @@ export async function runOnboardingCompletion(input: {
 
   // 1. Provision the customer account (Auth + CRM) idempotently.
   //    The verified WhatsApp phone is the authoritative identity.
+  //    Respects the auto_customer_creation setting: when disabled, only the
+  //    lead is created and onboarding still completes normally.
   let provisionResult: Awaited<ReturnType<typeof provisionCustomerAccount>> | null = null
-  try {
-    provisionResult = await provisionCustomerAccount({
+  if (settings.auto_customer_creation) {
+    try {
+      provisionResult = await provisionCustomerAccount({
+        phone,
+        fullName: String(collected.name ?? '').trim(),
+        email: String(collected.email ?? '').trim().toLowerCase(),
+        city: collected.location ? String(collected.location).trim() : null,
+        address: collected.address ? String(collected.address).trim() : null,
+        conversationId: conversation.id,
+        confirmedAt: conversation.identity_confirmed_at,
+      })
+    } catch (e) {
+      const reason = (e as Error).message ?? 'Account provisioning error'
+      await logAgent('onboarding_completion_error', null, 'error', { phone, conversationId: conversation.id }, reason)
+      provisionResult = { success: false, status: 'failed_retryable', error: reason }
+    }
+  } else {
+    await logAgent('onboarding_customer_creation_skipped', null, 'info', {
       phone,
-      fullName: String(collected.name ?? '').trim(),
-      email: String(collected.email ?? '').trim().toLowerCase(),
-      city: collected.location ? String(collected.location).trim() : null,
-      address: collected.address ? String(collected.address).trim() : null,
       conversationId: conversation.id,
-      confirmedAt: conversation.identity_confirmed_at,
+      reason: 'auto_customer_creation disabled',
     })
-  } catch (e) {
-    const reason = (e as Error).message ?? 'Account provisioning error'
-    await logAgent('onboarding_completion_error', null, 'error', { phone, conversationId: conversation.id }, reason)
-    provisionResult = { success: false, status: 'failed_retryable', error: reason }
   }
 
-  if (!provisionResult.success) {
+  if (provisionResult && !provisionResult.success) {
     const reason = provisionResult.blockedReason ?? provisionResult.error ?? 'Account provisioning failed'
     const isBlocked = provisionResult.status === 'blocked'
 
@@ -151,7 +161,16 @@ export async function runOnboardingCompletion(input: {
     return { customerId: fallbackCustomerId, leadId: null, confirmationQueued: false }
   }
 
-  const customerId = provisionResult.customerId ?? null
+  const customerId = provisionResult?.customerId ?? null
+
+  if (customerId) {
+    await logAgent('onboarding_customer_created', null, 'success', {
+      phone,
+      conversationId: conversation.id,
+      customerId,
+      provisioningStatus: provisionResult?.status,
+    })
+  }
 
   // 2. Lead
   let lead: Awaited<ReturnType<typeof upsertLeadForCollected>> | null = null
@@ -235,7 +254,7 @@ export async function runOnboardingCompletion(input: {
     customerId: customerId ?? null,
     leadId: lead?.id ?? null,
     confirmationQueued,
-    credentialsSent: provisionResult.password ? true : false,
+    credentialsSent: provisionResult?.password ? true : false,
   })
 
   return {
