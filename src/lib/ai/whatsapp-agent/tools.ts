@@ -254,6 +254,11 @@ export async function queueOutgoingMessage(
     postSendState?: string | null
     messageType?: 'text' | 'image'
     mediaUrl?: string | null
+    /**
+     * Explicit created_at so two messages queued in the SAME turn can be
+     * delivered in a guaranteed order (the outbox sends oldest-first).
+     */
+    createdAt?: string
   }
 ): Promise<WhatsappMessageRow | null> {
   const dedupKey = options?.sourceInboundMessageId && options?.conversationId
@@ -268,6 +273,7 @@ export async function queueOutgoingMessage(
       message,
       status: 'pending',
       ai_generated: aiGenerated,
+      created_at: options?.createdAt ?? undefined,
       message_type: options?.messageType ?? 'text',
       media_url: options?.mediaUrl ?? null,
       provider_message_id: `out:${createHash('sha256').update(`${phone}\u0000${message}`).digest('hex').slice(0, 12)}`,

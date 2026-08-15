@@ -234,6 +234,7 @@ const RECENT_SENT_TTL_MS = 60 * 60 * 1000
 function ensureMessageStateMeta(state) {
   const meta = state.meta || {}
   if (!Array.isArray(meta.recentSent)) meta.recentSent = []
+  if (!Array.isArray(meta.recentSentIds)) meta.recentSentIds = []
   if (!meta.ownSenderToken) meta.ownSenderToken = null
   state.meta = meta
   return meta
@@ -416,6 +417,37 @@ function hasSentExactText(meta, text, phone) {
   const now = Date.now()
   return ((meta && meta.recentSent) || []).some((e) =>
     e.phone === chatKey && normalizeMessageText(e.text) === norm && (now - (e.ts || 0)) < RECENT_SENT_TTL_MS
+  )
+}
+
+// Record the OUTBOX ROW id of a message this account just sent, so the outbox
+// duplicate-send guard can key on the row identity instead of the text. Two
+// DIFFERENT outbox rows may legitimately carry the SAME text (e.g. a welcome
+// re-sent for a fresh conversation); only the exact same row that was already
+// delivered must never be sent twice.
+function recordSentRowId(state, id, phone) {
+  const meta = ensureMessageStateMeta(state)
+  if (!id) return
+  const now = Date.now()
+  const fresh = (meta.recentSentIds || []).filter((e) => now - (e.ts || 0) < RECENT_SENT_TTL_MS)
+  fresh.push({ id: String(id), phone: canonicalPhone(phone) || null, ts: now })
+  meta.recentSentIds = fresh.slice(-RECENT_SENT_MAX)
+  saveMessageState(state)
+}
+
+// True when THIS EXACT outbox row was already delivered to this chat recently
+// (send echo). Used as the outbox duplicate guard: if an ACK failed after
+// WhatsApp actually delivered the message, the re-claimed row (same id) must
+// NOT be re-sent. Keyed on the row id — never on the text — so a brand-new row
+// with the same message text is never skipped.
+function hasSentRowId(meta, id, phone) {
+  if (!id) return false
+  const chatKey = canonicalPhone(phone)
+  if (!chatKey) return false
+  const now = Date.now()
+  const rowId = String(id)
+  return ((meta && meta.recentSentIds) || []).some(
+    (e) => e.id === rowId && e.phone === chatKey && (now - (e.ts || 0)) < RECENT_SENT_TTL_MS
   )
 }
 
@@ -1328,11 +1360,12 @@ async function processOutbox(page, messageState) {
     const outboxPhone = canonicalPhone(msg.phone_number) || String(msg.phone_number || '')
     console.log(`[OUTBOX_PROCESS_START] chat=${outboxPhone} id=${msg.id}`)
     console.log(`[OUTBOX_SEND_START] id=${msg.id} phone=${msg.phone_number}`)
-    // Exactly-once reconciliation: if the exact text was already delivered to
-    // this chat recently (a previous attempt sent it but its ACK failed), do NOT
-    // send it again — this avoids duplicate customer messages after ACK loss.
-    if (hasSentExactText(messageState?.meta, msg.message, msg.phone_number)) {
-      console.log(`[OUTBOX_DUPLICATE_GUARD] chat=${outboxPhone} id=${msg.id} text_already_sent`)
+    // Exactly-once reconciliation keyed on the OUTBOX ROW id: if THIS SAME row
+    // was already delivered to this chat recently (a previous attempt sent it
+    // but its ACK failed), do NOT send it again. A brand-new row that happens
+    // to carry the same text (e.g. a fresh welcome reply) is always sent.
+    if (hasSentRowId(messageState?.meta, msg.id, msg.phone_number)) {
+      console.log(`[OUTBOX_DUPLICATE_GUARD] chat=${outboxPhone} id=${msg.id} row_already_sent`)
       result.sent += 1
       results.push({ id: msg.id, status: 'sent' })
       continue
@@ -1345,6 +1378,7 @@ async function processOutbox(page, messageState) {
       })
       if (outcome.ok) {
         result.sent += 1
+        recordSentRowId(messageState, msg.id, msg.phone_number)
         results.push({ id: msg.id, status: 'sent' })
         console.log(`[OUTBOX_PROCESS_DONE] chat=${outboxPhone} id=${msg.id} ok=true`)
         console.log(`[OUTBOX_SEND_DONE] id=${msg.id}`)

@@ -825,7 +825,7 @@ async function handleBatchCollectionTurn(input: {
   settings: AiAgentSettingsRow
   isNewConversation: boolean
 }): Promise<OnboardingTurnResult> {
-  const { conversation, phone, incomingText, providerMessageId, settings, isNewConversation } = input
+  const { conversation, phone, incomingText, providerMessageId, settings } = input
   const step = conversation.current_step
   const now = new Date().toISOString()
 
@@ -839,21 +839,49 @@ async function handleBatchCollectionTurn(input: {
 
   let reply: string
   let nextStep: string | null
+  let skipEndQueue = false
+  let firstTurnBatchQueued = false
 
   if (identityComplete && projectComplete) {
     reply = buildIdentitySummary(collected)
     nextStep = CONFIRM_STEP
-  } else if (step === IDENTITY_BATCH_STEP) {
-    if (identityComplete) {
-      reply = PROJECT_BATCH_QUESTION
-      nextStep = PROJECT_BATCH_STEP
-    } else if (identityMissing.length === CUSTOMER_IDENTITY_FIELDS.length) {
-      // Nothing collected yet — ask the full batch question (welcome first on
-      // a genuinely new conversation).
-      const welcome = isNewConversation ? settings.welcome_message?.trim() : null
-      reply = welcome ? `${welcome}\n\n${IDENTITY_BATCH_QUESTION}` : IDENTITY_BATCH_QUESTION
+    } else if (step === IDENTITY_BATCH_STEP) {
+      if (identityComplete) {
+        reply = PROJECT_BATCH_QUESTION
+        nextStep = PROJECT_BATCH_STEP
+      } else if ((conversation.turn_count ?? 0) === 0) {
+      // FIRST turn — the customer receives TWO separate messages:
+      //   1. the configured welcome message (plain, verbatim — never modified),
+      //   2. then the full identity batch question.
+      // If no welcome is configured, only the batch question is sent.
+      if (settings.auto_reply_enabled) {
+        const welcome = settings.welcome_message
+        const now = Date.now()
+        if (welcome?.trim()) {
+          await queueOutgoingMessage(phone, welcome, true, {
+            conversationId: conversation.id,
+            sourceInboundMessageId: providerMessageId ?? null,
+            decisionAction: 'reply',
+            postSendState: 'waiting_customer',
+          })
+        }
+        // Content-based dedup key (no sourceInboundMessageId) so the batch
+        // question never collides with the welcome message above. Its
+        // created_at is forced 1s AFTER the welcome so the outbox (oldest-first)
+        // ALWAYS delivers the welcome before the batch question.
+        firstTurnBatchQueued = Boolean(await queueOutgoingMessage(phone, IDENTITY_BATCH_QUESTION, true, {
+          conversationId: conversation.id,
+          decisionAction: 'reply',
+          postSendState: 'waiting_customer',
+          createdAt: new Date(now + 1000).toISOString(),
+        }))
+      }
+      reply = IDENTITY_BATCH_QUESTION
       nextStep = IDENTITY_BATCH_STEP
+      skipEndQueue = true
     } else {
+      // Never repeat the full batch question. Later turns always use a short
+      // nudge listing exactly what is still missing (even if that is all items).
       reply = `I still need your ${listMissingFields(identityMissing)}. Please share them.`
       nextStep = IDENTITY_BATCH_STEP
     }
@@ -861,10 +889,9 @@ async function handleBatchCollectionTurn(input: {
     if (projectComplete) {
       reply = buildIdentitySummary(collected)
       nextStep = CONFIRM_STEP
-    } else if (projectMissing.length === PROJECT_DETAIL_FIELDS.length) {
-      reply = PROJECT_BATCH_QUESTION
-      nextStep = PROJECT_BATCH_STEP
     } else {
+      // Same rule as identity: no repeated full project question, only a short
+      // nudge listing what is still missing.
       reply = `I still need your ${listMissingFields(projectMissing)}. Please share them.`
       nextStep = PROJECT_BATCH_STEP
     }
@@ -882,14 +909,15 @@ async function handleBatchCollectionTurn(input: {
     })
     .eq('id', conversation.id)
 
-  let queued = false
-  if (settings.auto_reply_enabled) {
-    queued = Boolean(await queueOutgoingMessage(phone, reply, true, {
+  let queued = firstTurnBatchQueued
+  if (settings.auto_reply_enabled && !skipEndQueue) {
+    const q = await queueOutgoingMessage(phone, reply, true, {
       conversationId: conversation.id,
       sourceInboundMessageId: providerMessageId ?? null,
       decisionAction: 'reply',
       postSendState: 'waiting_customer',
-    }))
+    })
+    queued = queued || Boolean(q)
   }
 
   return {

@@ -50,6 +50,8 @@ let fn: {
   isRowUnchangedTerminal: (lastOutcome: string | null | undefined) => boolean
   isTerminalSkipReason: (skipReason: string | null | undefined) => boolean
   hasSentExactText: (meta: Record<string, unknown> | undefined, text: string, phone: string) => boolean
+  recordSentRowId: (state: Record<string, unknown>, id: string, phone: string) => void
+  hasSentRowId: (meta: Record<string, unknown> | undefined, id: string, phone: string) => boolean
 }
 
 beforeAll(() => {
@@ -84,13 +86,15 @@ beforeAll(() => {
     extractFunction(src, 'isRowUnchangedTerminal'),
     extractFunction(src, 'isTerminalSkipReason'),
     extractFunction(src, 'hasSentExactText'),
+    extractFunction(src, 'recordSentRowId'),
+    extractFunction(src, 'hasSentRowId'),
   ].join('\n')
 
   const sandbox = new Function(
     'saveMessageState',
     'DEBUG',
     'createHash',
-    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, finalizeMessageIdentity, readIncomingFromPreview, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, isTerminalSkipReason, hasSentExactText };`
+    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, finalizeMessageIdentity, readIncomingFromPreview, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, isTerminalSkipReason, hasSentExactText, recordSentRowId, hasSentRowId };`
   )
   // Deterministic fake createHash so generateFallbackId produces distinct ids
   // for distinct (chat, text, timestamp) inputs.
@@ -355,6 +359,25 @@ describe('hasSentExactText — outbox duplicate-send guard', () => {
     const state = makeState()
     fn.recordSentMessage(state, 'What is your kitchen size in feet?', '94760544773')
     expect(fn.hasSentExactText(state.meta, 'What is your kitchen size?', '94760544773')).toBe(false)
+  })
+})
+
+describe('hasSentRowId — outbox duplicate-send guard (row-id keyed)', () => {
+  it('skips only the SAME outbox row that was already sent to the same chat', () => {
+    const state = makeState()
+    fn.recordSentRowId(state, 'row-1', '94760544773')
+    expect(fn.hasSentRowId(state.meta, 'row-1', '94760544773')).toBe(true)
+    expect(fn.hasSentRowId(state.meta, 'row-1', '94771234567')).toBe(false)
+    expect(fn.hasSentRowId(state.meta, 'row-2', '94760544773')).toBe(false)
+  })
+
+  it('does NOT skip a brand-new row that carries the same text as a previously sent one', () => {
+    const state = makeState()
+    // Welcome text was sent in an earlier run (recorded by text evidence)…
+    fn.recordSentMessage(state, 'Welcome to Luxus Kitchen!', '94760544773')
+    // …but a NEW outbox row with the same text must still be delivered.
+    fn.recordSentRowId(state, 'row-old', '94760544773')
+    expect(fn.hasSentRowId(state.meta, 'row-new', '94760544773')).toBe(false)
   })
 })
 

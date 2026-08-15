@@ -105,10 +105,47 @@ beforeEach(() => {
 })
 
 describe('batch collection — customer identity', () => {
-  it('asks for ALL identity details in ONE message when none are collected', async () => {
+  it('sends the plain welcome message FIRST, then the batch question as a second message', async () => {
     callAgentAI.mockResolvedValue({ content: '{}' })
 
-    const result = await turn({ isNewConversation: true })
+    const result = await turn()
+
+    expect(result.complete).toBe(false)
+    expect(result.reply).toContain('Full name')
+    expect(result.reply).toContain('Delivery address')
+
+    // Two separate outbound messages: welcome (with source inbound id) then the
+    // batch question (content-based dedup, no source inbound id).
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(2)
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(
+      1,
+      '+94760000000',
+      'Welcome to LUXUS ELEMENTE!',
+      true,
+      expect.objectContaining({ conversationId: 'conv-1', sourceInboundMessageId: 'wa-1' })
+    )
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(
+      2,
+      '+94760000000',
+      expect.stringContaining('Full name'),
+      true,
+      expect.objectContaining({ conversationId: 'conv-1' })
+    )
+    const secondOpts = queueOutgoingMessage.mock.calls[1][3] as Record<string, unknown>
+    // No source inbound id (content-based dedup) and a created_at strictly later
+    // than the welcome, so the outbox delivers the welcome FIRST.
+    expect(secondOpts.sourceInboundMessageId).toBeUndefined()
+    expect(secondOpts.createdAt).toBeDefined()
+
+    expect(lastUpdate()?.current_step).toBe('collect_identity')
+  })
+
+  it('asks for ALL identity details in ONE message when no welcome is configured', async () => {
+    callAgentAI.mockResolvedValue({ content: '{}' })
+
+    const result = await turn({
+      settings: { ...settings, welcome_message: null },
+    })
 
     expect(result.complete).toBe(false)
     expect(result.reply).toContain('Full name')
@@ -116,9 +153,28 @@ describe('batch collection — customer identity', () => {
     expect(result.reply).toContain('Email address')
     expect(result.reply).toContain('City')
     expect(result.reply).toContain('Delivery address')
+    expect(lastUpdate()?.current_step).toBe('collect_identity')
+  })
+
+  it('never repeats the full batch question on later turns — only a short nudge', async () => {
+    callAgentAI.mockResolvedValue({ content: '{}' })
+
+    const result = await turn({
+      conversation: baseConversation({ turn_count: 1 }),
+    })
+
+    expect(result.complete).toBe(false)
+    expect(result.reply).toContain('I still need')
+    expect(result.reply).not.toContain('Please share the following details in one message')
+    expect(result.reply).not.toContain('1. Full name')
+    expect(result.reply).toContain('full name')
+    expect(result.reply).toContain('phone number')
+    expect(result.reply).toContain('email address')
+    expect(result.reply).toContain('city')
+    expect(result.reply).toContain('delivery address')
     expect(queueOutgoingMessage).toHaveBeenCalledWith(
       '+94760000000',
-      expect.stringContaining('Full name'),
+      expect.stringContaining('I still need'),
       true,
       expect.objectContaining({ conversationId: 'conv-1' })
     )
@@ -148,12 +204,47 @@ describe('batch collection — customer identity', () => {
     expect((lastUpdate()?.collected_data as Record<string, unknown>)?.name).toBe('Kaveesha')
   })
 
-  it('requests ONLY the missing identity items separately', async () => {
+  it('first turn sends welcome + full batch question even when some fields are volunteered', async () => {
     callAgentAI.mockResolvedValue({
       content: JSON.stringify({ name: 'Kaveesha' }),
     })
 
     const result = await turn()
+
+    expect(result.complete).toBe(false)
+    expect(result.reply).toContain('Full name')
+    expect(result.reply).not.toContain('I still need')
+
+    // welcome first, then the full batch question
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(2)
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(
+      1,
+      '+94760000000',
+      'Welcome to LUXUS ELEMENTE!',
+      true,
+      expect.anything()
+    )
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(
+      2,
+      '+94760000000',
+      expect.stringContaining('Delivery address'),
+      true,
+      expect.anything()
+    )
+
+    expect(lastUpdate()?.current_step).toBe('collect_identity')
+  })
+
+  it('requests ONLY the missing identity items separately on later turns', async () => {
+    callAgentAI.mockResolvedValue({
+      content: JSON.stringify({ name: 'Kaveesha' }),
+    })
+
+    const result = await turn({
+      conversation: baseConversation({
+        turn_count: 2,
+      }),
+    })
 
     expect(result.complete).toBe(false)
     expect(result.reply).toContain('I still need')
