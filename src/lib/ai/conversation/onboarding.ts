@@ -817,15 +817,57 @@ async function extractBatchFields(input: {
   return collected
 }
 
+// Detects whether the customer's first message is a question (or a request)
+// that deserves a real answer alongside the welcome + batch question.
+const QUESTION_RE = /[?？]|(?:how\s+(?:much|many)|what|which|why|when|where|can\s+(?:i|you)|could|would|cost|price|quote|estimate)\b/i
+
+function looksLikeQuestion(text: string): boolean {
+  return QUESTION_RE.test(String(text || ''))
+}
+
+// Best-effort answer to the customer's very first question, generated through
+// the conversation controller (answers kitchen questions naturally). Returns
+// null on controller failure so the turn never fails because of the answer.
+async function answerFirstMessage(input: {
+  conversation: AiConversationRow
+  phone: string
+  incomingText: string
+  settings: AiAgentSettingsRow
+  isReturning: boolean
+  lastInteractionAt: string | null
+  isNewConversation: boolean
+}): Promise<string | null> {
+  try {
+    const decideInput = await buildControllerContext({
+      phone: input.phone,
+      incomingText: input.incomingText,
+      conversation: input.conversation,
+      settings: input.settings,
+      isReturning: input.isReturning,
+      lastInteractionAt: input.lastInteractionAt,
+      isNewConversation: input.isNewConversation,
+    })
+    const decision = await decideConversationTurn(decideInput)
+    if (isControllerFailure(decision)) return null
+    const answer = decision.reply?.trim()
+    return answer || null
+  } catch (e) {
+    await logAgent('onboarding_first_answer_error', null, 'error', { phone: input.phone }, (e as Error).message)
+    return null
+  }
+}
+
 async function handleBatchCollectionTurn(input: {
   conversation: AiConversationRow
   phone: string
   incomingText: string
   providerMessageId?: string | null
   settings: AiAgentSettingsRow
+  isReturning: boolean
+  lastInteractionAt: string | null
   isNewConversation: boolean
 }): Promise<OnboardingTurnResult> {
-  const { conversation, phone, incomingText, providerMessageId, settings } = input
+  const { conversation, phone, incomingText, providerMessageId, settings, isReturning, lastInteractionAt, isNewConversation } = input
   const step = conversation.current_step
   const now = new Date().toISOString()
 
@@ -856,7 +898,6 @@ async function handleBatchCollectionTurn(input: {
       // If no welcome is configured, only the batch question is sent.
       if (settings.auto_reply_enabled) {
         const welcome = settings.welcome_message
-        const now = Date.now()
         if (welcome?.trim()) {
           await queueOutgoingMessage(phone, welcome, true, {
             conversationId: conversation.id,
@@ -866,15 +907,33 @@ async function handleBatchCollectionTurn(input: {
           })
         }
         // Content-based dedup key (no sourceInboundMessageId) so the batch
-        // question never collides with the welcome message above. Its
-        // created_at is forced 1s AFTER the welcome so the outbox (oldest-first)
-        // ALWAYS delivers the welcome before the batch question.
+        // question never collides with the welcome message above.
         firstTurnBatchQueued = Boolean(await queueOutgoingMessage(phone, IDENTITY_BATCH_QUESTION, true, {
           conversationId: conversation.id,
           decisionAction: 'reply',
           postSendState: 'waiting_customer',
-          createdAt: new Date(now + 1000).toISOString(),
         }))
+
+        // After the welcome + batch question, also answer the question the
+        // customer actually asked on their very first message.
+        if (looksLikeQuestion(incomingText)) {
+          const answer = await answerFirstMessage({
+            conversation,
+            phone,
+            incomingText,
+            settings,
+            isReturning,
+            lastInteractionAt,
+            isNewConversation,
+          })
+          if (answer) {
+            await queueOutgoingMessage(phone, answer, true, {
+              conversationId: conversation.id,
+              decisionAction: 'reply',
+              postSendState: 'waiting_customer',
+            })
+          }
+        }
       }
       reply = IDENTITY_BATCH_QUESTION
       nextStep = IDENTITY_BATCH_STEP

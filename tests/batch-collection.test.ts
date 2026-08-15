@@ -8,6 +8,13 @@ const { callAgentAI } = vi.hoisted(() => ({ callAgentAI: vi.fn() }))
 const mockDb = createMockDb()
 
 const { queueOutgoingMessage } = vi.hoisted(() => ({ queueOutgoingMessage: vi.fn() }))
+const { searchCustomerByPhone, findActiveLeadByPhone, getRecentWhatsAppHistory } = vi.hoisted(() => ({
+  searchCustomerByPhone: vi.fn(),
+  findActiveLeadByPhone: vi.fn(),
+  getRecentWhatsAppHistory: vi.fn(),
+}))
+const { classifySubIntent } = vi.hoisted(() => ({ classifySubIntent: vi.fn() }))
+const { decideConversationTurn } = vi.hoisted(() => ({ decideConversationTurn: vi.fn() }))
 
 vi.mock('@/lib/supabase/admin', () => ({
   createAdminClient: () => mockDb.db,
@@ -21,7 +28,18 @@ vi.mock('@/lib/ai/whatsapp-agent/tools', async (importOriginal) => {
   return {
     ...actual,
     queueOutgoingMessage,
+    searchCustomerByPhone,
+    findActiveLeadByPhone,
+    getRecentWhatsAppHistory,
   }
+})
+vi.mock('@/lib/ai/whatsapp-agent/intent-filter', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return { ...actual, classifySubIntent }
+})
+vi.mock('@/lib/ai/whatsapp-agent/controller', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return { ...actual, decideConversationTurn }
 })
 
 function baseConversation(overrides: Partial<AiConversationRow> = {}): AiConversationRow {
@@ -96,6 +114,11 @@ beforeEach(() => {
   logAgent.mockClear()
   callAgentAI.mockReset()
   queueOutgoingMessage.mockReset()
+  searchCustomerByPhone.mockReset().mockResolvedValue([])
+  findActiveLeadByPhone.mockReset().mockResolvedValue(null)
+  getRecentWhatsAppHistory.mockReset().mockResolvedValue([])
+  classifySubIntent.mockReset().mockResolvedValue({ intent: 'greeting', confidence: 0.9 })
+  decideConversationTurn.mockReset()
   mockDb.queries.length = 0
   queueOutgoingMessage.mockResolvedValue({ id: 'out-1' })
   mockDb.on('ai_conversations', (q) => {
@@ -131,13 +154,37 @@ describe('batch collection — customer identity', () => {
       true,
       expect.objectContaining({ conversationId: 'conv-1' })
     )
-    const secondOpts = queueOutgoingMessage.mock.calls[1][3] as Record<string, unknown>
-    // No source inbound id (content-based dedup) and a created_at strictly later
-    // than the welcome, so the outbox delivers the welcome FIRST.
-    expect(secondOpts.sourceInboundMessageId).toBeUndefined()
-    expect(secondOpts.createdAt).toBeDefined()
+    expect((queueOutgoingMessage.mock.calls[1][3] as Record<string, unknown>).sourceInboundMessageId).toBeUndefined()
 
+    expect(decideConversationTurn).not.toHaveBeenCalled()
     expect(lastUpdate()?.current_step).toBe('collect_identity')
+  })
+
+  it('answers the customer first question AFTER welcome + batch question', async () => {
+    callAgentAI.mockResolvedValue({ content: '{}' })
+    decideConversationTurn.mockResolvedValue({
+      action: 'reply',
+      next_state: 'waiting_customer',
+      intent: 'estimate_request',
+      reply: 'A standard 10ft kitchen typically costs between Rs. 400,000 and Rs. 700,000 depending on the materials you choose.',
+      extracted_fields: {},
+      declined_fields: [],
+      next_question: null,
+      handoff_reason: null,
+      confidence: 0.95,
+    })
+
+    const result = await turn({ incomingText: 'How much does a kitchen cost?' })
+
+    expect(result.complete).toBe(false)
+    expect(result.reply).toContain('Full name')
+
+    // Three outbound messages in order: welcome → batch question → answer.
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(3)
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(1, '+94760000000', 'Welcome to LUXUS ELEMENTE!', true, expect.anything())
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(2, '+94760000000', expect.stringContaining('Full name'), true, expect.anything())
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(3, '+94760000000', expect.stringContaining('costs between'), true, expect.anything())
+    expect(decideConversationTurn).toHaveBeenCalledTimes(1)
   })
 
   it('asks for ALL identity details in ONE message when no welcome is configured', async () => {
