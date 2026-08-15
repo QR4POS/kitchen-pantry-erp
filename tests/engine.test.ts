@@ -252,3 +252,48 @@ describe('engine — non-provider processing error', () => {
     expect(logAgent).toHaveBeenCalledWith('processing_error', null, 'error', expect.objectContaining({ providerFailure: false }), expect.any(String))
   })
 })
+
+describe('engine — answer bypass for expected field replies', () => {
+  it('bypasses the kitchen-intent filter for a bare email address when current_step is email', async () => {
+    const conv = baseConversation({
+      current_step: 'email',
+      last_question: 'What is your email address?',
+      collected_data: {
+        name: 'Kaveesha',
+        phone: '+94760000000',
+        location: 'Matara',
+        kitchen_type: 'L-Shape',
+        kitchen_size: '6m total length',
+        budget: 500000,
+      },
+    })
+    mockDb.on('ai_conversations', (q) => {
+      if (q.mode === 'select' && q.filters.phone_number) return { data: conv, error: null }
+      if (q.mode === 'update' && q.inFilters.conversation_status) {
+        return { data: [{ id: 'conv-1' }], error: null }
+      }
+      if (q.mode === 'update' && q.filters.id) {
+        return { data: { id: 'conv-1' }, error: null }
+      }
+      return { data: null, error: null }
+    })
+
+    runOnboardingTurn.mockResolvedValue({
+      mode: 'onboarding',
+      complete: false,
+      reply: 'Thank you, email noted.',
+      nextState: 'waiting_customer',
+      replyQueued: true,
+      collected: { ...(conv.collected_data as Record<string, unknown>), email: 'vihangakaveeshavg@gmail.com' },
+      decisionAction: 'reply',
+      conversationId: 'conv-1',
+    })
+
+    const result = await processWhatsAppMessage('+94760000000', 'vihangakaveeshavg@gmail.com', { providerMessageId: 'wa-email' })
+
+    expect(result.replyQueued).toBe(true)
+    expect(runOnboardingTurn).toHaveBeenCalledWith(expect.objectContaining({ incomingText: 'vihangakaveeshavg@gmail.com' }))
+    // No non-kitchen redirect should be queued.
+    expect(queueOutgoingMessage).not.toHaveBeenCalled()
+  })
+})

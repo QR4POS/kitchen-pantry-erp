@@ -195,6 +195,7 @@ Allow:
 - measurements
 - sizes
 - budget answers
+- email addresses
 
 Examples:
 
@@ -204,6 +205,7 @@ yes
 Colombo
 10x12
 500000
+vihangakaveeshavg@gmail.com
 
 Even without kitchen keywords.
 

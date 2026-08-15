@@ -235,6 +235,11 @@ describe('onboarding — identity confirmation', () => {
     const update = lastAiConversationUpdate()
     expect(update?.identity_confirmed_at).toBeTruthy()
     expect(update?.current_step).toBeNull()
+
+    // Critical: the in-memory object must also be refreshed because engine.ts
+    // passes it directly to runOnboardingCompletion() without reloading.
+    expect(conversation.identity_confirmed_at).toBeTruthy()
+    expect(conversation.current_step).toBeNull()
   })
 
   it('clears confirmation and asks what to change on NO reply', async () => {
@@ -316,6 +321,115 @@ describe('onboarding — identity confirmation', () => {
       .map((q) => q.payload as Record<string, unknown>)
     return updates[updates.length - 1]
   }
+})
+
+describe('onboarding — controller path state persistence', () => {
+  beforeEach(() => {
+    queueOutgoingMessage.mockResolvedValue({ id: 'out-controller' })
+    mockDb.on('ai_conversations', (q) => {
+      if (q.mode === 'update') return { data: null, error: null }
+      return { data: null, error: null }
+    })
+  })
+
+  function lastAiConversationUpdate(): Record<string, unknown> | undefined {
+    const updates = mockDb.queries
+      .filter((q) => q.table === 'ai_conversations' && q.mode === 'update')
+      .map((q) => q.payload as Record<string, unknown>)
+    return updates[updates.length - 1]
+  }
+
+  it('derives last_question from reply and sets current_step when controller omits next_question', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      phone: '+94760000000',
+      location: 'Matara',
+      kitchen_type: 'L-Shape',
+      kitchen_size: '6m total length',
+      budget: 500000,
+    }
+    const conversation = { ...baseConversation(), collected_data: collected, current_step: 'budget' }
+
+    decideConversationTurn.mockResolvedValue({
+      action: 'reply',
+      next_state: 'waiting_customer',
+      intent: 'answer',
+      reply: 'Thank you, noted your budget of LKR 500,000. Could you share your email address so we can send over the tailored quotation?',
+      extracted_fields: {},
+      declined_fields: [],
+      next_question: null,
+      handoff_reason: null,
+      confidence: 0.95,
+    })
+
+    const result = await runOnboardingTurn({
+      conversation,
+      phone: '+94760000000',
+      incomingText: '500000',
+      providerMessageId: 'wa-budget',
+      settings: settingsWithAutoReply,
+      isReturning: false,
+      lastInteractionAt: null,
+      isNewConversation: false,
+      conversationCreated: false,
+      genuinelyNew: false,
+    })
+
+    expect(result.replyQueued).toBe(true)
+    expect(queueOutgoingMessage).toHaveBeenCalledWith(
+      '+94760000000',
+      expect.stringContaining('email address'),
+      true,
+      expect.objectContaining({ conversationId: 'conv-1' }),
+    )
+
+    const update = lastAiConversationUpdate()
+    expect(update?.current_step).toBe('email')
+    expect(update?.last_question).toContain('email')
+  })
+
+  it('deterministically extracts an email address when the controller omits extracted_fields.email', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      phone: '+94760000000',
+      location: 'Matara',
+      kitchen_type: 'L-Shape',
+      kitchen_size: '6m total length',
+      budget: 500000,
+    }
+    const conversation = { ...baseConversation(), collected_data: collected, current_step: 'email' }
+
+    decideConversationTurn.mockResolvedValue({
+      action: 'reply',
+      next_state: 'waiting_customer',
+      intent: 'answer',
+      reply: 'Thanks, noted. What material do you prefer?',
+      extracted_fields: {},
+      declined_fields: [],
+      next_question: null,
+      handoff_reason: null,
+      confidence: 0.95,
+    })
+
+    const result = await runOnboardingTurn({
+      conversation,
+      phone: '+94760000000',
+      incomingText: 'vihangakaveeshavg@gmail.com',
+      providerMessageId: 'wa-email',
+      settings: settingsWithAutoReply,
+      isReturning: false,
+      lastInteractionAt: null,
+      isNewConversation: false,
+      conversationCreated: false,
+      genuinelyNew: false,
+    })
+
+    expect(result.replyQueued).toBe(true)
+    const update = lastAiConversationUpdate()
+    expect(update?.collected_data).toMatchObject({ email: 'vihangakaveeshavg@gmail.com' })
+    expect(update?.current_step).toBe('material_preference')
+    expect(update?.last_question).toContain('material')
+  })
 })
 
 describe('onboarding — auto reply disabled', () => {

@@ -1617,20 +1617,31 @@ async function extractChatTitle(row) {
   return viaAnyTitle
 }
 
-async function extractChatPreview(row) {
+async function extractChatPreview(row, title = '') {
+  // Current WhatsApp Web DOM (2026-08+): the secondary line inside the row is
+  // the actual last-message preview. It is distinct from the title/name line,
+  // so reading it first avoids capturing the contact name as the preview.
+  const viaSecondary = (await row.locator('[data-testid="cell-frame-secondary"]').first().innerText({ timeout: 100 }).catch(() => '')) || ''
+  if (viaSecondary.trim()) return viaSecondary.trim()
+
   const viaPreview = (await row.locator('[data-testid="last-msg"]').first().innerText({ timeout: 100 }).catch(() => '')) || ''
   if (viaPreview.trim()) return viaPreview.trim()
   // Current WhatsApp Web DOM (2026-08+) puts the preview inside
   // [data-testid="last-msg-status"] with a nested dir="ltr"/dir="auto" span.
   const viaStatus = (await row.locator('[data-testid="last-msg-status"]').first().innerText({ timeout: 100 }).catch(() => '')) || ''
   if (viaStatus.trim()) return viaStatus.trim()
+
+  // dir="auto"/"ltr" spans are a last resort, but they often contain the
+  // contact name. Reject anything that exactly matches the chat title so the
+  // contact name is never mistaken for a message preview.
   const viaDirAuto = (await row.locator('span[dir="auto"]:not([title])').first().innerText({ timeout: 100 }).catch(() => '')) || ''
-  if (viaDirAuto.trim()) return viaDirAuto.trim()
+  if (viaDirAuto.trim() && viaDirAuto.trim() !== String(title || '').trim()) return viaDirAuto.trim()
   const viaDirLtr = (await row.locator('span[dir="ltr"]:not([title])').first().innerText({ timeout: 100 }).catch(() => '')) || ''
-  if (viaDirLtr.trim()) return viaDirLtr.trim()
+  if (viaDirLtr.trim() && viaDirLtr.trim() !== String(title || '').trim()) return viaDirLtr.trim()
+
   // Nested last-msg variants (preview text deeper inside the row).
   const viaNestedLastMsg = (await row.locator('[data-testid="last-msg"] span').last().innerText({ timeout: 100 }).catch(() => '')) || ''
-  if (viaNestedLastMsg.trim()) return viaNestedLastMsg.trim()
+  if (viaNestedLastMsg.trim() && viaNestedLastMsg.trim() !== String(title || '').trim()) return viaNestedLastMsg.trim()
   return ''
 }
 
@@ -1776,7 +1787,7 @@ async function dumpDomForDiagnostics(page) {
         }
         return out
       }
-      const selectedRow = document.querySelector('[role="row"][aria-selected="true"], [aria-selected="true"][role="row"], [aria-selected="true"][role="button"], [aria-selected="true"]')
+      const selectedRow = document.querySelector('#side [role="row"][aria-selected="true"], [data-testid="chat-list"] [role="row"][aria-selected="true"], [data-testid="chat-list"] [aria-selected="true"][role="button"]')
       const unreadMarker = document.querySelector('[data-testid="icon-unread-count"], [data-icon*="unread"], [aria-label*="unread"], [data-testid*="unread"], [aria-label*="Unread"], [data-testid*="unread-count"]')
       const unreadRow = unreadMarker ? unreadMarker.closest('div[role="row"], div[role="button"], div') : null
       const titleElement = document.querySelector('[data-testid="conversation-info-header-chat-title"], [data-testid="conversation-info-header"], [data-testid="conversation-title"], header [title], header span[dir="auto"], header span[dir="ltr"], header h1')
@@ -1923,7 +1934,7 @@ async function discoverChatCandidates(page) {
         const el = els.nth(i)
         const title = await extractChatTitle(el)
         if (!title || seen.has(title) || isIgnoredChatTitle(title)) continue
-        const preview = await extractChatPreview(el)
+        const preview = await extractChatPreview(el, title)
         const hasUnread = await detectUnread(el)
         const raw = await rowRawText(el)
         seen.add(title)
@@ -1944,7 +1955,7 @@ async function discoverChatCandidates(page) {
         if (!title || seen.has(title) || isIgnoredChatTitle(title)) continue
         const row = await findRowAncestor(anchor)
         if (!row) continue
-        const preview = await extractChatPreview(row)
+        const preview = await extractChatPreview(row, title)
         const hasUnread = await detectUnread(row)
         const raw = await rowRawText(row)
         seen.add(title)
@@ -1964,7 +1975,7 @@ async function discoverChatCandidates(page) {
         if (!title || seen.has(title) || isIgnoredChatTitle(title)) continue
         const raw = await rowRawText(el)
         if (raw.split(/\s+/).length < 2) continue
-        const preview = await extractChatPreview(el)
+        const preview = await extractChatPreview(el, title)
         const hasUnread = await detectUnread(el)
         seen.add(title)
         candidates.push({ title, preview, hasUnread, raw })
@@ -1988,7 +1999,7 @@ async function discoverChatCandidates(page) {
         if (!title || seen.has(title) || isIgnoredChatTitle(title)) continue
         const row = await findRowAncestor(anchor)
         if (!row) continue
-        const preview = await extractRowPreviewFromText(row, title)
+        const preview = (await extractChatPreview(row, title)) || (await extractRowPreviewFromText(row, title))
         const hasUnread = await detectUnread(row)
         const raw = await rowRawText(row)
         seen.add(title)
@@ -2793,10 +2804,15 @@ async function extractIncomingPhotoMedia(page, rowId) {
   return mediaUrl
 }
 
-async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
+async function readLastIncomingMessage(page, meta, phoneKey, customerTitle, storedLastId, storedLastText) {
   // Only real message bubbles inside the OPEN chat (#main) are ever considered.
   // Direction is decided by resolveRowDirection() — only 'in' is ever returned.
   // Outgoing, system banners, and unknown messages are skipped.
+  //
+  // IMPORTANT: this is a recovery fallback. It must NEVER return the message
+  // that is already the stored dedup boundary, otherwise the worker will
+  // re-forward an old message, get `already_replied`, and incorrectly advance
+  // the row signature past the real new message.
   const customerDigits = canonicalPhone(customerTitle)
   const customerName = String(customerTitle || '').trim().toLowerCase()
   const dirCtx = {
@@ -2813,7 +2829,12 @@ async function readLastIncomingMessage(page, meta, phoneKey, customerTitle) {
   const rows = await extractIncomingBubblesInPage(page) || []
   for (let i = rows.length - 1; i >= 0; i--) {
     const msg = await rowToIncomingMessage(page, rows[i], dirCtx, phoneKey)
-    if (msg) return msg
+    if (!msg) continue
+    if (isAlreadyProcessedBoundary(msg, storedLastId || null, storedLastText || null)) {
+      console.log(`[DEDUP_BOUNDARY_SKIP] chat=${phoneKey} fallback hit stored boundary id=${msg.id ?? 'none'} text="${(msg.text || '').slice(0, 60)}"`)
+      continue
+    }
+    return msg
   }
   return null
 }
@@ -3265,9 +3286,15 @@ async function readLastIncomingFromRow(page, chat) {
     return null
   }
   let text = ''
-  const preview = row.locator('[data-testid="last-msg"]').first()
+  const preview = row.locator('[data-testid="cell-frame-secondary"]').first()
   if ((await preview.count().catch(() => 0)) > 0) {
     text = ((await preview.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+  }
+  if (!text) {
+    const legacyPreview = row.locator('[data-testid="last-msg"]').first()
+    if ((await legacyPreview.count().catch(() => 0)) > 0) {
+      text = ((await legacyPreview.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+    }
   }
   if (!text) {
     // Current WhatsApp Web DOM (2026-08+): preview text lives inside
@@ -3280,7 +3307,9 @@ async function readLastIncomingFromRow(page, chat) {
   if (!text) {
     const dirAuto = row.locator('span[dir="auto"]:not([title])').first()
     if ((await dirAuto.count().catch(() => 0)) > 0) {
-      text = ((await dirAuto.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+      const t = ((await dirAuto.innerText({ timeout: 100 }).catch(() => '')) || '').trim()
+      // Never return the contact name as the preview.
+      if (t && t !== String(chat.title || '').trim()) text = t
     }
   }
   // Photo / media row fallback: preview is empty but chat has an unread badge.
@@ -3330,6 +3359,30 @@ async function readLastIncomingFromRow(page, chat) {
   const phone = (chat.title || '').replace(/\D/g, '')
   const msg = finalizeMessageIdentity(text, null, null, phone)
   return { ...msg, phone, fromRow: true }
+}
+
+// Fallback when the opened conversation panel fails to expose the newest
+// message bubble in time. The chat-list preview is the authoritative newest
+// message text, so we can use it directly as long as it is clearly different
+// from the already-processed boundary and does not match a recent outgoing
+// message from this account. This prevents messages like short email addresses
+// from being silently dropped with a `not_handled` outcome when WhatsApp Web
+// delays rendering the new bubble after the chat opens.
+function readIncomingFromPreview(preview, storedLastText, meta, phoneKey) {
+  if (!preview) return null
+  const normPreview = normalizeMessageText(preview)
+  if (!normPreview) return null
+  if (storedLastText && normPreview === normalizeMessageText(storedLastText)) return null
+  // Never treat our own recently-sent message as a new customer message. The
+  // preview can lag behind the outbox; an exact/prefix match against recent
+  // outgoing texts for this chat means this is still our own reply.
+  if (metaHasRecentSent(meta, preview, phoneKey)) {
+    console.log(`[worker] preview fallback skipped: matches recent outgoing text for ${phoneKey}`)
+    return null
+  }
+  const phone = (phoneKey || '').replace(/\D/g, '')
+  const msg = finalizeMessageIdentity(preview, null, null, phone)
+  return { ...msg, phone, fromPreview: true }
 }
 
 // ── Diagnostics ──
@@ -3383,8 +3436,20 @@ async function detectAndForwardIncoming(page, state) {
       if (!chat.hasUnread && stored && stored.rowSig && chat.raw && stored.rowSig === chat.raw) {
         const terminal = isRowUnchangedTerminal(stored.lastOutcome)
         if (terminal) {
-          console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=row_unchanged`)
-          continue
+          // Extra safety: if the extracted preview disagrees with the last
+          // known incoming message, do not trust the row signature. A stale or
+          // mis-extracted preview (e.g. the contact name) can make different
+          // rows look identical. The subsequent deep-read path will either find
+          // a real new message or hit the already-processed boundary and exit
+          // cleanly.
+          const previewMatchesBoundary = !chat.preview ||
+            normalizeMessageText(chat.preview) === normalizeMessageText(stored.lastIncomingText || '')
+          if (!previewMatchesBoundary) {
+            console.log(`[CHAT_RECOVERY] chat=${key} reason=preview_boundary_mismatch stored="${stored.lastIncomingText || ''}" current="${chat.preview || ''}"`)
+          } else {
+            console.log(`[CHAT_PROCESS_SKIP] chat=${key} reason=row_unchanged`)
+            continue
+          }
         }
         console.log(`[CHAT_RECOVERY] chat=${key} reason=row_unchanged_but_not_handled`)
       }
@@ -3503,9 +3568,21 @@ async function detectAndForwardIncoming(page, state) {
         )
         if (chat.hasUnread || previewChanged || needsRecovery) {
           if (needsRecovery) console.log(`[CHAT_RECOVERY] chat=${key} reason=re-read_unhandled_last_message`)
-          last = await withTimeout(readLastIncomingMessage(page, state.meta, key, chat.title), READ_LAST_TIMEOUT_MS, null, 'readLastIncomingMessage')
+          last = await withTimeout(readLastIncomingMessage(page, state.meta, key, chat.title, stored?.lastIncomingId || null, stored?.lastIncomingText || null), READ_LAST_TIMEOUT_MS, null, 'readLastIncomingMessage')
           if (last) {
             console.log(`[worker] re-read ok, found message in ${chat.title}`)
+          }
+        }
+
+        // Final fallback: the chat-list preview itself is the newest message.
+        // Use it only when the panel bubbles could not be read and the preview
+        // is clearly different from the processed boundary and not our own reply.
+        if (!last && (previewChanged || needsRecovery)) {
+          const previewMsg = readIncomingFromPreview(chat.preview, stored?.lastIncomingText || null, state.meta, key)
+          if (previewMsg) {
+            console.log(`[worker] preview fallback succeeded for ${chat.title}: "${previewMsg.text.slice(0, 80)}"`)
+            last = previewMsg
+            phone = previewMsg.phone
           }
         }
       }
@@ -3548,13 +3625,23 @@ async function detectAndForwardIncoming(page, state) {
       // 3. Send the most recent message. Multiple new messages (e.g. received
       //    while the worker was offline) are noted but processed one at a time
       //    through separate ingest calls on subsequent polls.
+      // Final safety net: any recovered message must NOT be the stored boundary.
+      // If it is, pretend we found nothing so the message is retried instead of
+      // being incorrectly marked handled.
+      if (isAlreadyProcessedBoundary(last, stored?.lastIncomingId || null, stored?.lastIncomingText || null)) {
+        console.log(`[worker] recovered message is the stored boundary — discarding and retrying`)
+        await resetChatView(page)
+        continue
+      }
+
       // Guard: never send an empty message to /api/whatsapp/ingest — the backend
       // 400s on a falsy message (e.g. a voice note that failed to transcribe).
       // Fall back to a valid marker so the AI can still acknowledge the message.
       const messageToSend = cleanText(last.text) || '[voice note]'
 
       console.log(`[worker] message extracted: ${messageToSend.slice(0, 120)}`)
-      console.log(`[INCOMING_MESSAGE_FOUND] source=${opened ? 'bubbles' : 'row_preview'}`)
+      const incomingSource = last?.fromPreview ? 'chat_preview' : (opened ? 'bubbles' : 'row_preview')
+      console.log(`[INCOMING_MESSAGE_FOUND] source=${incomingSource}`)
 
       // 4. Resolve the phone from the correct source only: the opened chat when
       //    available, otherwise the chat title digits (row fallback). Always

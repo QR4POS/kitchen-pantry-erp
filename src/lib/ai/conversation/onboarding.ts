@@ -80,6 +80,27 @@ function parseConfirmationReply(text: string): 'yes' | 'no' | 'unclear' {
   return 'unclear'
 }
 
+// Extract a single plausible email address from free text. Used as a
+// deterministic fallback when the AI controller omits `extracted_fields.email`.
+function extractEmailFromText(text: string): string | null {
+  const match = String(text || '').match(/[^\s@]+@[^\s@]+\.[^\s@]+/)
+  return match ? match[0].trim() : null
+}
+
+// Derive a last_question value from the controller reply when the AI did not
+// populate next_question explicitly. This keeps answer-detection working for
+// replies like "Could you share your email address?"
+function extractQuestionFromReply(reply: string | null): string | null {
+  if (!reply) return null
+  // Find the last sentence that ends with a question mark.
+  const sentences = reply.split(/(?<=[.!?])\s+/)
+  for (let i = sentences.length - 1; i >= 0; i--) {
+    const s = sentences[i].trim()
+    if (s.endsWith('?')) return s
+  }
+  return null
+}
+
 const admin = () => createAdminClient()
 
 // ── Emergency fallback prompts (legacy form flow) ──
@@ -385,6 +406,19 @@ async function applyControllerDecision(input: {
     ])),
   }
 
+  // Deterministic fallback: if the AI controller missed a valid email address,
+  // capture it directly so the onboarding flow can advance.
+  if (!nextCollected.email) {
+    const fallbackEmail = extractEmailFromText(decideInput.incomingText)
+    if (fallbackEmail) nextCollected.email = fallbackEmail
+  }
+
+  const nextMissingField = REQUIRED_FIELDS.find((f) => !nextCollected[f]) || null
+  const effectiveQuestion =
+    decision.next_question ??
+    extractQuestionFromReply(decision.reply) ??
+    (nextMissingField ? FIELD_QUESTIONS[nextMissingField] ?? `What is your ${nextMissingField.replace(/_/g, ' ')}?` : null)
+
   // Onboarding fields finished → before account creation we require explicit
   // confirmation of identity details, plus a structured address if missing.
   if (isOnboardingComplete(nextCollected) && !conversation.support_mode_at && !isIdentityConfirmed(conversation)) {
@@ -526,9 +560,10 @@ async function applyControllerDecision(input: {
     .update({
       conversation_status: immediateState,
       collected_data: nextCollected,
+      current_step: nextMissingField,
       last_intent: decision.intent,
       last_action: decision.action,
-      last_question: decision.next_question,
+      last_question: effectiveQuestion,
       handoff_reason: autoReplyUnavailable
         ? 'Auto reply is disabled; staff response required'
         : decision.handoff_reason,
@@ -715,6 +750,13 @@ async function handleConfirmationTurn(input: {
         updated_at: now,
       })
       .eq('id', conversation.id)
+
+    // The caller (engine.ts) reuses this in-memory object when it calls
+    // runOnboardingCompletion(). If we do not refresh it here, completion will
+    // see identity_confirmed_at=null and silently skip account creation.
+    conversation.identity_confirmed_at = now
+    conversation.current_step = null
+    conversation.updated_at = now
 
     await logAgent('onboarding_identity_confirmed', null, 'info', {
       phone,

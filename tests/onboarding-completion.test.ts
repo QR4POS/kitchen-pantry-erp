@@ -1,0 +1,302 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { createMockDb } from './helpers/supabase-mock'
+import { runOnboardingCompletion } from '@/lib/ai/conversation/completion'
+import { ONBOARDING_CONFIRMATION } from '@/lib/ai/conversation/types'
+import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
+
+const { logAgent } = vi.hoisted(() => ({ logAgent: vi.fn() }))
+const mockDb = createMockDb()
+
+const { queueOutgoingMessage, createNotification } = vi.hoisted(() => ({
+  queueOutgoingMessage: vi.fn(),
+  createNotification: vi.fn(),
+}))
+
+const { provisionCustomerAccount } = vi.hoisted(() => ({
+  provisionCustomerAccount: vi.fn(),
+}))
+
+const { upsertLeadForCollected } = vi.hoisted(() => ({
+  upsertLeadForCollected: vi.fn(),
+}))
+
+vi.mock('@/lib/supabase/admin', () => ({
+  createAdminClient: () => mockDb.db,
+}))
+
+vi.mock('@/lib/ai/agent-provider', () => ({
+  logAgent: (...args: unknown[]) => logAgent(...args),
+}))
+
+vi.mock('@/lib/ai/whatsapp-agent/tools', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    queueOutgoingMessage,
+    createNotification,
+  }
+})
+
+vi.mock('@/lib/customer-management/provisionCustomerAccount', () => ({
+  provisionCustomerAccount: (...args: unknown[]) => provisionCustomerAccount(...args),
+}))
+
+vi.mock('@/lib/ai/conversation/lead-sync', () => ({
+  upsertLeadForCollected: (...args: unknown[]) => upsertLeadForCollected(...args),
+}))
+
+function baseConversation(overrides: Partial<AiConversationRow> = {}): AiConversationRow {
+  return {
+    id: 'conv-1',
+    phone_number: '+94760000000',
+    customer_id: null,
+    conversation_status: 'waiting_customer',
+    current_step: 'confirm_identity',
+    collected_data: {},
+    last_intent: null,
+    last_action: null,
+    last_question: null,
+    last_inbound_message_id: null,
+    last_outbound_message_id: null,
+    ai_suppressed: false,
+    handoff_reason: null,
+    support_mode_at: null,
+    identity_confirmed_at: null,
+    paused_until: null,
+    language_code: null,
+    turn_count: 0,
+    misunderstanding_count: 0,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    ...overrides,
+  }
+}
+
+const settings: AiAgentSettingsRow = {
+  id: '00000000-0000-0000-0000-000000000001',
+  whatsapp_agent_enabled: true,
+  auto_reply_enabled: true,
+  auto_lead_creation: true,
+  auto_customer_creation: true,
+  auto_project_creation: false,
+  auto_notification_enabled: true,
+  admin_approval_required: false,
+  primary_provider: 'gemini',
+  fallback_provider: 'deepseek',
+  welcome_message: null,
+  conversation_controller_enabled: false,
+  human_handoff_enabled: true,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+}
+
+beforeEach(() => {
+  logAgent.mockClear()
+  mockDb.queries.length = 0
+
+  queueOutgoingMessage.mockReset().mockResolvedValue({ id: 'out-confirm' })
+  createNotification.mockReset().mockResolvedValue({ id: 'notif-1' })
+  provisionCustomerAccount.mockReset().mockResolvedValue({
+    success: true,
+    customerId: 'cust-1',
+    password: 'temp-password',
+  })
+  upsertLeadForCollected.mockReset().mockResolvedValue({
+    id: 'lead-1',
+    name: 'Kaveesha',
+  })
+
+  mockDb.on('profiles', (q) => {
+    if (q.mode === 'select') return { data: { id: 'admin-1' }, error: null }
+    return { data: null, error: null }
+  })
+  mockDb.on('ai_conversations', (q) => {
+    if (q.mode === 'update') return { data: { id: 'conv-1' }, error: null }
+    return { data: null, error: null }
+  })
+})
+
+describe('runOnboardingCompletion', () => {
+  it('provisions the customer account, syncs the lead, queues the confirmation, and notifies staff', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      phone: '+94760000000',
+      location: 'Matara',
+      address: 'No36,thalgahawatta,makawita,nawimana,matara',
+      kitchen_type: 'L-Shape',
+      kitchen_size: '6x6',
+      budget: 500000,
+      material_preference: 'HPL',
+    }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings,
+      providerMessageId: 'wa-confirm',
+    })
+
+    expect(result.customerId).toBe('cust-1')
+    expect(result.leadId).toBe('lead-1')
+    expect(result.confirmationQueued).toBe(true)
+
+    expect(provisionCustomerAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phone: '+94760000000',
+        fullName: 'Kaveesha',
+        email: 'vihangakaveeshavg@gmail.com',
+      })
+    )
+    expect(upsertLeadForCollected).toHaveBeenCalledWith(
+      expect.objectContaining({ phone: '+94760000000', collected })
+    )
+    expect(queueOutgoingMessage).toHaveBeenCalledWith(
+      '+94760000000',
+      ONBOARDING_CONFIRMATION,
+      true,
+      expect.objectContaining({
+        conversationId: 'conv-1',
+        sourceInboundMessageId: 'wa-confirm',
+        decisionAction: 'reply',
+        postSendState: 'completed',
+      })
+    )
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'cust-1',
+        title: 'New WhatsApp Lead',
+        referenceId: 'lead-1',
+      })
+    )
+  })
+
+  it('queues a fallback handoff reply when provisioning is blocked', async () => {
+    const collected = { name: 'Kaveesha', email: 'vihangakaveeshavg@gmail.com' }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    provisionCustomerAccount.mockResolvedValue({
+      success: false,
+      status: 'blocked',
+      blockedReason: 'Email already belongs to a different customer',
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings,
+      providerMessageId: 'wa-confirm-blocked',
+    })
+
+    expect(result.confirmationQueued).toBe(true)
+    expect(result.customerId).toBeNull()
+    expect(queueOutgoingMessage).toHaveBeenCalledWith(
+      '+94760000000',
+      expect.stringContaining('Thank you for confirming'),
+      true,
+      expect.objectContaining({
+        conversationId: 'conv-1',
+        sourceInboundMessageId: 'wa-confirm-blocked',
+        decisionAction: 'handoff',
+        postSendState: 'human_active',
+      })
+    )
+
+    const convUpdate = mockDb.queries.find(
+      (q) => q.table === 'ai_conversations' && q.mode === 'update' && (q.payload as Record<string, unknown>)?.conversation_status === 'human_active'
+    )
+    expect(convUpdate).toBeTruthy()
+    expect(convUpdate?.payload as Record<string, unknown>).toMatchObject({ ai_suppressed: true })
+  })
+
+  it('queues a fallback handoff reply when provisionCustomerAccount throws', async () => {
+    const collected = { name: 'Kaveesha', email: 'vihangakaveeshavg@gmail.com' }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    provisionCustomerAccount.mockRejectedValue(new Error('connect ECONNREFUSED'))
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings,
+      providerMessageId: 'wa-confirm-error',
+    })
+
+    expect(result.confirmationQueued).toBe(true)
+    expect(logAgent).toHaveBeenCalledWith(
+      'onboarding_completion_error',
+      null,
+      'error',
+      expect.objectContaining({ phone: '+94760000000' }),
+      'connect ECONNREFUSED'
+    )
+    expect(queueOutgoingMessage).toHaveBeenCalledWith(
+      '+94760000000',
+      expect.stringContaining('Thank you for confirming'),
+      true,
+      expect.objectContaining({ decisionAction: 'handoff' })
+    )
+  })
+
+  it('still completes when lead sync fails', async () => {
+    const collected = { name: 'Kaveesha', email: 'vihangakaveeshavg@gmail.com' }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    upsertLeadForCollected.mockRejectedValue(new Error('lead DB timeout'))
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings,
+      providerMessageId: 'wa-confirm-lead-err',
+    })
+
+    expect(result.customerId).toBe('cust-1')
+    expect(result.leadId).toBeNull()
+    expect(result.confirmationQueued).toBe(true)
+    expect(logAgent).toHaveBeenCalledWith(
+      'lead_sync_error',
+      null,
+      'error',
+      expect.anything(),
+      'lead DB timeout'
+    )
+  })
+
+  it('skips provisioning when the conversation is already in support mode', async () => {
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      support_mode_at: new Date().toISOString(),
+      collected_data: { name: 'Kaveesha' },
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected: { name: 'Kaveesha' },
+      settings,
+      providerMessageId: 'wa-confirm-2',
+    })
+
+    expect(result.confirmationQueued).toBe(false)
+    expect(provisionCustomerAccount).not.toHaveBeenCalled()
+    expect(queueOutgoingMessage).not.toHaveBeenCalled()
+  })
+})

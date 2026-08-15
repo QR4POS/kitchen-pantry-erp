@@ -175,8 +175,9 @@ function isAnswerToPreviousQuestion(
   message: string,
   lastQuestion: string | null,
   conversationState: string,
+  currentStep?: string | null,
 ): boolean {
-  if (!lastQuestion || !message) return false
+  if (!message) return false
 
   const states: string[] = ['collecting_details', 'processing', 'waiting_customer', 'reply_queued']
   if (!states.includes(conversationState)) return false
@@ -185,7 +186,38 @@ function isAnswerToPreviousQuestion(
   if (msg.length > 200) return false
   if (/[?]/.test(msg)) return false
 
-  return true
+  // If the AI explicitly asked a question, any short reply is treated as an answer.
+  if (lastQuestion) return true
+
+  // Fallback: the AI's last question may not have been persisted, but the
+  // conversation's current_step tells us which field is expected. Recognise
+  // obvious field-shape replies so they are never blocked by the kitchen-intent
+  // filter (e.g. a bare email address after asking for email).
+  // We only do this for fields with a strong, unambiguous shape. Generic text
+  // fields like name/location must NOT bypass the filter, otherwise greetings
+  // such as "Hello" would be treated as answers while current_step=name.
+  if (currentStep && looksLikeExpectedFieldAnswer(currentStep, msg)) return true
+
+  return false
+}
+
+// Deterministic shape checks for expected onboarding answers. These are used
+// only when the conversation is actively collecting a known field AND the AI's
+// last_question was not persisted. We deliberately restrict this to fields with
+// an unambiguous shape so common greetings do not bypass the kitchen-intent gate.
+function looksLikeExpectedFieldAnswer(field: string, message: string): boolean {
+  switch (field) {
+    case 'email':
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(message)
+    case 'budget':
+      return /^[\d\s,.lkrs]+$/.test(message.replace(/\s/g, '')) && /\d/.test(message)
+    case 'phone':
+      return /^[\d\s+\-()]{7,}$/.test(message) && /\d{7,}/.test(message)
+    case 'kitchen_size':
+      return /\d+\s*(ft|feet|m|mtr)?\s*(x|by|×|\*)\s*\d+/i.test(message) || /^\d+\s*(ft|feet|m|mtr)$/i.test(message)
+    default:
+      return false
+  }
 }
 
 // ── Core: process one incoming message (orchestration only) ──
@@ -238,6 +270,7 @@ export async function processWhatsAppMessage(
     incomingText,
     conversation.last_question,
     conversation.conversation_status,
+    conversation.current_step,
   )
 
   // ── Kitchen-intent gate ──

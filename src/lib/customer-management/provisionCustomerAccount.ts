@@ -370,7 +370,18 @@ export async function provisionCustomerAccount(
   const normalizedEmail = normalizeEmail(input.email)
   const now = input.confirmedAt ?? new Date().toISOString()
 
-  let provisioning = await getOrCreateProvisioningRecord(phoneE164, input)
+  // IMPORTANT: the provisioning record operations must never throw an
+  // unhandled exception. If the table is missing or the DB is unreachable, we
+  // return a structured retryable result so the caller can decide whether to
+  // retry or fall back to a human handoff reply.
+  let provisioning: WhatsappCustomerAccountProvisioningRow | null = null
+  try {
+    provisioning = await getOrCreateProvisioningRecord(phoneE164, input)
+  } catch (e) {
+    const message = (e as Error).message
+    await logAgent('provision_error', null, 'error', { phone: phoneE164, phase: 'get_or_create_record' }, message)
+    return { success: false, status: 'failed_retryable', error: message }
+  }
 
   try {
     // Terminal states: do not mutate or regenerate anything.

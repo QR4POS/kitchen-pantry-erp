@@ -58,17 +58,28 @@ export async function runOnboardingCompletion(input: {
     return { customerId: null, leadId: null, confirmationQueued: false }
   }
 
+  // Shared fallback message for any path where we cannot fully complete.
+  const fallbackMessage =
+    "Thank you for confirming your details. We've received your kitchen requirements and our team will be in touch with you shortly to finalize everything."
+
   // 1. Provision the customer account (Auth + CRM) idempotently.
   //    The verified WhatsApp phone is the authoritative identity.
-  const provisionResult = await provisionCustomerAccount({
-    phone,
-    fullName: String(collected.name ?? '').trim(),
-    email: String(collected.email ?? '').trim().toLowerCase(),
-    city: collected.location ? String(collected.location).trim() : null,
-    address: collected.address ? String(collected.address).trim() : null,
-    conversationId: conversation.id,
-    confirmedAt: conversation.identity_confirmed_at,
-  })
+  let provisionResult: Awaited<ReturnType<typeof provisionCustomerAccount>> | null = null
+  try {
+    provisionResult = await provisionCustomerAccount({
+      phone,
+      fullName: String(collected.name ?? '').trim(),
+      email: String(collected.email ?? '').trim().toLowerCase(),
+      city: collected.location ? String(collected.location).trim() : null,
+      address: collected.address ? String(collected.address).trim() : null,
+      conversationId: conversation.id,
+      confirmedAt: conversation.identity_confirmed_at,
+    })
+  } catch (e) {
+    const reason = (e as Error).message ?? 'Account provisioning error'
+    await logAgent('onboarding_completion_error', null, 'error', { phone, conversationId: conversation.id }, reason)
+    provisionResult = { success: false, status: 'failed_retryable', error: reason }
+  }
 
   if (!provisionResult.success) {
     const reason = provisionResult.blockedReason ?? provisionResult.error ?? 'Account provisioning failed'
@@ -83,19 +94,40 @@ export async function runOnboardingCompletion(input: {
       })
       .eq('id', conversation.id)
     await logAgent('onboarding_provisioning_failed', null, 'error', { phone, conversationId: conversation.id }, reason)
+
+    // The customer confirmed their details and must not be left without a
+    // reply just because account provisioning hit a conflict or a transient
+    // error. Queue a polite handoff message and treat it as a queued reply.
+    if (settings.auto_reply_enabled) {
+      const queued = await queueOutgoingMessage(phone, fallbackMessage, true, {
+        conversationId: conversation.id,
+        sourceInboundMessageId: providerMessageId ?? null,
+        decisionAction: 'handoff',
+        postSendState: 'human_active',
+      })
+      if (queued) {
+        return { customerId: null, leadId: null, confirmationQueued: true }
+      }
+    }
+
     return { customerId: null, leadId: null, confirmationQueued: false }
   }
 
   const customerId = provisionResult.customerId ?? null
 
   // 2. Lead
-  const lead = await upsertLeadForCollected({
-    phone,
-    collected,
-    conversationId: conversation.id,
-    customerId,
-    settings,
-  })
+  let lead: Awaited<ReturnType<typeof upsertLeadForCollected>> | null = null
+  try {
+    lead = await upsertLeadForCollected({
+      phone,
+      collected,
+      conversationId: conversation.id,
+      customerId,
+      settings,
+    })
+  } catch (e) {
+    await logAgent('lead_sync_error', null, 'error', { phone, conversationId: conversation.id }, (e as Error).message)
+  }
 
   // 3. Mark complete + persist collected data
   await admin

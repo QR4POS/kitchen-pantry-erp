@@ -41,6 +41,8 @@ let fn: {
   recordSentMessage: (state: Record<string, unknown>, text: string, phone: string) => void
   metaHasRecentSent: (meta: Record<string, unknown> | undefined, text: string, phone: string) => boolean
   generateFallbackId: (phoneKey: string, text: string, ts: string) => string
+  finalizeMessageIdentity: (text: string, rawId: string | null, rawTs: string | null, phoneKey: string) => { text: string; id: string; ts: string | number }
+  readIncomingFromPreview: (preview: string, storedLastText: string | null, meta: Record<string, unknown> | undefined, phoneKey: string) => { text: string; id: string; ts: string | number; phone: string; fromPreview: boolean } | null
   resolveRowDirection: (row: Record<string, unknown>, dirCtx: Record<string, unknown>) => { dir: string; source: string }
   isIngestHandled: (res: Record<string, unknown> | null | undefined) => boolean
   isAlreadyProcessedBoundary: (msg: Record<string, unknown>, storedLastId: string | null, storedLastText: string | null) => boolean
@@ -71,8 +73,10 @@ beforeAll(() => {
     extractFunction(src, 'metaHasRecentSent'),
     extractFunction(src, 'chatStateKey'),
     extractFunction(src, 'generateFallbackId'),
+    extractFunction(src, 'finalizeMessageIdentity'),
     extractFunction(src, 'extractSenderFromPre'),
     extractFunction(src, 'matchesCustomerText'),
+    extractFunction(src, 'readIncomingFromPreview'),
     extractFunction(src, 'resolveRowDirection'),
     extractFunction(src, 'isIngestHandled'),
     extractFunction(src, 'isAlreadyProcessedBoundary'),
@@ -86,7 +90,7 @@ beforeAll(() => {
     'saveMessageState',
     'DEBUG',
     'createHash',
-    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, isTerminalSkipReason, hasSentExactText };`
+    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, finalizeMessageIdentity, readIncomingFromPreview, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, isTerminalSkipReason, hasSentExactText };`
   )
   // Deterministic fake createHash so generateFallbackId produces distinct ids
   // for distinct (chat, text, timestamp) inputs.
@@ -412,5 +416,45 @@ describe('resolveRowDirection — strict direction hierarchy (unknown is never a
     const ctxB = { ownSenderToken: 'Kitchen Pantry', customerDigits: '94771234567', customerName: '', recentOutgoingTexts: ['Hello there'] }
     const result = fn.resolveRowDirection({ dir: null, pre: null, text: 'Hello' }, ctxB)
     expect(result.dir).toBe('unknown')
+  })
+})
+
+describe('readIncomingFromPreview — chat-list preview fallback', () => {
+  it('returns the preview as an incoming message when it differs from the boundary', () => {
+    const msg = fn.readIncomingFromPreview('vihangakaveeshavg@gmail.com', '500000', undefined, '94760544773')
+    expect(msg).not.toBeNull()
+    expect(msg?.text).toBe('vihangakaveeshavg@gmail.com')
+    expect(msg?.phone).toBe('94760544773')
+    expect(msg?.fromPreview).toBe(true)
+  })
+
+  it('returns null when the preview matches the already-processed boundary', () => {
+    const msg = fn.readIncomingFromPreview('500000', '500000', undefined, '94760544773')
+    expect(msg).toBeNull()
+  })
+
+  it('returns null when the preview matches a recent outgoing message', () => {
+    const meta = { recentSent: [{ text: 'Could you share your email address?', ts: Date.now(), phone: '94760544773' }] }
+    const msg = fn.readIncomingFromPreview('Could you share your email address?', '500000', meta, '94760544773')
+    expect(msg).toBeNull()
+  })
+
+  it('returns the preview even with a different normalization', () => {
+    const msg = fn.readIncomingFromPreview('  vihangakaveeshavg@gmail.com  ', '500000', undefined, '94760544773')
+    expect(msg?.text).toBe('vihangakaveeshavg@gmail.com')
+  })
+
+  it('uses the preview when the bubble fallback only returns the old boundary (HPL scenario)', () => {
+    // The chat-list preview shows the new customer reply, but the DOM fallback
+    // returned the already-processed "Matara" message. The boundary check must
+    // reject the fallback, and the preview fallback must supply "Hpl" instead.
+    const mataraId = fn.generateFallbackId('94760544773', 'Matara', '12:34, 8/15/2026')
+    const fallbackMsg = { text: 'Matara', id: mataraId }
+    expect(fn.isAlreadyProcessedBoundary(fallbackMsg, mataraId, 'Matara')).toBe(true)
+
+    const meta = { recentSent: [{ text: 'Thank you, Kaveesha! Do you have a preferred material or finish in mind, like Acrylic or HPL, or would you like our recommendation?', ts: Date.now(), phone: '94760544773' }] }
+    const previewMsg = fn.readIncomingFromPreview('Hpl', 'Matara', meta, '94760544773')
+    expect(previewMsg).not.toBeNull()
+    expect(previewMsg?.text).toBe('Hpl')
   })
 })
