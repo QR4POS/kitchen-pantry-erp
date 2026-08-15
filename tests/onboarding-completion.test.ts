@@ -256,6 +256,77 @@ describe('runOnboardingCompletion', () => {
     )
   })
 
+  it('records a CRM customer even when full account provisioning fails transiently', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      phone: '+94760000000',
+      location: 'Matara',
+      address: 'No36, Matara',
+    }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    provisionCustomerAccount.mockRejectedValue(new Error('auth service down'))
+
+    mockDb.on('customers', (q) => {
+      if (q.mode === 'select') return { data: null, error: null }
+      if (q.mode === 'insert') return { data: { id: 'cust-fallback' }, error: null }
+      return { data: null, error: null }
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings,
+      providerMessageId: 'wa-fallback-cust',
+    })
+
+    expect(result.customerId).toBe('cust-fallback')
+    expect(result.confirmationQueued).toBe(true)
+
+    const customerInsert = mockDb.queries.find((q) => q.table === 'customers' && q.mode === 'insert')
+    expect(customerInsert?.payload).toMatchObject({
+      phone: '+94760000000',
+      full_name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      city: 'Matara',
+      address: 'No36, Matara',
+    })
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Customer auto-creation failed' })
+    )
+  })
+
+  it('does not auto-create a CRM customer when provisioning is blocked', async () => {
+    const collected = { name: 'Kaveesha', email: 'vihangakaveeshavg@gmail.com' }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    provisionCustomerAccount.mockResolvedValue({
+      success: false,
+      status: 'blocked',
+      blockedReason: 'Multiple customer records share the same phone number',
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings,
+      providerMessageId: 'wa-fallback-blocked',
+    })
+
+    expect(result.customerId).toBeNull()
+    const customerInsert = mockDb.queries.find((q) => q.table === 'customers' && q.mode === 'insert')
+    expect(customerInsert).toBeFalsy()
+  })
+
   it('still completes when lead sync fails', async () => {
     const collected = { name: 'Kaveesha', email: 'vihangakaveeshavg@gmail.com' }
     const conversation = baseConversation({
@@ -343,6 +414,52 @@ describe('runOnboardingCompletion', () => {
       kitchen_type: 'l_shape',
       status: 'inquiry',
     })
+  })
+
+  it('maps all collected details into the automated project row', async () => {
+    const collected = {
+      name: 'Kaveesha',
+      email: 'vihangakaveeshavg@gmail.com',
+      phone: '+94760000000',
+      location: 'Matara',
+      address: 'No36, Beach Road, Matara',
+      kitchen_type: 'L-Shape',
+      kitchen_size: '10.5 x 12',
+      budget: 650000,
+      material_preference: 'HPL',
+      timeline: 'urgent',
+    }
+    const conversation = baseConversation({
+      identity_confirmed_at: new Date().toISOString(),
+      collected_data: collected,
+    })
+
+    const result = await runOnboardingCompletion({
+      conversation,
+      phone: '+94760000000',
+      collected,
+      settings: { ...settings, auto_project_creation: true },
+      providerMessageId: 'wa-proj-details',
+    })
+
+    expect(result.projectId).toBe('proj-1')
+
+    const projectInsert = mockDb.queries.find((q) => q.table === 'projects' && q.mode === 'insert')
+    const payload = projectInsert?.payload as Record<string, unknown>
+    expect(payload).toMatchObject({
+      customer_id: 'cust-1',
+      source_onboarding_id: 'conv-1',
+      kitchen_type: 'l_shape',
+      material_type: 'HPL',
+      city: 'Matara',
+      address: 'No36, Beach Road, Matara',
+      length: 10.5,
+      width: 12,
+      estimated_cost: 650000,
+      priority: 'urgent',
+      status: 'inquiry',
+    })
+    expect(String(payload.notes ?? '')).toContain('Timeline: urgent')
   })
 
   it('does not duplicate a project already created for the same conversation', async () => {

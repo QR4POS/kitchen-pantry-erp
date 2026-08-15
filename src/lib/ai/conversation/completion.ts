@@ -12,6 +12,7 @@
 // ============================================================
 
 import { createAdminClient } from '@/lib/supabase/admin'
+import { canonicalPhone } from '@/lib/phone'
 import {
   queueOutgoingMessage,
   createNotification,
@@ -19,7 +20,7 @@ import {
 import { logAgent } from '@/lib/ai/agent-provider'
 import { provisionCustomerAccount } from '@/lib/customer-management/provisionCustomerAccount'
 import { upsertLeadForCollected } from './lead-sync'
-import { ONBOARDING_CONFIRMATION, findAdminId, type CompletionResult } from './types'
+import { ONBOARDING_CONFIRMATION, findAdminId, parseBudget, type CompletionResult } from './types'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
 
 export async function runOnboardingCompletion(input: {
@@ -101,6 +102,37 @@ export async function runOnboardingCompletion(input: {
       .eq('id', conversation.id)
     await logAgent('onboarding_provisioning_failed', null, 'error', { phone, conversationId: conversation.id }, reason)
 
+    // Even when full account provisioning fails transiently, never lose the
+    // lead: still record the customer in CRM. The next customer message retries
+    // and upgrades this orphan row into a full account (auth + credentials).
+    // Blocked conflicts are a data-quality issue and are NOT auto-created.
+    let fallbackCustomerId: string | null = null
+    if (!isBlocked && settings.auto_customer_creation) {
+      fallbackCustomerId = await createCrmOnlyCustomerFallback({
+        phone,
+        collected,
+        conversationId: conversation.id,
+      })
+    }
+
+    // Surface the failure to admins so it is visible in-app instead of only in
+    // the agent logs.
+    const adminId = await findAdminId()
+    if (adminId) {
+      await createNotification({
+        userId: adminId,
+        title: 'Customer auto-creation failed',
+        message: `${phone}: ${reason}.${
+          fallbackCustomerId
+            ? ' Customer was saved to CRM without an account and will be upgraded on their next message.'
+            : ' No CRM customer was created.'
+        }`,
+        type: 'lead',
+        referenceType: 'ai_conversation',
+        referenceId: conversation.id,
+      }).catch(() => {})
+    }
+
     // The customer confirmed their details and must not be left without a
     // reply just because account provisioning hit a conflict or a transient
     // error. Queue a polite handoff message and treat it as a queued reply.
@@ -112,11 +144,11 @@ export async function runOnboardingCompletion(input: {
         postSendState: isBlocked ? 'human_active' : 'waiting_customer',
       })
       if (queued) {
-        return { customerId: null, leadId: null, confirmationQueued: true }
+        return { customerId: fallbackCustomerId, leadId: null, confirmationQueued: true }
       }
     }
 
-    return { customerId: null, leadId: null, confirmationQueued: false }
+    return { customerId: fallbackCustomerId, leadId: null, confirmationQueued: false }
   }
 
   const customerId = provisionResult.customerId ?? null
@@ -214,6 +246,61 @@ export async function runOnboardingCompletion(input: {
   }
 }
 
+/**
+ * Best-effort CRM-only customer record. Used when full account provisioning
+ * fails transiently so the confirmed lead is never lost. Self-healing: the
+ * provisioning service detects this orphan row on the next retry and upgrades
+ * it into a full account. Never throws.
+ */
+async function createCrmOnlyCustomerFallback(input: {
+  phone: string
+  collected: Record<string, unknown>
+  conversationId: string
+}): Promise<string | null> {
+  const { phone, collected, conversationId } = input
+  const adminClient = createAdminClient()
+
+  // Reuse an existing CRM row for this canonical phone if one already exists.
+  try {
+    const { data: existing } = await adminClient
+      .from('customers')
+      .select('id')
+      .eq('phone_canonical', canonicalPhone(phone))
+      .maybeSingle()
+    if (existing?.id) return existing.id as string
+  } catch {
+    // phone_canonical may be unavailable; fall through to a plain insert.
+  }
+
+  try {
+    const { data, error } = await adminClient
+      .from('customers')
+      .insert({
+        profile_id: null,
+        full_name: collected.name ? String(collected.name).trim() : null,
+        phone,
+        email: collected.email ? String(collected.email).trim().toLowerCase() : null,
+        city: collected.location ? String(collected.location).trim() : null,
+        address: collected.address ? String(collected.address).trim() : null,
+        notes: `CRM fallback from WhatsApp onboarding ${conversationId}`,
+      })
+      .select('id')
+      .single()
+    if (error) throw error
+    if (!data?.id) return null
+
+    await logAgent('onboarding_customer_crm_fallback', null, 'info', {
+      phone,
+      conversationId,
+      customerId: data.id,
+    })
+    return data.id as string
+  } catch (e) {
+    await logAgent('onboarding_customer_crm_fallback_error', null, 'error', { phone, conversationId }, (e as Error).message)
+    return null
+  }
+}
+
 function normalizeKitchenType(value: unknown): string | null {
   const map: Record<string, string> = {
     straight: 'straight',
@@ -251,19 +338,33 @@ async function maybeCreateOnboardingProject(input: {
   if (existing?.id) return existing.id as string
 
   const projectName = `${collected.name ? String(collected.name) : 'Customer'} Kitchen Project`
+  const { length, width } = parseKitchenDimensions(collected.kitchen_size)
+  const estimatedCost = parseBudget(collected.budget)
+  const timeline = collected.timeline ? String(collected.timeline) : null
+
   const { data, error } = await admin
     .from('projects')
     .insert({
       customer_id: customerId,
       project_name: projectName,
+      description: descriptionFromCollected(collected),
       kitchen_type: kitchenType,
       material_type: collected.material_preference ? String(collected.material_preference) : null,
+      length,
+      width,
+      estimated_cost: estimatedCost,
       city: collected.location ? String(collected.location) : null,
       address: collected.address ? String(collected.address) : null,
       status: 'inquiry',
-      priority: 'medium',
+      priority: priorityFromTimeline(timeline),
       source_onboarding_id: conversationId,
-      notes: `Auto-created from WhatsApp onboarding ${conversationId}`,
+      notes: [
+        `Auto-created from WhatsApp onboarding ${conversationId}`,
+        timeline ? `Timeline: ${timeline}` : null,
+        collected.kitchen_size ? `Size: ${String(collected.kitchen_size)}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n'),
     })
     .select('id')
     .single()
@@ -274,4 +375,32 @@ async function maybeCreateOnboardingProject(input: {
   }
 
   return (data?.id as string | null) ?? null
+}
+
+function descriptionFromCollected(collected: Record<string, unknown>): string | null {
+  const parts = [
+    collected.kitchen_type ? `Layout: ${String(collected.kitchen_type)}` : null,
+    collected.kitchen_size ? `Size: ${String(collected.kitchen_size)}` : null,
+    collected.budget ? `Budget: ${typeof collected.budget === 'number' ? `Rs. ${collected.budget.toLocaleString()}` : String(collected.budget)}` : null,
+    collected.material_preference ? `Material: ${String(collected.material_preference)}` : null,
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join('\n') : null
+}
+
+function parseKitchenDimensions(value: unknown): { length: number | null; width: number | null } {
+  if (typeof value !== 'string') return { length: null, width: null }
+  const match = value.match(/(\d+(?:\.\d+)?)\s*(?:x|by|×|\*)\s*(\d+(?:\.\d+)?)/i)
+  if (!match) return { length: null, width: null }
+  return {
+    length: parseFloat(match[1]),
+    width: parseFloat(match[2]),
+  }
+}
+
+function priorityFromTimeline(timeline: string | null): 'low' | 'medium' | 'high' | 'urgent' {
+  if (!timeline) return 'medium'
+  const t = timeline.toLowerCase()
+  if (/(urgent|asap|immediately|this week|within \d+ days)/.test(t)) return 'urgent'
+  if (/\b\d+\s*(day|week)/.test(t) || /next month|1 month/.test(t)) return 'high'
+  return 'medium'
 }
