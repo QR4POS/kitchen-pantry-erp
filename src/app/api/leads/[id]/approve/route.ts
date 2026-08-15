@@ -26,8 +26,13 @@ export const POST = apiGuard({ roles: ['admin'] }, async ({ request, userId }) =
 
   const leadRow = lead as unknown as LeadRow
   const originalStatus = leadRow.status
-  if (leadRow.status === 'converted') {
-    return NextResponse.json({ error: 'Lead already converted' }, { status: 400 })
+  if (leadRow.status === 'converted' || (leadRow.status === 'approved' && leadRow.customer_id)) {
+    // Already approved/converted — idempotent, never duplicate the project.
+    return NextResponse.json({
+      ok: true,
+      alreadyApproved: true,
+      customer: { id: leadRow.customer_id, email: leadRow.email },
+    })
   }
 
   const email = (leadRow.email ?? '').trim().toLowerCase()
@@ -69,57 +74,49 @@ export const POST = apiGuard({ roles: ['admin'] }, async ({ request, userId }) =
     let customer: CustomerRow | null = existingCustomers[0] ?? null
     let credentialsSent = false
 
-    if (customer?.profile_id) {
-      // Case 1: exact phone + existing customer + existing account.
-      // Do NOT create another account or send credentials.
-      await logAgent('lead_approved_existing_customer', null, 'info', {
-        leadId: leadRow.id,
-        customerId: customer.id,
-        profileId: customer.profile_id,
-      })
-    } else {
-      // Case 2: CRM customer exists but no Auth account, or no customer at all.
-      // Use the idempotent provisioning service to create/link safely.
-      const provisionResult = await provisionCustomerAccount({
-        phone: leadRow.phone,
-        fullName: leadRow.name ?? 'Customer',
-        email,
-        city: leadRow.location ?? null,
-        address: leadRow.location ?? null,
-        createdBy: userId,
-        confirmedAt: new Date().toISOString(),
-        allowPasswordResetForExistingAuth: true,
-      })
+    // ALWAYS run the idempotent provisioning service. It safely handles an
+    // existing customer + account, an orphan CRM row, or a brand-new customer,
+    // and because this is an ADMIN-APPROVED handover it also delivers fresh
+    // credentials (username + temporary password) over WhatsApp.
+    const provisionResult = await provisionCustomerAccount({
+      phone: leadRow.phone,
+      fullName: leadRow.name ?? 'Customer',
+      email,
+      city: leadRow.location ?? null,
+      address: leadRow.location ?? null,
+      createdBy: userId,
+      confirmedAt: new Date().toISOString(),
+      allowPasswordResetForExistingAuth: true,
+    })
 
-      if (!provisionResult.success) {
-        await admin
-          .from('leads')
-          .update({ status: originalStatus, updated_at: new Date().toISOString() })
-          .eq('id', leadRow.id)
-        const message = provisionResult.blockedReason ?? provisionResult.error ?? 'Customer account provisioning failed'
-        await logAgent('lead_approve_error', null, 'error', { leadId: leadRow.id }, message)
-        return NextResponse.json({ error: message }, { status: 409 })
-      }
-
-      if (!provisionResult.customerId) {
-        await admin
-          .from('leads')
-          .update({ status: originalStatus, updated_at: new Date().toISOString() })
-          .eq('id', leadRow.id)
-        const message = 'Provisioning succeeded but no customer id was returned'
-        await logAgent('lead_approve_error', null, 'error', { leadId: leadRow.id }, message)
-        return NextResponse.json({ error: message }, { status: 500 })
-      }
-
-      // Fetch the customer row so the project can reference it.
-      const { data: provisionedCustomer } = await admin
-        .from('customers')
-        .select('*')
-        .eq('id', provisionResult.customerId)
-        .single()
-      customer = provisionedCustomer as CustomerRow | null
-      credentialsSent = Boolean(provisionResult.password)
+    if (!provisionResult.success) {
+      await admin
+        .from('leads')
+        .update({ status: originalStatus, updated_at: new Date().toISOString() })
+        .eq('id', leadRow.id)
+      const message = provisionResult.blockedReason ?? provisionResult.error ?? 'Customer account provisioning failed'
+      await logAgent('lead_approve_error', null, 'error', { leadId: leadRow.id }, message)
+      return NextResponse.json({ error: message }, { status: 409 })
     }
+
+    if (!provisionResult.customerId) {
+      await admin
+        .from('leads')
+        .update({ status: originalStatus, updated_at: new Date().toISOString() })
+        .eq('id', leadRow.id)
+      const message = 'Provisioning succeeded but no customer id was returned'
+      await logAgent('lead_approve_error', null, 'error', { leadId: leadRow.id }, message)
+      return NextResponse.json({ error: message }, { status: 500 })
+    }
+
+    // Fetch the customer row so the project can reference it.
+    const { data: provisionedCustomer } = await admin
+      .from('customers')
+      .select('*')
+      .eq('id', provisionResult.customerId)
+      .single()
+    customer = provisionedCustomer as CustomerRow | null
+    credentialsSent = Boolean(provisionResult.password)
 
     if (!customer) {
       await admin
@@ -145,10 +142,10 @@ export const POST = apiGuard({ roles: ['admin'] }, async ({ request, userId }) =
     })
     await admin.from('projects').update({ status: 'approved' }).eq('id', project.id as string)
 
-    // 3. Mark lead converted + link customer
+    // 3. Mark lead approved + link customer
     await admin
       .from('leads')
-      .update({ status: 'converted', customer_id: customer.id, updated_at: new Date().toISOString() })
+      .update({ status: 'approved', customer_id: customer.id, updated_at: new Date().toISOString() })
       .eq('id', leadRow.id)
 
     // 4. Notify + audit + logs
@@ -156,8 +153,8 @@ export const POST = apiGuard({ roles: ['admin'] }, async ({ request, userId }) =
     for (const a of admins.data ?? []) {
       await createNotification({
         userId: a.id as string,
-        title: 'Lead Converted',
-        message: `${leadRow.name ?? leadRow.phone} converted to customer & project.${
+        title: 'Lead Approved',
+        message: `${leadRow.name ?? leadRow.phone} approved and converted to customer & project.${
           credentialsSent ? ' Credentials sent via WhatsApp.' : ' Existing account reused; no credentials sent.'
         }`,
         type: 'lead',

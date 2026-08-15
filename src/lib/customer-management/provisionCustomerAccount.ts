@@ -349,11 +349,18 @@ async function queueCredentialDelivery(
 ): Promise<string | null> {
   if (!provisioning.phone_e164) return null
 
+  // phone_e164 is stored as bare digits (e.g. 94760544773). The worker opens
+  // the chat by the E.164 number with the '+' prefix, exactly like the regular
+  // AI replies — send in that same format so credentials are actually delivered.
+  const outboundPhone = /^94\d{9}$/.test(provisioning.phone_e164)
+    ? `+${provisioning.phone_e164}`
+    : provisioning.phone_e164
+
   // Exactly one credential message per provisioning record.
   const message = credentialMessage(email, password)
 
   const queued = await queueOutgoingMessage(
-    provisioning.phone_e164,
+    outboundPhone,
     message,
     false, // not AI-generated: must never be fed back into conversation history
     {
@@ -366,7 +373,7 @@ async function queueCredentialDelivery(
   if (!queued) {
     await logAgent('provision_credential_queue_failed', null, 'error', {
       provisioningId: provisioning.id,
-      phone: provisioning.phone_e164,
+      phone: outboundPhone,
     })
     return null
   }
@@ -431,11 +438,17 @@ async function ensureCredentialDelivery(input: {
   let provisioning = input.provisioning
   let password = input.password
 
-  if (provisioning.status === 'credential_sent' || provisioning.status === 'credential_pending') {
+  if (provisioning.status === 'credential_pending') {
+    return { provisioning, password }
+  }
+  // credential_sent is terminal EXCEPT when the caller explicitly wants to
+  // re-issue credentials (admin-approval handover) — then keep going so fresh
+  // credentials are regenerated and delivered.
+  if (!input.allowReset && provisioning.status === 'credential_sent') {
     return { provisioning, password }
   }
 
-  if (!password && input.allowReset && provisioning.auth_user_id && !provisioning.credentials_sent_at) {
+  if (!password && input.allowReset && provisioning.auth_user_id) {
     password = generateSecureTemporaryPassword()
     const resetOk = await resetAuthUserPassword(provisioning.auth_user_id, password)
     if (resetOk) {
@@ -443,7 +456,7 @@ async function ensureCredentialDelivery(input: {
       await logAgent('provision_retry_credentials', null, 'info', {
         phone: provisioning.phone_e164,
         provisioningId: provisioning.id,
-        reason: 'regenerated_after_failed_queue',
+        reason: 'admin_approval_or_failed_queue',
       })
     } else {
       password = null
@@ -500,8 +513,10 @@ export async function provisionCustomerAccount(
   }
 
   try {
-    // Terminal states: do not mutate or regenerate anything.
-    if (provisioning.status === 'credential_sent') {
+    // Terminal states: do not mutate or regenerate anything — EXCEPT admin
+    // approval (allowPasswordResetForExistingAuth), which must re-issue fresh
+    // credentials even when the record was already marked credential_sent.
+    if (provisioning.status === 'credential_sent' && !input.allowPasswordResetForExistingAuth) {
       return {
         success: true,
         status: 'credential_sent',
@@ -571,14 +586,17 @@ export async function provisionCustomerAccount(
       }
     }
 
-    // 4. Existing complete linkage → nothing to do.
-    //    If the CRM customer already has a profile, verify the email matches
-    //    the requested identity. A mismatch means the lead/email changed for
-    //    an already-account-enabled customer; staff must resolve it.
+    // 4. Existing complete linkage.
+    //    If the CRM customer already has a profile, verify the email matches the
+    //    requested identity. A mismatch means the lead/email changed for an
+    //    already-account-enabled customer; staff must resolve it.
+    //    Normally a credential_sent / credential_pending record is already
+    //    handled (idempotent), EXCEPT for an admin-approval handover, which must
+    //    re-issue fresh credentials even if they were queued before.
     if (
       existingCustomer?.profile_id &&
-      provisioning.status !== 'credential_sent' &&
-      provisioning.status !== 'credential_pending'
+      (input.allowPasswordResetForExistingAuth ||
+        (provisioning.status !== 'credential_sent' && provisioning.status !== 'credential_pending'))
     ) {
       const existingProfile = await findProfileById(existingCustomer.profile_id)
       const existingEmail = existingProfile?.email?.toLowerCase().trim() ?? ''
@@ -618,7 +636,7 @@ export async function provisionCustomerAccount(
         provisioning,
         email: existingEmail || normalizedEmail,
         password: null,
-        allowReset: credentialRetryPending,
+        allowReset: credentialRetryPending || Boolean(input.allowPasswordResetForExistingAuth),
       })
       return {
         success: delivered.provisioning.status !== 'failed_retryable',

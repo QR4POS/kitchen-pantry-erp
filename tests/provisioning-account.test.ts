@@ -404,4 +404,53 @@ describe('provisionCustomerAccount', () => {
     )
     expect((customerUpdate?.payload as Record<string, unknown>).profile_id).toBe('auth-existing')
   })
+
+  it('delivers credentials to the full E.164 number (with + prefix) so the worker can open the chat', async () => {
+    provRecord = {
+      id: 'prov-1',
+      phone_e164: '94760544773',
+      status: 'ready',
+      attempt_count: 0,
+    }
+
+    const result = await provisionCustomerAccount(baseInput())
+
+    expect(result.success).toBe(true)
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(1)
+    expect(queueOutgoingMessage).toHaveBeenCalledWith(
+      '+94760544773',
+      expect.stringContaining('Temporary password'),
+      false,
+      expect.any(Object)
+    )
+  })
+
+  it('re-issues credentials on admin approval even when the record was already credential_sent', async () => {
+    provRecord = {
+      id: 'prov-1',
+      phone_e164: '94760544773',
+      status: 'credential_sent',
+      auth_user_id: 'auth-1',
+      profile_id: 'auth-1',
+      customer_id: 'cust-1',
+      login_email: EMAIL,
+      credentials_sent_at: '2026-01-01T00:00:00.000Z',
+    }
+    customersState = [
+      { id: 'cust-1', phone: PHONE, phone_canonical: PHONE_E164, profile_id: 'auth-1', email: EMAIL },
+    ]
+
+    const result = await provisionCustomerAccount({
+      ...baseInput(),
+      allowPasswordResetForExistingAuth: true,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.password).toBeTruthy()
+    expect(updateUserByIdFn).toHaveBeenCalledWith(
+      'auth-1',
+      expect.objectContaining({ password: expect.any(String) })
+    )
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(1)
+  })
 })

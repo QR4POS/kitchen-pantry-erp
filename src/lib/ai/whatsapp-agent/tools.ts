@@ -71,7 +71,7 @@ export async function findActiveLeadByPhone(phone: string): Promise<LeadRow | nu
     .from('leads')
     .select('*')
     .eq('phone', phone)
-    .in('status', ['new', 'waiting_approval', 'approved'])
+    .in('status', ['new', 'waiting_approval'])
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
