@@ -20,6 +20,7 @@ import { queueOutgoingMessage } from './tools'
 import { searchCustomerByPhone } from './tools'
 import { isKitchenRelatedMessage, NON_KITCHEN_REPLY } from './intent-filter'
 import { runOnboardingTurn } from '@/lib/ai/conversation/onboarding'
+import { IDENTITY_BATCH_STEP } from '@/lib/ai/conversation/types'
 import { runOnboardingCompletion } from '@/lib/ai/conversation/completion'
 import { runSupportTurn } from '@/lib/ai/conversation/support'
 import {
@@ -137,7 +138,7 @@ export async function getOrCreateConversation(phone: string): Promise<{
       phone_number: normalized,
       customer_id: customerId,
       conversation_status: 'collecting_details',
-      current_step: 'name',
+      current_step: IDENTITY_BATCH_STEP,
       collected_data: {},
     })
     .select('*')

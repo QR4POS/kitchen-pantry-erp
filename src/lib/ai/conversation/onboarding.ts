@@ -35,7 +35,13 @@ import {
 } from '@/lib/ai/whatsapp-agent/provider-fallback'
 import {
   REQUIRED_FIELDS,
+  CUSTOMER_IDENTITY_FIELDS,
+  PROJECT_DETAIL_FIELDS,
   FIELD_QUESTIONS,
+  IDENTITY_BATCH_STEP,
+  PROJECT_BATCH_STEP,
+  IDENTITY_BATCH_QUESTION,
+  PROJECT_BATCH_QUESTION,
   cleanExtracted,
   safeParseJson,
   findAdminId,
@@ -320,6 +326,15 @@ export async function runOnboardingTurn(input: {
 
   if (conversation.current_step === CONFIRM_STEP) {
     return handleConfirmationTurn(input)
+  }
+
+  // Deterministic batch collection: identity fields all at once, then project
+  // details all at once. Missing items are re-requested separately.
+  if (
+    conversation.current_step === IDENTITY_BATCH_STEP ||
+    conversation.current_step === PROJECT_BATCH_STEP
+  ) {
+    return handleBatchCollectionTurn(input)
   }
 
   if (conversation.ai_suppressed || conversation.conversation_status === 'human_active') {
@@ -740,6 +755,145 @@ async function handleCollectAddressTurn(input: {
     nextState: 'waiting_customer',
     replyQueued: settings.auto_reply_enabled,
     collected: nextCollected,
+    decisionAction: 'reply',
+    conversationId: conversation.id,
+  }
+}
+
+// ── Deterministic batch collection turn ──
+// Requests ALL customer identity fields in one message, then ALL project
+// detail fields in one message. Anything missing is re-requested separately
+// until each phase completes, then the identity summary is sent for YES/NO
+// confirmation (which triggers account + project creation on completion).
+
+const FIELD_LABELS: Record<string, string> = {
+  name: 'full name',
+  phone: 'phone number',
+  email: 'email address',
+  location: 'city',
+  address: 'delivery address',
+  kitchen_type: 'kitchen layout',
+  kitchen_size: 'kitchen size',
+  budget: 'budget',
+  material_preference: 'preferred material',
+  timeline: 'timeline',
+}
+
+function listMissingFields(fields: string[]): string {
+  return fields.map((f) => FIELD_LABELS[f] ?? f.replace(/_/g, ' ')).join(', ')
+}
+
+async function extractBatchFields(input: {
+  phone: string
+  incomingText: string
+  collected: Record<string, unknown>
+  settings: AiAgentSettingsRow
+}): Promise<Record<string, unknown>> {
+  const { phone, incomingText, collected, settings } = input
+  if (!settings.auto_reply_enabled) return collected
+  try {
+    const extraction = await callAgentAI(
+      [
+        { role: 'system', content: buildExtractionPrompt(collected) },
+        { role: 'user', content: incomingText },
+      ],
+      { primary: settings.primary_provider, fallback: settings.fallback_provider }
+    )
+    const parsed = safeParseJson(extraction.content)
+    if (parsed && typeof parsed === 'object') {
+      const cleaned = cleanExtracted(parsed)
+      if (Object.keys(cleaned).length > 0) {
+        return { ...collected, ...cleaned }
+      }
+    }
+  } catch (e) {
+    await logAgent('batch_extraction_error', null, 'error', { phone }, (e as Error).message)
+  }
+  return collected
+}
+
+async function handleBatchCollectionTurn(input: {
+  conversation: AiConversationRow
+  phone: string
+  incomingText: string
+  providerMessageId?: string | null
+  settings: AiAgentSettingsRow
+  isNewConversation: boolean
+}): Promise<OnboardingTurnResult> {
+  const { conversation, phone, incomingText, providerMessageId, settings, isNewConversation } = input
+  const step = conversation.current_step
+  const now = new Date().toISOString()
+
+  const baseCollected = (conversation.collected_data ?? {}) as Record<string, unknown>
+  const collected = await extractBatchFields({ phone, incomingText, collected: baseCollected, settings })
+
+  const identityMissing = CUSTOMER_IDENTITY_FIELDS.filter((f) => !collected[f])
+  const projectMissing = PROJECT_DETAIL_FIELDS.filter((f) => !collected[f])
+  const identityComplete = identityMissing.length === 0
+  const projectComplete = projectMissing.length === 0
+
+  let reply: string
+  let nextStep: string | null
+
+  if (identityComplete && projectComplete) {
+    reply = buildIdentitySummary(collected)
+    nextStep = CONFIRM_STEP
+  } else if (step === IDENTITY_BATCH_STEP) {
+    if (identityComplete) {
+      reply = PROJECT_BATCH_QUESTION
+      nextStep = PROJECT_BATCH_STEP
+    } else if (identityMissing.length === CUSTOMER_IDENTITY_FIELDS.length) {
+      // Nothing collected yet — ask the full batch question (welcome first on
+      // a genuinely new conversation).
+      const welcome = isNewConversation ? settings.welcome_message?.trim() : null
+      reply = welcome ? `${welcome}\n\n${IDENTITY_BATCH_QUESTION}` : IDENTITY_BATCH_QUESTION
+      nextStep = IDENTITY_BATCH_STEP
+    } else {
+      reply = `I still need your ${listMissingFields(identityMissing)}. Please share them.`
+      nextStep = IDENTITY_BATCH_STEP
+    }
+  } else {
+    if (projectComplete) {
+      reply = buildIdentitySummary(collected)
+      nextStep = CONFIRM_STEP
+    } else if (projectMissing.length === PROJECT_DETAIL_FIELDS.length) {
+      reply = PROJECT_BATCH_QUESTION
+      nextStep = PROJECT_BATCH_STEP
+    } else {
+      reply = `I still need your ${listMissingFields(projectMissing)}. Please share them.`
+      nextStep = PROJECT_BATCH_STEP
+    }
+  }
+
+  await admin()
+    .from('ai_conversations')
+    .update({
+      conversation_status: 'reply_queued',
+      collected_data: collected,
+      current_step: nextStep,
+      last_question: reply,
+      turn_count: (conversation.turn_count ?? 0) + 1,
+      updated_at: now,
+    })
+    .eq('id', conversation.id)
+
+  let queued = false
+  if (settings.auto_reply_enabled) {
+    queued = Boolean(await queueOutgoingMessage(phone, reply, true, {
+      conversationId: conversation.id,
+      sourceInboundMessageId: providerMessageId ?? null,
+      decisionAction: 'reply',
+      postSendState: 'waiting_customer',
+    }))
+  }
+
+  return {
+    mode: 'onboarding',
+    complete: false,
+    reply,
+    nextState: 'waiting_customer',
+    replyQueued: queued,
+    collected,
     decisionAction: 'reply',
     conversationId: conversation.id,
   }

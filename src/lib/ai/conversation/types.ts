@@ -11,17 +11,27 @@ import type { AiConversationStatus } from '@/types/database'
 // ── Onboarding field set (order matters) ──
 // Everything needed to create the customer AND an automated project:
 // identity fields + the full project brief.
-export const REQUIRED_FIELDS = [
+// Customer identity fields — collected FIRST, all in one message.
+export const CUSTOMER_IDENTITY_FIELDS = [
   'name',
-  'email',
   'phone',
+  'email',
   'location',
   'address',
+] as const
+
+// Project brief fields — collected AFTER identity, all in one message.
+export const PROJECT_DETAIL_FIELDS = [
   'kitchen_type',
   'kitchen_size',
   'budget',
   'material_preference',
   'timeline',
+] as const
+
+export const REQUIRED_FIELDS = [
+  ...CUSTOMER_IDENTITY_FIELDS,
+  ...PROJECT_DETAIL_FIELDS,
 ] as const
 
 export type RequiredField = (typeof REQUIRED_FIELDS)[number]
@@ -38,6 +48,27 @@ export const FIELD_QUESTIONS: Record<string, string> = {
   material_preference: 'Do you have a material preference? (MDF, Plywood, Acrylic, Melamine, HPL, PVC)',
   timeline: 'When do you need your kitchen ready? (e.g. in 2 months, or a target date)',
 }
+
+// ── Deterministic batch collection phases ──
+// New conversations collect the CUSTOMER_IDENTITY_FIELDS in ONE message, then
+// the PROJECT_DETAIL_FIELDS in ONE message. Missing items are re-requested
+// separately until each phase is complete.
+export const IDENTITY_BATCH_STEP = 'collect_identity'
+export const PROJECT_BATCH_STEP = 'collect_project'
+
+export const IDENTITY_BATCH_QUESTION = `Please share the following details in one message so we can create your customer account:
+1. Full name
+2. Phone number
+3. Email address
+4. City
+5. Delivery address`
+
+export const PROJECT_BATCH_QUESTION = `Thank you! Now, so we can prepare your kitchen project, please share the following in one message:
+1. Kitchen layout (Straight, L-Shape, U-Shape, Island, Parallel)
+2. Approximate kitchen size (length x width in feet)
+3. Budget (in Rupees)
+4. Preferred material (MDF, Plywood, Acrylic, Melamine, HPL, PVC)
+5. When you need it ready (timeline)`
 
 // ── One-time onboarding confirmation (sent exactly once) ──
 export const ONBOARDING_CONFIRMATION = `Thank you!
