@@ -282,7 +282,7 @@ describe('onboarding — identity confirmation', () => {
 
     const update = lastAiConversationUpdate()
     expect(update?.current_step).toBeNull()
-    expect(update?.conversation_status).toBe('waiting_customer')
+    expect(update?.conversation_status).toBe('reply_queued')
     expect(update?.identity_confirmed_at).toBeFalsy()
   })
 

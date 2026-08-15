@@ -97,19 +97,6 @@ export async function runOnboardingCompletion(input: {
     const reason = provisionResult.blockedReason ?? provisionResult.error ?? 'Account provisioning failed'
     const isBlocked = provisionResult.status === 'blocked'
 
-    // Blocked (duplicate phone/email/etc.) needs a real staff handoff.
-    // Transient/retryable failures must keep the conversation alive so the
-    // next customer message triggers a retry.
-    await admin
-      .from('ai_conversations')
-      .update({
-        conversation_status: isBlocked ? 'human_active' : 'waiting_customer',
-        ai_suppressed: isBlocked,
-        current_step: null,
-        handoff_reason: reason,
-        updated_at: now,
-      })
-      .eq('id', conversation.id)
     await logAgent('onboarding_provisioning_failed', null, 'error', { phone, conversationId: conversation.id }, reason)
 
     // Even when full account provisioning fails transiently, never lose the
@@ -146,6 +133,7 @@ export async function runOnboardingCompletion(input: {
     // The customer confirmed their details and must not be left without a
     // reply just because account provisioning hit a conflict or a transient
     // error. Queue a polite handoff message and treat it as a queued reply.
+    let fallbackQueued = false
     if (settings.auto_reply_enabled) {
       const queued = await queueOutgoingMessage(phone, fallbackMessage, true, {
         conversationId: conversation.id,
@@ -153,9 +141,33 @@ export async function runOnboardingCompletion(input: {
         decisionAction: 'handoff',
         postSendState: isBlocked ? 'human_active' : 'waiting_customer',
       })
-      if (queued) {
-        return { customerId: fallbackCustomerId, leadId: null, confirmationQueued: true }
-      }
+      fallbackQueued = Boolean(queued)
+    }
+
+    // Blocked (duplicate phone/email/etc.) needs a real staff handoff.
+    // Transient/retryable failures must keep the conversation alive so the
+    // next customer message triggers a retry.
+    // IMPORTANT: while the fallback reply is still pending delivery the state
+    // must be reply_queued, NOT waiting_customer — waiting_customer would imply
+    // we are waiting on the customer when in fact the reply is on its way. The
+    // outbox ACK moves reply_queued → post_send_state after delivery.
+    await admin
+      .from('ai_conversations')
+      .update({
+        conversation_status: isBlocked
+          ? 'human_active'
+          : fallbackQueued
+            ? 'reply_queued'
+            : 'waiting_customer',
+        ai_suppressed: isBlocked,
+        current_step: null,
+        handoff_reason: reason,
+        updated_at: now,
+      })
+      .eq('id', conversation.id)
+
+    if (fallbackQueued) {
+      return { customerId: fallbackCustomerId, leadId: null, confirmationQueued: true }
     }
 
     return { customerId: fallbackCustomerId, leadId: null, confirmationQueued: false }

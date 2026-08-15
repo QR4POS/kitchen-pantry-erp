@@ -238,17 +238,19 @@ describe('engine — non-provider processing error', () => {
 
     const result = await processWhatsAppMessage('+94760000000', 'Hello', { providerMessageId: 'wa-1' })
 
-    expect(result.action).toBe('wait')
-    expect(result.state).toBe('waiting_customer')
+    // A graceful fallback reply is queued so the customer's message is never
+    // silently dropped, and the state reflects the pending reply (reply_queued)
+    // instead of wrongly claiming we are waiting on the customer.
+    expect(result.action).toBe('reply')
+    expect(result.state).toBe('reply_queued')
 
     const safeStateUpdate = mockDb.queries
       .filter((q) => q.table === 'ai_conversations' && q.mode === 'update')
       .map((q) => q.payload as Record<string, unknown>)
-      .find((p) => p.conversation_status === 'waiting_customer')
+      .find((p) => p.conversation_status === 'reply_queued')
     expect(safeStateUpdate?.ai_suppressed).toBe(false)
 
-    // No fallback reply is queued for a non-provider error.
-    expect(queueOutgoingMessage).not.toHaveBeenCalled()
+    expect(queueOutgoingMessage).toHaveBeenCalled()
     expect(logAgent).toHaveBeenCalledWith('processing_error', null, 'error', expect.objectContaining({ providerFailure: false }), expect.any(String))
   })
 })

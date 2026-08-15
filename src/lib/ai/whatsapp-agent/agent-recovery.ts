@@ -154,7 +154,7 @@ export async function releaseStuckProcessingLock(input: {
 export async function moveConversationToSafeState(input: {
   phone: string
   conversationId: string
-  targetState: 'waiting_customer' | 'human_active'
+  targetState: 'waiting_customer' | 'human_active' | 'reply_queued'
   aiSuppressed?: boolean
   handoffReason?: string | null
   lastAction?: string | null

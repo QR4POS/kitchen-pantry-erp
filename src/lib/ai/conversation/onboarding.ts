@@ -799,7 +799,7 @@ async function handleConfirmationTurn(input: {
     await admin()
       .from('ai_conversations')
       .update({
-        conversation_status: 'waiting_customer',
+        conversation_status: 'reply_queued',
         current_step: null,
         last_question: clarify,
         turn_count: (conversation.turn_count ?? 0) + 1,

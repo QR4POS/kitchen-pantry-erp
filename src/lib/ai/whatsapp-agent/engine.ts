@@ -28,7 +28,7 @@ import {
   recoverAutomatedHandoffConversation,
   releaseStuckProcessingLock,
 } from './agent-recovery'
-import { handleProviderFailure, isProviderFailureError, sanitizeErrorText } from './provider-fallback'
+import { AI_PROVIDER_FALLBACK_MESSAGE, handleProviderFailure, isProviderFailureError, sanitizeErrorText } from './provider-fallback'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
 
 // Env-gated performance timing (WHATSAPP_PERF=1). Date.now() based, additive
@@ -484,17 +484,40 @@ export async function processWhatsAppMessage(
       })
     }
 
-    // Non-provider failure → release the lock to waiting_customer so the next
-    // incoming message can retry the turn. Never leave the conversation in
-    // 'processing'.
+    // Non-provider failure → release the lock so the next incoming message can
+    // retry the turn. Never leave the conversation in 'processing'.
+    // The customer's message must not be silently dropped: queue a best-effort
+    // graceful reply first, and only then set the state. While that reply is
+    // pending the state is reply_queued (ACK moves it to waiting_customer);
+    // waiting_customer alone would wrongly imply we are waiting on the customer.
+    let fallbackQueued = false
+    try {
+      if (settings.auto_reply_enabled) {
+        const queued = await queueOutgoingMessage(normalizedPhone, AI_PROVIDER_FALLBACK_MESSAGE, true, {
+          conversationId: conversation.id,
+          sourceInboundMessageId: providerMessageId ?? null,
+          decisionAction: 'reply',
+          postSendState: 'waiting_customer',
+        })
+        fallbackQueued = Boolean(queued)
+      }
+    } catch {
+      // Best-effort only — a DB error may prevent queueing; recovery still runs.
+    }
+
     await moveConversationToSafeState({
       phone: normalizedPhone,
       conversationId: conversation.id,
-      targetState: 'waiting_customer',
+      targetState: fallbackQueued ? 'reply_queued' : 'waiting_customer',
       aiSuppressed: false,
       handoffReason: null,
       lastAction: 'wait',
     })
-    return { action: 'wait', state: 'waiting_customer', replyQueued: false, conversationId: conversation.id }
+    return {
+      action: fallbackQueued ? 'reply' : 'wait',
+      state: fallbackQueued ? 'reply_queued' : 'waiting_customer',
+      replyQueued: fallbackQueued,
+      conversationId: conversation.id,
+    }
   }
 }

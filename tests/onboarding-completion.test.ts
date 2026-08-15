@@ -375,8 +375,11 @@ describe('runOnboardingCompletion', () => {
 
     expect(result.confirmationQueued).toBe(true)
 
+    // While the fallback reply is pending delivery the state is reply_queued
+    // (not waiting_customer — that would wrongly imply we are waiting on the
+    // customer). The outbox ACK moves it to waiting_customer after delivery.
     const convUpdate = mockDb.queries.find(
-      (q) => q.table === 'ai_conversations' && q.mode === 'update' && (q.payload as Record<string, unknown>)?.conversation_status === 'waiting_customer'
+      (q) => q.table === 'ai_conversations' && q.mode === 'update' && (q.payload as Record<string, unknown>)?.conversation_status === 'reply_queued'
     )
     expect(convUpdate).toBeTruthy()
     expect(convUpdate?.payload as Record<string, unknown>).toMatchObject({ ai_suppressed: false })
