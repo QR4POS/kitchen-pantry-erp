@@ -260,25 +260,44 @@ export async function queueOutgoingMessage(
     ? `outgoing-turn:${options.conversationId}:${options.sourceInboundMessageId}`
     : outgoingDedupKey(phone, message)
 
-  const { data, error } = await admin()
-    .from('whatsapp_messages')
-    .insert({
-      phone_number: phone,
-      direction: 'outgoing',
-      message,
-      status: 'pending',
-      ai_generated: aiGenerated,
-      message_type: options?.messageType ?? 'text',
-      media_url: options?.mediaUrl ?? null,
-      provider_message_id: `out:${createHash('sha256').update(`${phone}\u0000${message}`).digest('hex').slice(0, 12)}`,
-      dedup_key: dedupKey,
-      conversation_id: options?.conversationId ?? null,
-      source_inbound_message_id: options?.sourceInboundMessageId ?? null,
-      decision_action: options?.decisionAction ?? null,
-      post_send_state: options?.postSendState ?? null,
-    })
-    .select('*')
-    .single()
+  const baseRow = {
+    phone_number: phone,
+    direction: 'outgoing' as const,
+    message,
+    status: 'pending' as const,
+    ai_generated: aiGenerated,
+    message_type: options?.messageType ?? 'text',
+    media_url: options?.mediaUrl ?? null,
+    provider_message_id: `out:${createHash('sha256').update(`${phone}\u0000${message}`).digest('hex').slice(0, 12)}`,
+    dedup_key: dedupKey,
+    source_inbound_message_id: options?.sourceInboundMessageId ?? null,
+    decision_action: options?.decisionAction ?? null,
+    post_send_state: options?.postSendState ?? null,
+  }
+
+  const insertOutgoing = (conversationId: string | null) =>
+    admin()
+      .from('whatsapp_messages')
+      .insert({ ...baseRow, conversation_id: conversationId })
+      .select('*')
+      .single()
+
+  let { data, error } = await insertOutgoing(options?.conversationId ?? null)
+
+  if (error?.code === '23503') {
+    // The referenced ai_conversations row no longer exists (stale reference).
+    // Queue the message WITHOUT the conversation link so the customer is never
+    // left without a reply — conversation_id is bookkeeping; the phone number
+    // routes the message to the right chat.
+    await logAgent('queue_outgoing_fk_fallback', null, 'warn', {
+      phone,
+      conversationId: options?.conversationId ?? null,
+    }, error.message)
+    const retry = await insertOutgoing(null)
+    data = retry.data
+    error = retry.error
+  }
+
   if (error) {
     if (error.code === '23505') {
       await logAgent('queue_outgoing_duplicate', null, 'info', {

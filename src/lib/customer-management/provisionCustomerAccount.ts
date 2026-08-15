@@ -186,10 +186,13 @@ async function findCustomersByCanonicalPhone(phoneE164: string) {
 }
 
 async function findProfileByEmail(email: string) {
+  // Case-insensitive: profiles.email can vary in case, but the unique index is
+  // on lower(email). A case-sensitive match would miss the profile and trigger a
+  // duplicate Auth-user creation.
   const { data, error } = await createAdminClient()
     .from('profiles')
     .select('*')
-    .eq('email', email)
+    .ilike('email', email)
     .maybeSingle()
   if (error) throw error
   return data as ProfileRow | null
@@ -203,6 +206,42 @@ async function findProfileById(id: string) {
     .maybeSingle()
   if (error) throw error
   return data as ProfileRow | null
+}
+
+// Mirrors the handle_new_user trigger: guarantees a profiles row exists for an
+// Auth user id so a customers.profile_id FK can never be violated. Reused Auth
+// users (e.g. found via email after a duplicate createUser) may lack a profile
+// row if it was deleted or the trigger never ran.
+async function ensureProfileForAuthUser(input: {
+  authUserId: string
+  email: string
+  fullName: string
+}): Promise<boolean> {
+  const existing = await findProfileById(input.authUserId)
+  if (existing) return true
+
+  const { error } = await createAdminClient()
+    .from('profiles')
+    .insert({
+      id: input.authUserId,
+      full_name: input.fullName,
+      email: input.email,
+      role: 'customer',
+    })
+    .select('id')
+    .single()
+  if (error) {
+    await logAgent('provision_profile_ensure_error', null, 'error', {
+      authUserId: input.authUserId,
+      email: input.email,
+    }, error.message)
+    return false
+  }
+  await logAgent('provision_profile_recreated', null, 'info', {
+    authUserId: input.authUserId,
+    email: input.email,
+  })
+  return true
 }
 
 async function findCustomerByProfileId(profileId: string) {
@@ -219,6 +258,13 @@ async function findAuthUserById(userId: string) {
   const { data, error } = await createAdminClient().auth.admin.getUserById(userId)
   if (error || !data.user) return null
   return data.user
+}
+
+async function findAuthUserByEmail(email: string) {
+  const { data, error } = await createAdminClient().auth.admin.listUsers({ page: 1, perPage: 1000 })
+  if (error || !data?.users) return null
+  const target = email.toLowerCase()
+  return data.users.find((u) => (u.email ?? '').toLowerCase() === target) ?? null
 }
 
 async function createAuthUser(
@@ -624,12 +670,37 @@ export async function provisionCustomerAccount(
         password = generateSecureTemporaryPassword()
         authUserId = await createAuthUser(normalizedEmail, password, input.fullName.trim())
         if (!authUserId) {
-          const reason = 'Failed to create Auth user'
-          await updateProvisioningState(provisioning.id, {
-            status: 'failed_retryable',
-            last_error: reason,
-          })
-          return { success: false, status: 'failed_retryable', error: reason }
+          // createUser failed — most commonly because an Auth user ALREADY
+          // exists for this email. Reuse it instead of failing the approval.
+          const existingAuth = await findAuthUserByEmail(normalizedEmail)
+          if (existingAuth?.id) {
+            authUserId = existingAuth.id
+            if (input.allowPasswordResetForExistingAuth) {
+              const resetOk = await resetAuthUserPassword(authUserId, password)
+              if (!resetOk) {
+                const reason = 'Failed to reset password for existing Auth user'
+                await updateProvisioningState(provisioning.id, {
+                  status: 'failed_retryable',
+                  last_error: reason,
+                })
+                return { success: false, status: 'failed_retryable', error: reason }
+              }
+            } else {
+              // Never claim a password we did not actually set.
+              password = null
+            }
+            await logAgent('provision_auth_user_reused_after_duplicate', null, 'info', {
+              email: normalizedEmail,
+              authUserId,
+            })
+          } else {
+            const reason = 'Failed to create Auth user'
+            await updateProvisioningState(provisioning.id, {
+              status: 'failed_retryable',
+              last_error: reason,
+            })
+            return { success: false, status: 'failed_retryable', error: reason }
+          }
         }
       }
 
@@ -649,6 +720,24 @@ export async function provisionCustomerAccount(
 
     let customerId: string | null = provisioning.customer_id ?? existingCustomer?.id ?? null
     if (!customerId) {
+      // The customers.profile_id FK points at profiles(id). For a brand-new Auth
+      // user the trigger creates the profile, but a REUSED Auth user may have no
+      // profile row — ensure it exists so the customer insert can never violate
+      // customers_profile_id_fkey.
+      const profileOk = await ensureProfileForAuthUser({
+        authUserId,
+        email: normalizedEmail,
+        fullName: input.fullName.trim(),
+      })
+      if (!profileOk) {
+        const reason = 'Failed to ensure profile for Auth user'
+        await updateProvisioningState(provisioning.id, {
+          status: 'failed_retryable',
+          last_error: reason,
+        })
+        return { success: false, status: 'failed_retryable', error: reason }
+      }
+
       const created = await createCustomerRow({
         profileId: authUserId,
         fullName: input.fullName.trim(),
@@ -666,6 +755,22 @@ export async function provisionCustomerAccount(
       })
     } else if (!existingCustomer?.profile_id) {
       // Orphan CRM-only customer: link it to the new/existing Auth user.
+      // The customers.profile_id FK points at profiles(id) — a reused Auth user
+      // may have no profile row, so ensure it exists before the UPDATE.
+      const profileOk = await ensureProfileForAuthUser({
+        authUserId,
+        email: normalizedEmail,
+        fullName: input.fullName.trim(),
+      })
+      if (!profileOk) {
+        const reason = 'Failed to ensure profile for Auth user'
+        await updateProvisioningState(provisioning.id, {
+          status: 'failed_retryable',
+          last_error: reason,
+        })
+        return { success: false, status: 'failed_retryable', error: reason }
+      }
+
       await linkExistingOrphanCustomer(existingCustomer, authUserId, input)
       provisioning = await updateProvisioningState(provisioning.id, {
         status: 'customer_linked',

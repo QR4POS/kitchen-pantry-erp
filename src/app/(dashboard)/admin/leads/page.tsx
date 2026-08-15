@@ -59,6 +59,7 @@ export default function WhatsAppLeadsPage() {
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<string>("all")
   const [selectedLead, setSelectedLead] = useState<LeadRow | null>(null)
+  const [approving, setApproving] = useState<string | null>(null)
   const [messages, setMessages] = useState<{ id: string; direction: string; message: string; created_at: string }[]>([])
   const supabase = createClient()
 
@@ -108,6 +109,8 @@ export default function WhatsAppLeadsPage() {
   }
 
   async function handleApprove(lead: LeadRow) {
+    if (approving) return
+    setApproving(lead.id)
     try {
       const res = await fetch(`/api/leads/${lead.id}/approve`, { method: "POST" })
       const data = await res.json()
@@ -120,6 +123,8 @@ export default function WhatsAppLeadsPage() {
       setSelectedLead(null)
     } catch (e) {
       toast({ title: "Error", description: (e as Error).message, variant: "destructive" })
+    } finally {
+      setApproving(null)
     }
   }
 
@@ -308,7 +313,7 @@ export default function WhatsAppLeadsPage() {
                       </span>
                       {lead.status === "waiting_approval" && (
                         <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
-                          <Button size="sm" className="h-7" onClick={() => handleApprove(lead)}>
+                          <Button size="sm" className="h-7" disabled={approving === lead.id} onClick={() => handleApprove(lead)}>
                             <CheckCircle2 className="size-3.5 mr-1" />
                             Approve
                           </Button>
@@ -364,9 +369,9 @@ export default function WhatsAppLeadsPage() {
                 <XCircle className="size-4 mr-1.5" />
                 Reject
               </Button>
-              <Button onClick={() => handleApprove(selectedLead)}>
+              <Button disabled={approving === selectedLead.id} onClick={() => handleApprove(selectedLead)}>
                 <CheckCircle2 className="size-4 mr-1.5" />
-                Approve & Create Account
+                {approving === selectedLead.id ? "Approving…" : "Approve & Create Account"}
               </Button>
             </DialogFooter>
           )}

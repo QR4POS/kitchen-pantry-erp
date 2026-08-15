@@ -30,6 +30,7 @@ let profileByIdResult: Record<string, unknown> | null
 let createUserFn: ReturnType<typeof vi.fn>
 let getUserByIdFn: ReturnType<typeof vi.fn>
 let updateUserByIdFn: ReturnType<typeof vi.fn>
+let listUsersFn: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   logAgent.mockClear()
@@ -48,11 +49,13 @@ beforeEach(() => {
   createUserFn = vi.fn().mockResolvedValue({ data: { user: { id: 'auth-1' } }, error: null })
   getUserByIdFn = vi.fn().mockResolvedValue({ data: { user: { id: 'auth-1' } }, error: null })
   updateUserByIdFn = vi.fn().mockResolvedValue({ data: { user: { id: 'auth-1' } }, error: null })
+  listUsersFn = vi.fn().mockResolvedValue({ data: { users: [] }, error: null })
   ;(mockDb.db as unknown as { auth: unknown }).auth = {
     admin: {
       createUser: createUserFn,
       getUserById: getUserByIdFn,
       updateUserById: updateUserByIdFn,
+      listUsers: listUsersFn,
     },
   }
 
@@ -287,5 +290,118 @@ describe('provisionCustomerAccount', () => {
       false,
       expect.any(Object)
     )
+  })
+
+  it('reuses an existing Auth user when createUser fails on a duplicate email (admin approval resets the password)', async () => {
+    createUserFn.mockResolvedValue({
+      data: { user: null },
+      error: { message: 'User already registered', code: '23505' },
+    })
+    listUsersFn.mockResolvedValue({
+      data: { users: [{ id: 'auth-existing', email: EMAIL }] },
+      error: null,
+    })
+
+    const result = await provisionCustomerAccount({
+      ...baseInput(),
+      allowPasswordResetForExistingAuth: true,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.status).toBe('credential_sent')
+    expect(result.authUserId).toBe('auth-existing')
+    expect(updateUserByIdFn).toHaveBeenCalledWith(
+      'auth-existing',
+      expect.objectContaining({ password: expect.any(String) })
+    )
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('reuses an existing Auth user on duplicate email WITHOUT resetting or sending credentials (auto onboarding)', async () => {
+    createUserFn.mockResolvedValue({
+      data: { user: null },
+      error: { message: 'User already registered', code: '23505' },
+    })
+    listUsersFn.mockResolvedValue({
+      data: { users: [{ id: 'auth-existing', email: EMAIL }] },
+      error: null,
+    })
+
+    const result = await provisionCustomerAccount(baseInput())
+
+    expect(result.success).toBe(true)
+    expect(result.status).toBe('customer_linked')
+    expect(result.authUserId).toBe('auth-existing')
+    expect(result.password).toBeNull()
+    expect(updateUserByIdFn).not.toHaveBeenCalled()
+    expect(queueOutgoingMessage).not.toHaveBeenCalled()
+  })
+
+  it('creates a missing profile row when reusing an Auth user (prevents customers_profile_id FK violation)', async () => {
+    createUserFn.mockResolvedValue({
+      data: { user: null },
+      error: { message: 'User already registered', code: '23505' },
+    })
+    listUsersFn.mockResolvedValue({
+      data: { users: [{ id: 'auth-existing', email: EMAIL }] },
+      error: null,
+    })
+    profileByIdResult = null
+
+    const result = await provisionCustomerAccount({
+      ...baseInput(),
+      allowPasswordResetForExistingAuth: true,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.authUserId).toBe('auth-existing')
+
+    const profileInsert = mockDb.queries.find(
+      (q) => q.table === 'profiles' && q.mode === 'insert'
+    )
+    expect(profileInsert).toBeTruthy()
+    expect(profileInsert?.payload).toMatchObject({
+      id: 'auth-existing',
+      email: EMAIL,
+      role: 'customer',
+    })
+
+    // The customer row references the existing (now guaranteed) profile.
+    const customerInsert = mockDb.queries.find((q) => q.table === 'customers' && q.mode === 'insert')
+    expect((customerInsert?.payload as Record<string, unknown>).profile_id).toBe('auth-existing')
+  })
+
+  it('ensures a profile before linking an orphan customer to a reused Auth user (prevents FK violation on UPDATE)', async () => {
+    customersState = [
+      { id: 'cust-orphan', phone: PHONE, phone_canonical: PHONE_E164, profile_id: null, email: null },
+    ]
+    createUserFn.mockResolvedValue({
+      data: { user: null },
+      error: { message: 'User already registered', code: '23505' },
+    })
+    listUsersFn.mockResolvedValue({
+      data: { users: [{ id: 'auth-existing', email: EMAIL }] },
+      error: null,
+    })
+    profileByIdResult = null
+
+    const result = await provisionCustomerAccount({
+      ...baseInput(),
+      allowPasswordResetForExistingAuth: true,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.customerId).toBe('cust-orphan')
+    expect(result.authUserId).toBe('auth-existing')
+
+    const profileInsert = mockDb.queries.find((q) => q.table === 'profiles' && q.mode === 'insert')
+    expect(profileInsert).toBeTruthy()
+    expect((profileInsert?.payload as Record<string, unknown>).id).toBe('auth-existing')
+
+    // The orphan customer UPDATE links to the now-guaranteed profile.
+    const customerUpdate = mockDb.queries.find(
+      (q) => q.table === 'customers' && q.mode === 'update'
+    )
+    expect((customerUpdate?.payload as Record<string, unknown>).profile_id).toBe('auth-existing')
   })
 })
