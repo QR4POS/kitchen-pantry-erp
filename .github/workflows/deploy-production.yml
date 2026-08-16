@@ -1,0 +1,181 @@
+name: Deploy production tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kitchen-erp-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy tagged release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    environment:
+      name: production
+      url: https://erp.cabenginepro.com
+
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      COMMIT_SHA: ${{ github.sha }}
+      RUN_TOKEN: ${{ github.run_id }}${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid production tag: $RELEASE_TAG"
+            echo "Expected format such as v1.0.0"
+            exit 1
+          fi
+
+          if [[ ! "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid Git commit SHA"
+            exit 1
+          fi
+
+          echo "Preparing $RELEASE_TAG from $COMMIT_SHA"
+
+      - name: Package tagged source
+        shell: bash
+        run: |
+          ARCHIVE="$RUNNER_TEMP/kitchen-pantry-${RUN_TOKEN}.tar.gz"
+
+          tar \
+            --create \
+            --gzip \
+            --file "$ARCHIVE" \
+            --exclude="./.git" \
+            --exclude="./node_modules" \
+            --exclude="./.next" \
+            --exclude="./.env*" \
+            --exclude="./storage" \
+            --exclude="./storage/**" \
+            --exclude="./supabase/.temp" \
+            .
+
+          test -s "$ARCHIVE"
+
+          echo "Created archive:"
+          du -h "$ARCHIVE"
+
+      - name: Configure secured SSH connection
+        shell: bash
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_SSH_HOST_KEY: ${{ secrets.VPS_SSH_HOST_KEY }}
+        run: |
+          test -n "$VPS_SSH_PRIVATE_KEY"
+          test -n "$VPS_SSH_HOST_KEY"
+
+          KEY_FILE="$RUNNER_TEMP/vps_deploy_key"
+          HOSTS_FILE="$RUNNER_TEMP/vps_known_hosts"
+
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$KEY_FILE"
+          printf '%s\n' "$VPS_SSH_HOST_KEY" > "$HOSTS_FILE"
+
+          chmod 600 "$KEY_FILE" "$HOSTS_FILE"
+
+          ssh-keygen -y -f "$KEY_FILE" >/dev/null
+
+      - name: Test VPS connection
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh \
+            -i "$RUNNER_TEMP/vps_deploy_key" \
+            -p "$VPS_PORT" \
+            -o UserKnownHostsFile="$RUNNER_TEMP/vps_known_hosts" \
+            -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            "${VPS_USER}@${VPS_HOST}" \
+            "whoami && hostname"
+
+      - name: Upload release
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ARCHIVE="$RUNNER_TEMP/kitchen-pantry-${RUN_TOKEN}.tar.gz"
+          REMOTE_ARCHIVE="/home/deploy/deploy-incoming/release-${RUN_TOKEN}.tar.gz"
+
+          scp \
+            -i "$RUNNER_TEMP/vps_deploy_key" \
+            -P "$VPS_PORT" \
+            -o UserKnownHostsFile="$RUNNER_TEMP/vps_known_hosts" \
+            -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            "$ARCHIVE" \
+            "${VPS_USER}@${VPS_HOST}:${REMOTE_ARCHIVE}"
+
+      - name: Deploy release on VPS
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          REMOTE_ARCHIVE="/home/deploy/deploy-incoming/release-${RUN_TOKEN}.tar.gz"
+
+          printf -v REMOTE_COMMAND '%q ' \
+            /home/deploy/bin/deploy-kitchen-erp \
+            "$REMOTE_ARCHIVE" \
+            "$RELEASE_TAG" \
+            "$COMMIT_SHA" \
+            "$RUN_TOKEN"
+
+          ssh \
+            -i "$RUNNER_TEMP/vps_deploy_key" \
+            -p "$VPS_PORT" \
+            -o UserKnownHostsFile="$RUNNER_TEMP/vps_known_hosts" \
+            -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            "${VPS_USER}@${VPS_HOST}" \
+            "$REMOTE_COMMAND"
+
+      - name: Verify public HTTPS application
+        shell: bash
+        run: |
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --location \
+            --max-time 30 \
+            --output /dev/null \
+            https://erp.cabenginepro.com/login
+
+          echo "Production HTTPS verification succeeded"
+
+      - name: Write deployment summary
+        shell: bash
+        run: |
+          {
+            echo "### Production deployment completed"
+            echo ""
+            echo "- Tag: \`$RELEASE_TAG\`"
+            echo "- Commit: \`$COMMIT_SHA\`"
+            echo "- URL: https://erp.cabenginepro.com"
+          } >> "$GITHUB_STEP_SUMMARY"
