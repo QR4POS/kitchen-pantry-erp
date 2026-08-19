@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
+import { createContractorAccountAction } from "@/lib/contractor/actions"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -59,14 +60,10 @@ export default function ContractorsPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editContractor, setEditContractor] = useState<Contractor | null>(null)
   const [deleteId, setDeleteId] = useState<string | null>(null)
-  const [formData, setFormData] = useState({ company_name: "", specialization: "", phone: "", city: "", experience_years: "" })
+  const [formData, setFormData] = useState({ company_name: "", specialization: "", phone: "", city: "", experience_years: "", email: "", password: "" })
   const [saving, setSaving] = useState(false)
   const supabase = createClient()
   const { addToast: toast } = useToast()
-
-  useEffect(() => {
-    fetchData()
-  }, [])
 
   async function fetchData() {
     try {
@@ -81,6 +78,10 @@ export default function ContractorsPage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    fetchData()
+  }, [])
 
   const filtered = useMemo(() => {
     let result = contractors
@@ -107,7 +108,7 @@ export default function ContractorsPage() {
 
   function openAdd() {
     setEditContractor(null)
-    setFormData({ company_name: "", specialization: "", phone: "", city: "", experience_years: "" })
+    setFormData({ company_name: "", specialization: "", phone: "", city: "", experience_years: "", email: "", password: "" })
     setDialogOpen(true)
   }
 
@@ -119,6 +120,8 @@ export default function ContractorsPage() {
       phone: contractor.phone ?? "",
       city: contractor.city ?? "",
       experience_years: contractor.experience_years?.toString() ?? "",
+      email: contractor.email ?? "",
+      password: "",
     })
     setDialogOpen(true)
   }
@@ -139,15 +142,29 @@ export default function ContractorsPage() {
         setContractors((prev) => prev.map((c) => c.id === editContractor.id ? { ...c, ...payload, experience_years: payload.experience_years ?? undefined } as Contractor : c))
         toast({ title: "Contractor updated" })
       } else {
-        const { data, error } = await supabase.from("contractors").insert(payload).select().single()
-        if (error) throw error
-        if (data) setContractors((prev) => [data as unknown as Contractor, ...prev])
-        toast({ title: "Contractor added" })
+        const accountForm = new FormData()
+        accountForm.append("company_name", formData.company_name)
+        accountForm.append("email", formData.email)
+        accountForm.append("password", formData.password)
+        accountForm.append("specialization", formData.specialization)
+        accountForm.append("phone", formData.phone)
+        accountForm.append("city", formData.city)
+        accountForm.append("experience_years", formData.experience_years)
+
+        const result = await createContractorAccountAction(accountForm)
+        if (!result.success) {
+          throw new Error(result.error || "Failed to create contractor account")
+        }
+        if (result.contractor) {
+          setContractors((prev) => [result.contractor as unknown as Contractor, ...prev])
+        }
+        toast({ title: "Contractor added", description: "Login credentials have been created." })
       }
       setDialogOpen(false)
       setEditContractor(null)
-    } catch {
-      toast({ title: "Error", description: "Failed to save contractor.", variant: "destructive" })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to save contractor."
+      toast({ title: "Error", description: message, variant: "destructive" })
     } finally {
       setSaving(false)
     }
@@ -258,6 +275,18 @@ export default function ContractorsPage() {
               <Label>Company Name</Label>
               <Input value={formData.company_name} onChange={(e) => setFormData({ ...formData, company_name: e.target.value })} placeholder="Enter company name" />
             </div>
+            {!editContractor && (
+              <>
+                <div className="grid gap-2">
+                  <Label>Email <span className="text-destructive">*</span></Label>
+                  <Input value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} placeholder="contractor@example.com" type="email" />
+                </div>
+                <div className="grid gap-2">
+                  <Label>Password <span className="text-destructive">*</span></Label>
+                  <Input value={formData.password} onChange={(e) => setFormData({ ...formData, password: e.target.value })} placeholder="Min 6 characters" type="password" />
+                </div>
+              </>
+            )}
             <div className="grid gap-2">
               <Label>Specialization</Label>
               <Input value={formData.specialization} onChange={(e) => setFormData({ ...formData, specialization: e.target.value })} placeholder="e.g. Carpenter, Electrician" />
