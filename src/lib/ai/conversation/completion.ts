@@ -348,6 +348,7 @@ export async function runOnboardingCompletion(input: {
     kitchenType: collected.kitchen_type as string | null,
     kitchenSize: collected.kitchen_size as string | null,
     constructionStage: collected.construction_stage as string | null,
+    height: collected.height as string | null,
     location: collected.location as string | null,
     province: collected.province as string | null,
     insideWesternProvince: collected.inside_western_province as boolean | null,
@@ -531,6 +532,7 @@ async function maybeCreateOnboardingProject(input: {
 
   const projectName = `${collected.name ? String(collected.name) : 'Customer'} Kitchen Project`
   const { length, width } = parseKitchenDimensions(collected.kitchen_size)
+  const height = parseHeight(collected.height)
   const estimatedCost = parseBudget(collected.budget)
   const timeline = collected.timeline ? String(collected.timeline) : null
 
@@ -538,6 +540,7 @@ async function maybeCreateOnboardingProject(input: {
     `Auto-created from WhatsApp onboarding ${conversationId}`,
     timeline ? `Timeline: ${timeline}` : null,
     collected.kitchen_size ? `Size: ${String(collected.kitchen_size)}` : null,
+    collected.height ? `Wall height: ${String(collected.height)}` : null,
   ]
     .filter(Boolean)
     .join('\n')
@@ -550,6 +553,7 @@ async function maybeCreateOnboardingProject(input: {
     material_type: collected.material_preference ? String(collected.material_preference) : null,
     length,
     width,
+    height,
     estimated_cost: estimatedCost,
     city: collected.location ? String(collected.location) : null,
     address: collected.address ? String(collected.address) : null,
@@ -596,6 +600,7 @@ function descriptionFromCollected(collected: Record<string, unknown>): string | 
     collected.contact_reason ? `Reason: ${String(collected.contact_reason)}` : null,
     collected.kitchen_type ? `Layout: ${String(collected.kitchen_type)}` : null,
     collected.kitchen_size ? `Size: ${String(collected.kitchen_size)}` : null,
+    collected.height ? `Wall height: ${String(collected.height)}` : null,
     collected.construction_stage ? `Stage: ${String(collected.construction_stage)}` : null,
     collected.budget ? `Budget: ${typeof collected.budget === 'number' ? `LKR ${collected.budget.toLocaleString()}` : String(collected.budget)}` : null,
     collected.material_preference ? `Material: ${String(collected.material_preference)}` : null,
@@ -612,6 +617,13 @@ function parseKitchenDimensions(value: unknown): { length: number | null; width:
     length: parseFloat(match[1]),
     width: parseFloat(match[2]),
   }
+}
+
+function parseHeight(value: unknown): number | null {
+  if (typeof value !== 'string') return null
+  const match = value.match(/(\d+(?:\.\d+)?)/)
+  if (!match) return null
+  return parseFloat(match[1])
 }
 
 function priorityFromTimeline(timeline: string | null): 'low' | 'medium' | 'high' | 'urgent' {

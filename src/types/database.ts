@@ -300,6 +300,19 @@ export interface AiAgentSettingsRow {
   updated_at: string
 }
 
+export type AiAgentQuestionPhase = 'identity' | 'project'
+
+export interface AiAgentQuestionRow {
+  id: string
+  field_key: string
+  phase: AiAgentQuestionPhase
+  position: number
+  question: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface AiConversationRow {
   id: string
   phone_number: string

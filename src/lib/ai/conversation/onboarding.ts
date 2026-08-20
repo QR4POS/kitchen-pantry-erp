@@ -35,13 +35,9 @@ import {
 } from '@/lib/ai/whatsapp-agent/provider-fallback'
 import {
   REQUIRED_FIELDS,
-  CUSTOMER_IDENTITY_FIELDS,
-  PROJECT_DETAIL_FIELDS,
   FIELD_QUESTIONS,
   IDENTITY_BATCH_STEP,
   PROJECT_BATCH_STEP,
-  IDENTITY_BATCH_QUESTION,
-  PROJECT_BATCH_QUESTION,
   cleanExtracted,
   safeParseJson,
   findAdminId,
@@ -50,6 +46,13 @@ import {
 } from './types'
 import { normalizeLocation } from '@/lib/ai/whatsapp-agent/location'
 import { calculateLeadScore } from '@/lib/ai/whatsapp-agent/scoring'
+import {
+  getOnboardingSteps,
+  buildOnboardingFlow,
+  isExtractableField,
+  type OnboardingFlow,
+  type QuestionStep,
+} from '@/lib/ai/whatsapp-agent/onboarding-steps'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
 
 const ADDRESS_STEP = 'collect_address'
@@ -198,8 +201,9 @@ function computeSlotPriority(
   collected: Record<string, unknown>,
   declined: string[],
   customerMessage: string,
+  requiredFields: readonly string[],
 ): string[] {
-  const allMissing = REQUIRED_FIELDS.filter(f => !(f in collected))
+  const allMissing = requiredFields.filter(f => !(f in collected))
   if (allMissing.length === 0) return []
 
   const relatedKeywords: Record<string, RegExp> = {
@@ -229,8 +233,8 @@ function computeSlotPriority(
 
   const scored = allMissing.map(field => {
     let score = 0
-    const idx = REQUIRED_FIELDS.indexOf(field)
-    score += (REQUIRED_FIELDS.length - idx) * 1
+    const idx = requiredFields.indexOf(field)
+    score += (requiredFields.length - idx) * 1
 
     if (relatedKeywords[field]?.test(customerMessage)) score += 10
 
@@ -258,6 +262,7 @@ async function buildControllerContext(params: {
   isReturning: boolean
   lastInteractionAt: string | null
   isNewConversation: boolean
+  requiredFields: readonly string[]
 }): Promise<DecideTurnInput> {
   const collected = (params.conversation.collected_data ?? {}) as Record<string, unknown>
   const declined = Array.isArray(collected._declined_fields)
@@ -300,7 +305,7 @@ async function buildControllerContext(params: {
       })
     : []
 
-  const missingSlotPriorities = computeSlotPriority(collected, declined, params.incomingText)
+  const missingSlotPriorities = computeSlotPriority(collected, declined, params.incomingText, params.requiredFields)
 
   const customerName = (existingCustomers[0]?.full_name as string) || (collected.name as string) || null
 
@@ -353,6 +358,8 @@ export async function runOnboardingTurn(input: {
 }): Promise<OnboardingTurnResult> {
   const { conversation, phone, incomingText, providerMessageId, settings, isReturning, lastInteractionAt, isNewConversation } = input
 
+  const flow = buildOnboardingFlow(await getOnboardingSteps())
+
   if (conversation.current_step === ADDRESS_STEP) {
     return handleCollectAddressTurn(input)
   }
@@ -361,13 +368,16 @@ export async function runOnboardingTurn(input: {
     return handleConfirmationTurn(input)
   }
 
-  // Deterministic batch collection: identity fields all at once, then project
-  // details all at once. Missing items are re-requested separately.
+  // Deterministic collection: the configured question steps (identity first,
+  // then project) are asked ONE at a time in position order. current_step
+  // stays IDENTITY_BATCH_STEP / PROJECT_BATCH_STEP throughout so every
+  // customer reply routes back here and the controller path is never mixed
+  // into the deterministic loop.
   if (
     conversation.current_step === IDENTITY_BATCH_STEP ||
     conversation.current_step === PROJECT_BATCH_STEP
   ) {
-    return handleBatchCollectionTurn(input)
+    return handleBatchCollectionTurn({ ...input, flow })
   }
 
   if (conversation.ai_suppressed || conversation.conversation_status === 'human_active') {
@@ -398,6 +408,7 @@ export async function runOnboardingTurn(input: {
       isReturning,
       lastInteractionAt,
       isNewConversation,
+      requiredFields: flow.requiredFields,
     })
     const decision = await decideConversationTurn(decideInput)
 
@@ -407,7 +418,7 @@ export async function runOnboardingTurn(input: {
         conversationId: conversation.id,
         reason: decision.handoff_reason,
       })
-      return runLegacyFallbackTurn(input)
+      return runLegacyFallbackTurn({ ...input, flow })
     }
 
     return applyControllerDecision({
@@ -418,6 +429,7 @@ export async function runOnboardingTurn(input: {
       isReturning,
       decideInput,
       decision,
+      requiredFields: flow.requiredFields,
     })
   } catch (e) {
     await logAgent('onboarding_controller_error', null, 'error', {
@@ -445,7 +457,7 @@ export async function runOnboardingTurn(input: {
         conversationId: conversation.id,
       }
     }
-    return runLegacyFallbackTurn(input)
+    return runLegacyFallbackTurn({ ...input, flow })
   }
 }
 
@@ -457,8 +469,9 @@ async function applyControllerDecision(input: {
   isReturning: boolean
   decideInput: DecideTurnInput
   decision: ConversationDecision
+  requiredFields: readonly string[]
 }): Promise<OnboardingTurnResult> {
-  const { conversation, phone, providerMessageId, settings, isReturning, decideInput, decision } = input
+  const { conversation, phone, providerMessageId, settings, isReturning, decideInput, decision, requiredFields } = input
 
   const collected = decideInput.collectedData
   const declined = decideInput.declinedFields
@@ -503,7 +516,7 @@ async function applyControllerDecision(input: {
   nextCollected.next_action = scoreResult.recommendedNextAction
 
 
-  const nextMissingField = REQUIRED_FIELDS.find((f) => !nextCollected[f]) || null
+  const nextMissingField = requiredFields.find((f) => !nextCollected[f]) || null
   const effectiveQuestion =
     decision.next_question ??
     extractQuestionFromReply(decision.reply) ??
@@ -511,7 +524,7 @@ async function applyControllerDecision(input: {
 
   // Onboarding fields finished → before account creation we require explicit
   // confirmation of identity details, plus a structured address if missing.
-  if (isOnboardingComplete(nextCollected) && !conversation.support_mode_at && !isIdentityConfirmed(conversation)) {
+  if (isOnboardingComplete(nextCollected, requiredFields) && !conversation.support_mode_at && !isIdentityConfirmed(conversation)) {
     // If the customer hasn't provided a detailed address yet, ask for it now.
     if (!nextCollected.address) {
       const addressQuestion = 'Thank you! Before we create your account, please provide your detailed address (street, area, etc.).'
@@ -822,29 +835,10 @@ async function handleCollectAddressTurn(input: {
 }
 
 // ── Deterministic batch collection turn ──
-// Requests ALL customer identity fields in one message, then ALL project
-// detail fields in one message. Anything missing is re-requested separately
-// until each phase completes, then the identity summary is sent for YES/NO
-// confirmation (which triggers account + project creation on completion).
-
-const FIELD_LABELS: Record<string, string> = {
-  name: 'full name',
-  phone: 'phone number',
-  email: 'email address',
-  location: 'city',
-  address: 'delivery address',
-  contact_reason: 'reason for contact',
-  kitchen_type: 'kitchen layout',
-  kitchen_size: 'kitchen size',
-  construction_stage: 'construction stage',
-  budget: 'budget',
-  material_preference: 'preferred material',
-  timeline: 'timeline',
-}
-
-function listMissingFields(fields: string[]): string {
-  return fields.map((f) => FIELD_LABELS[f] ?? f.replace(/_/g, ' ')).join(', ')
-}
+// Requests the CUSTOMER_IDENTITY_FIELDS one at a time, then the
+// PROJECT_DETAIL_FIELDS one at a time. The next missing field is asked on
+// every turn until each phase completes, then the identity summary is sent for
+// YES/NO confirmation (which triggers account + project creation on completion).
 
 async function extractBatchFields(input: {
   phone: string
@@ -894,6 +888,7 @@ async function answerFirstMessage(input: {
   isReturning: boolean
   lastInteractionAt: string | null
   isNewConversation: boolean
+  requiredFields: readonly string[]
 }): Promise<string | null> {
   try {
     const decideInput = await buildControllerContext({
@@ -904,6 +899,7 @@ async function answerFirstMessage(input: {
       isReturning: input.isReturning,
       lastInteractionAt: input.lastInteractionAt,
       isNewConversation: input.isNewConversation,
+      requiredFields: input.requiredFields,
     })
     const decision = await decideConversationTurn(decideInput)
     if (isControllerFailure(decision)) return null
@@ -924,93 +920,143 @@ async function handleBatchCollectionTurn(input: {
   isReturning: boolean
   lastInteractionAt: string | null
   isNewConversation: boolean
+  flow: OnboardingFlow
 }): Promise<OnboardingTurnResult> {
-  const { conversation, phone, incomingText, providerMessageId, settings, isReturning, lastInteractionAt, isNewConversation } = input
+  const { conversation, phone, incomingText, providerMessageId, settings, isReturning, lastInteractionAt, isNewConversation, flow } = input
   const step = conversation.current_step
   const now = new Date().toISOString()
 
   const baseCollected = (conversation.collected_data ?? {}) as Record<string, unknown>
   const collected = await extractBatchFields({ phone, incomingText, collected: baseCollected, settings })
 
-  const identityMissing = CUSTOMER_IDENTITY_FIELDS.filter((f) => !collected[f])
-  const projectMissing = PROJECT_DETAIL_FIELDS.filter((f) => !collected[f])
-  const identityComplete = identityMissing.length === 0
-  const projectComplete = projectMissing.length === 0
+  const askedSteps = Array.isArray(collected._asked_steps)
+    ? collected._asked_steps.map(String)
+    : []
+
+  // A step is pending when it still needs attention:
+  //  - extractable fields: the value has not been captured yet;
+  //  - custom (informational) steps: it has not been asked once yet.
+  const isPending = (s: QuestionStep) =>
+    isExtractableField(s.fieldKey)
+      ? !collected[s.fieldKey]
+      : !askedSteps.includes(s.id) && !askedSteps.includes(s.fieldKey)
+
+  const identityPending = flow.identitySteps.filter(isPending)
+  const projectPending = flow.projectSteps.filter(isPending)
+
+  const isProjectPhase = step === PROJECT_BATCH_STEP
+  const isFirstTurn = step === IDENTITY_BATCH_STEP && (conversation.turn_count ?? 0) === 0
 
   let reply: string
   let nextStep: string | null
   let skipEndQueue = false
   let firstTurnBatchQueued = false
 
-  if (identityComplete && projectComplete) {
+  const recordAsked = (s: QuestionStep) => {
+    if (!isExtractableField(s.fieldKey) && !askedSteps.includes(s.fieldKey)) {
+      collected._asked_steps = [...askedSteps, s.fieldKey]
+    }
+  }
+
+  if (
+    identityPending.length === 0 &&
+    projectPending.length === 0 &&
+    isOnboardingComplete(collected, flow.requiredFields)
+  ) {
+    // All required details collected and every step resolved → confirm.
     reply = buildIdentitySummary(collected)
     nextStep = CONFIRM_STEP
-    } else if (step === IDENTITY_BATCH_STEP) {
-      if (identityComplete) {
-        reply = PROJECT_BATCH_QUESTION
-        nextStep = PROJECT_BATCH_STEP
-      } else if ((conversation.turn_count ?? 0) === 0) {
-      // FIRST turn — the customer receives TWO separate messages:
-      //   1. the configured welcome message (plain, verbatim — never modified),
-      //   2. then the full identity batch question.
-      // If no welcome is configured, only the batch question is sent.
-      if (settings.auto_reply_enabled) {
-        const welcome = settings.welcome_message
-        if (welcome?.trim()) {
-          await queueOutgoingMessage(phone, welcome, true, {
+  } else if (isFirstTurn) {
+    // FIRST identity turn — the customer receives TWO separate messages:
+    //   1. the configured welcome message (plain, verbatim — never modified),
+    //   2. then the first step question — the first configured identity step
+    //      unless ALL identity fields were already volunteered, in which case
+    //      the first configured project step is asked instead.
+    // If no welcome is configured, only the step question is sent.
+    const identityRequired = flow.identitySteps
+      .filter((s) => isExtractableField(s.fieldKey))
+      .map((s) => s.fieldKey)
+    const identityDone =
+      identityRequired.length > 0 &&
+      identityRequired.every((f) => Boolean(collected[f]))
+    const next = identityDone
+      ? (flow.projectSteps[0] ?? flow.identitySteps[0])
+      : (flow.identitySteps[0] ?? flow.projectSteps[0])
+    recordAsked(next)
+    const firstQuestion = next.question
+    if (settings.auto_reply_enabled) {
+      const welcome = settings.welcome_message
+      if (welcome?.trim()) {
+        await queueOutgoingMessage(phone, welcome, true, {
+          conversationId: conversation.id,
+          sourceInboundMessageId: providerMessageId ?? null,
+          decisionAction: 'reply',
+          postSendState: 'waiting_customer',
+        })
+      }
+      // Content-based dedup key (no sourceInboundMessageId) so the field
+      // question never collides with the welcome message above.
+      firstTurnBatchQueued = Boolean(await queueOutgoingMessage(phone, firstQuestion, true, {
+        conversationId: conversation.id,
+        decisionAction: 'reply',
+        postSendState: 'waiting_customer',
+      }))
+
+      // After the welcome + first question, also answer the question the
+      // customer actually asked on their very first message.
+      if (looksLikeQuestion(incomingText)) {
+        const answer = await answerFirstMessage({
+          conversation,
+          phone,
+          incomingText,
+          settings,
+          isReturning,
+          lastInteractionAt,
+          isNewConversation,
+          requiredFields: flow.requiredFields,
+        })
+        if (answer) {
+          await queueOutgoingMessage(phone, answer, true, {
             conversationId: conversation.id,
-            sourceInboundMessageId: providerMessageId ?? null,
             decisionAction: 'reply',
             postSendState: 'waiting_customer',
           })
         }
-        // Content-based dedup key (no sourceInboundMessageId) so the batch
-        // question never collides with the welcome message above.
-        firstTurnBatchQueued = Boolean(await queueOutgoingMessage(phone, IDENTITY_BATCH_QUESTION, true, {
-          conversationId: conversation.id,
-          decisionAction: 'reply',
-          postSendState: 'waiting_customer',
-        }))
-
-        // After the welcome + batch question, also answer the question the
-        // customer actually asked on their very first message.
-        if (looksLikeQuestion(incomingText)) {
-          const answer = await answerFirstMessage({
-            conversation,
-            phone,
-            incomingText,
-            settings,
-            isReturning,
-            lastInteractionAt,
-            isNewConversation,
-          })
-          if (answer) {
-            await queueOutgoingMessage(phone, answer, true, {
-              conversationId: conversation.id,
-              decisionAction: 'reply',
-              postSendState: 'waiting_customer',
-            })
-          }
-        }
       }
-      reply = IDENTITY_BATCH_QUESTION
-      nextStep = IDENTITY_BATCH_STEP
-      skipEndQueue = true
-    } else {
-      // Never repeat the full batch question. Later turns always use a short
-      // nudge listing exactly what is still missing (even if that is all items).
-      reply = `I still need your ${listMissingFields(identityMissing)}. Please share them.`
-      nextStep = IDENTITY_BATCH_STEP
     }
-  } else {
-    if (projectComplete) {
+    reply = firstQuestion
+    nextStep = next.phase === 'identity' ? IDENTITY_BATCH_STEP : PROJECT_BATCH_STEP
+    skipEndQueue = true
+  } else if (!isProjectPhase && identityPending.length > 0) {
+    // Later identity turn — ask the NEXT pending identity step. current_step
+    // remains IDENTITY_BATCH_STEP so the deterministic loop keeps ownership.
+    const next = identityPending[0]
+    recordAsked(next)
+    reply = next.question
+    nextStep = IDENTITY_BATCH_STEP
+  } else if (!isProjectPhase) {
+    // Identity steps all done — open the project phase with the FIRST pending
+    // project step. Every later project turn routes back here.
+    const next = projectPending[0]
+    if (next) {
+      recordAsked(next)
+      reply = next.question
+      nextStep = PROJECT_BATCH_STEP
+    } else {
       reply = buildIdentitySummary(collected)
       nextStep = CONFIRM_STEP
-    } else {
-      // Same rule as identity: no repeated full project question, only a short
-      // nudge listing what is still missing.
-      reply = `I still need your ${listMissingFields(projectMissing)}. Please share them.`
+    }
+  } else {
+    // Later project turn — ask the NEXT pending project step. current_step
+    // stays PROJECT_BATCH_STEP so the deterministic loop keeps ownership.
+    const next = projectPending[0]
+    if (next) {
+      recordAsked(next)
+      reply = next.question
       nextStep = PROJECT_BATCH_STEP
+    } else {
+      reply = buildIdentitySummary(collected)
+      nextStep = CONFIRM_STEP
     }
   }
 
@@ -1167,8 +1213,10 @@ async function runLegacyFallbackTurn(input: {
   isNewConversation: boolean
   conversationCreated: boolean
   genuinelyNew: boolean
+  flow?: OnboardingFlow
 }): Promise<OnboardingTurnResult> {
   const { conversation, phone, incomingText, providerMessageId, settings, conversationCreated, genuinelyNew } = input
+  const requiredFields = (input.flow?.requiredFields ?? REQUIRED_FIELDS) as readonly string[]
 
   let collected = (conversation.collected_data ?? {}) as Record<string, unknown>
 
@@ -1198,7 +1246,7 @@ async function runLegacyFallbackTurn(input: {
     }
   }
 
-  const missing = REQUIRED_FIELDS.filter((f) => !collected[f])
+  const missing = requiredFields.filter((f) => !collected[f])
 
   if (missing.length === 0 && !conversation.support_mode_at) {
     return {

@@ -133,18 +133,17 @@ beforeEach(() => {
   })
 })
 
-describe('batch collection — customer identity', () => {
-  it('sends the plain welcome message FIRST, then the batch question as a second message', async () => {
+describe('sequential identity collection — one field at a time', () => {
+  it('sends the plain welcome message FIRST, then the first identity field question', async () => {
     callAgentAI.mockResolvedValue({ content: '{}' })
 
     const result = await turn()
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('Full name')
-    expect(result.reply).toContain('Delivery address')
+    expect(result.reply).toContain('full name')
 
     // Two separate outbound messages: welcome (with source inbound id) then the
-    // batch question (content-based dedup, no source inbound id).
+    // first field question (content-based dedup, no source inbound id).
     expect(queueOutgoingMessage).toHaveBeenCalledTimes(2)
     expect(queueOutgoingMessage).toHaveBeenNthCalledWith(
       1,
@@ -156,7 +155,7 @@ describe('batch collection — customer identity', () => {
     expect(queueOutgoingMessage).toHaveBeenNthCalledWith(
       2,
       '+94760000000',
-      expect.stringContaining('Full name'),
+      expect.stringContaining('full name'),
       true,
       expect.objectContaining({ conversationId: 'conv-1' })
     )
@@ -166,7 +165,7 @@ describe('batch collection — customer identity', () => {
     expect(lastUpdate()?.current_step).toBe('collect_identity')
   })
 
-  it('answers the customer first question AFTER welcome + batch question', async () => {
+  it('answers the customer first question AFTER welcome + first field question', async () => {
     callAgentAI.mockResolvedValue({ content: '{}' })
     decideConversationTurn.mockResolvedValue({
       action: 'reply',
@@ -183,17 +182,17 @@ describe('batch collection — customer identity', () => {
     const result = await turn({ incomingText: 'How much does a kitchen cost?' })
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('Full name')
+    expect(result.reply).toContain('full name')
 
-    // Three outbound messages in order: welcome → batch question → answer.
+    // Three outbound messages in order: welcome → first field question → answer.
     expect(queueOutgoingMessage).toHaveBeenCalledTimes(3)
     expect(queueOutgoingMessage).toHaveBeenNthCalledWith(1, '+94760000000', 'Welcome to LUXUS ELEMENTE!', true, expect.anything())
-    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(2, '+94760000000', expect.stringContaining('Full name'), true, expect.anything())
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(2, '+94760000000', expect.stringContaining('full name'), true, expect.anything())
     expect(queueOutgoingMessage).toHaveBeenNthCalledWith(3, '+94760000000', expect.stringContaining('costs between'), true, expect.anything())
     expect(decideConversationTurn).toHaveBeenCalledTimes(1)
   })
 
-  it('asks for ALL identity details in ONE message when no welcome is configured', async () => {
+  it('asks the FIRST identity field when no welcome is configured', async () => {
     callAgentAI.mockResolvedValue({ content: '{}' })
 
     const result = await turn({
@@ -201,15 +200,14 @@ describe('batch collection — customer identity', () => {
     })
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('Full name')
-    expect(result.reply).toContain('Phone number')
-    expect(result.reply).toContain('Email address')
-    expect(result.reply).toContain('City')
-    expect(result.reply).toContain('Delivery address')
+    expect(result.reply).toContain('full name')
+    expect(result.reply).not.toContain('Phone number')
+    expect(result.reply).not.toContain('Delivery address')
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(1)
     expect(lastUpdate()?.current_step).toBe('collect_identity')
   })
 
-  it('never repeats the full batch question on later turns — only a short nudge', async () => {
+  it('on later turns asks ONLY the next missing identity field, in order', async () => {
     callAgentAI.mockResolvedValue({ content: '{}' })
 
     const result = await turn({
@@ -217,20 +215,33 @@ describe('batch collection — customer identity', () => {
     })
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('I still need')
-    expect(result.reply).not.toContain('Please share the following details in one message')
-    expect(result.reply).not.toContain('1. Full name')
     expect(result.reply).toContain('full name')
-    expect(result.reply).toContain('phone number')
-    expect(result.reply).toContain('email address')
-    expect(result.reply).toContain('city')
-    expect(result.reply).toContain('delivery address')
+    expect(result.reply).not.toContain('Please share the following details in one message')
     expect(queueOutgoingMessage).toHaveBeenCalledWith(
       '+94760000000',
-      expect.stringContaining('I still need'),
+      expect.stringContaining('full name'),
       true,
       expect.objectContaining({ conversationId: 'conv-1' })
     )
+    expect(lastUpdate()?.current_step).toBe('collect_identity')
+  })
+
+  it('advances one field at a time: after name is collected it asks for phone', async () => {
+    callAgentAI.mockResolvedValue({
+      content: JSON.stringify({ name: 'Kaveesha' }),
+    })
+
+    const result = await turn({
+      conversation: baseConversation({
+        turn_count: 1,
+        collected_data: { name: 'Kaveesha' },
+      }),
+    })
+
+    expect(result.complete).toBe(false)
+    expect(result.reply).toContain('phone number')
+    expect(result.reply).not.toContain('full name')
+    expect(result.reply).not.toContain('email')
     expect(lastUpdate()?.current_step).toBe('collect_identity')
   })
 
@@ -249,16 +260,15 @@ describe('batch collection — customer identity', () => {
     const result = await turn()
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('Kitchen layout')
-    expect(result.reply).toContain('kitchen size')
-    expect(result.reply).toContain('Budget')
-    expect(result.reply).toContain('material')
-    expect(result.reply).toContain('timeline')
+    // Identity done → the FIRST project field question is asked.
+    expect(result.reply).toContain('kitchen layout')
+    expect(result.reply).not.toContain('kitchen size')
+    expect(result.reply).not.toContain('Budget')
     expect(lastUpdate()?.current_step).toBe('collect_project')
     expect((lastUpdate()?.collected_data as Record<string, unknown>)?.name).toBe('Kaveesha')
   })
 
-  it('first turn sends welcome + full batch question even when some fields are volunteered', async () => {
+  it('first turn sends welcome + first field question even when some fields are volunteered', async () => {
     callAgentAI.mockResolvedValue({
       content: JSON.stringify({ name: 'Kaveesha' }),
     })
@@ -266,10 +276,10 @@ describe('batch collection — customer identity', () => {
     const result = await turn()
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('Full name')
+    expect(result.reply).toContain('full name')
     expect(result.reply).not.toContain('I still need')
 
-    // welcome first, then the full batch question
+    // welcome first, then the first field question
     expect(queueOutgoingMessage).toHaveBeenCalledTimes(2)
     expect(queueOutgoingMessage).toHaveBeenNthCalledWith(
       1,
@@ -281,7 +291,7 @@ describe('batch collection — customer identity', () => {
     expect(queueOutgoingMessage).toHaveBeenNthCalledWith(
       2,
       '+94760000000',
-      expect.stringContaining('Delivery address'),
+      expect.stringContaining('full name'),
       true,
       expect.anything()
     )
@@ -289,7 +299,7 @@ describe('batch collection — customer identity', () => {
     expect(lastUpdate()?.current_step).toBe('collect_identity')
   })
 
-  it('requests ONLY the missing identity items separately on later turns', async () => {
+  it('asks for the next missing identity field specifically on later turns', async () => {
     callAgentAI.mockResolvedValue({
       content: JSON.stringify({ name: 'Kaveesha' }),
     })
@@ -297,17 +307,16 @@ describe('batch collection — customer identity', () => {
     const result = await turn({
       conversation: baseConversation({
         turn_count: 2,
+        collected_data: { name: 'Kaveesha' },
       }),
     })
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('I still need')
     expect(result.reply).toContain('phone number')
-    expect(result.reply).toContain('email address')
-    expect(result.reply).toContain('city')
-    expect(result.reply).toContain('delivery address')
-    expect(result.reply).toContain('reason for contact')
-    expect(result.reply).not.toContain('full name')
+    expect(result.reply).not.toContain('email')
+    expect(result.reply).not.toContain('city')
+    expect(result.reply).not.toContain('delivery address')
+    expect(result.reply).not.toContain('reason for contact')
     expect(lastUpdate()?.current_step).toBe('collect_identity')
   })
 })
@@ -333,12 +342,12 @@ describe('batch collection — project details', () => {
     })
 
     expect(result.complete).toBe(false)
-    expect(result.reply).toContain('I still need')
+    // kitchen_type is already collected → the next missing project field is asked.
     expect(result.reply).toContain('kitchen size')
-    expect(result.reply).toContain('construction stage')
-    expect(result.reply).toContain('budget')
-    expect(result.reply).toContain('preferred material')
-    expect(result.reply).toContain('timeline')
+    expect(result.reply).not.toContain('construction stage')
+    expect(result.reply).not.toContain('budget')
+    expect(result.reply).not.toContain('preferred material')
+    expect(result.reply).not.toContain('timeline')
     expect(lastUpdate()?.current_step).toBe('collect_project')
   })
 
@@ -413,5 +422,135 @@ describe('batch collection — confirmation', () => {
     expect(result.nextState).toBe('completed')
     expect(conversation.identity_confirmed_at).toBeTruthy()
     expect(conversation.current_step).toBeNull()
+  })
+})
+
+describe('configurable question steps (ai_agent_questions)', () => {
+  const identityRows = [
+    { id: 'q-name', field_key: 'name', phase: 'identity', position: 0, question: 'May I have your full name?', enabled: true },
+    { id: 'q-phone', field_key: 'phone', phase: 'identity', position: 1, question: 'What is your phone number?', enabled: true },
+    { id: 'q-email', field_key: 'email', phase: 'identity', position: 2, question: 'What is your email?', enabled: true },
+    { id: 'q-location', field_key: 'location', phase: 'identity', position: 3, question: 'What is your city?', enabled: true },
+    { id: 'q-address', field_key: 'address', phase: 'identity', position: 4, question: 'What is your address?', enabled: true },
+    { id: 'q-contact', field_key: 'contact_reason', phase: 'identity', position: 5, question: 'What is your main priority?', enabled: true },
+  ]
+
+  it('asks a custom informational step once and then advances to the next step', async () => {
+    mockDb.on('ai_agent_questions', () => ({
+      data: [
+        { id: 'q-name', field_key: 'name', phase: 'identity', position: 0, question: 'May I have your full name?', enabled: true },
+        { id: 'q-ref', field_key: 'referral_source', phase: 'identity', position: 1, question: 'How did you hear about us?', enabled: true },
+        { id: 'q-ktype', field_key: 'kitchen_type', phase: 'project', position: 0, question: 'What kitchen layout?', enabled: true },
+        { id: 'q-budget', field_key: 'budget', phase: 'project', position: 1, question: 'What is your budget?', enabled: true },
+      ],
+      error: null,
+    }))
+    callAgentAI.mockResolvedValue({ content: '{}' })
+
+    // First turn: welcome + first configured identity step.
+    const first = await turn()
+    expect(first.complete).toBe(false)
+    expect(first.reply).toContain('full name')
+
+    // Second turn: name collected → the custom step is asked (not extracted).
+    const second = await turn({
+      conversation: baseConversation({
+        turn_count: 1,
+        current_step: 'collect_identity',
+        collected_data: { name: 'Kaveesha' },
+      }),
+    })
+    expect(second.reply).toContain('hear about us')
+    expect(lastUpdate()?.current_step).toBe('collect_identity')
+    const asked = (lastUpdate()?.collected_data as Record<string, unknown>)?._asked_steps
+    expect(asked).toContain('referral_source')
+
+    // Third turn: custom step was already asked → open the project phase.
+    const third = await turn({
+      conversation: baseConversation({
+        turn_count: 2,
+        current_step: 'collect_identity',
+        collected_data: { name: 'Kaveesha', _asked_steps: ['referral_source'] },
+      }),
+    })
+    expect(third.reply).toContain('kitchen layout')
+    expect(lastUpdate()?.current_step).toBe('collect_project')
+  })
+
+  it('does not require a disabled step field for completion (delete makes it optional)', async () => {
+    mockDb.on('ai_agent_questions', () => ({
+      data: [
+        ...identityRows,
+        { id: 'q-ktype', field_key: 'kitchen_type', phase: 'project', position: 0, question: 'What kitchen layout?', enabled: true },
+        { id: 'q-ksize', field_key: 'kitchen_size', phase: 'project', position: 1, question: 'What is your kitchen size?', enabled: false },
+        { id: 'q-stage', field_key: 'construction_stage', phase: 'project', position: 2, question: 'What stage?', enabled: true },
+        { id: 'q-budget', field_key: 'budget', phase: 'project', position: 3, question: 'What is your budget?', enabled: true },
+        { id: 'q-material', field_key: 'material_preference', phase: 'project', position: 4, question: 'Material?', enabled: true },
+        { id: 'q-timeline', field_key: 'timeline', phase: 'project', position: 5, question: 'Timeline?', enabled: true },
+      ],
+      error: null,
+    }))
+    callAgentAI.mockResolvedValue({ content: '{}' })
+
+    const result = await turn({
+      conversation: baseConversation({
+        current_step: 'collect_project',
+        collected_data: {
+          name: 'Kaveesha',
+          phone: '+94760000000',
+          email: 'k@example.com',
+          location: 'Matara',
+          address: 'No36, Beach Road',
+          contact_reason: 'Price',
+          kitchen_type: 'L-Shape',
+          construction_stage: 'Ready',
+          budget: 500000,
+          material_preference: 'HPL',
+          timeline: '2 months',
+        },
+      }),
+    })
+
+    // kitchen_size is disabled → it is NOT asked and NOT required, so the
+    // flow proceeds straight to the confirmation summary.
+    expect(result.complete).toBe(false)
+    expect(result.reply).toContain('Please confirm your details')
+    expect(result.reply).not.toContain('kitchen size')
+    expect(lastUpdate()?.current_step).toBe('confirm_identity')
+  })
+
+  it('asks the next enabled step when a disabled step is skipped', async () => {
+    mockDb.on('ai_agent_questions', () => ({
+      data: [
+        ...identityRows,
+        { id: 'q-ktype', field_key: 'kitchen_type', phase: 'project', position: 0, question: 'What kitchen layout?', enabled: true },
+        { id: 'q-ksize', field_key: 'kitchen_size', phase: 'project', position: 1, question: 'What is your kitchen size?', enabled: false },
+        { id: 'q-budget', field_key: 'budget', phase: 'project', position: 2, question: 'What is your budget?', enabled: true },
+      ],
+      error: null,
+    }))
+    callAgentAI.mockResolvedValue({ content: '{}' })
+
+    const result = await turn({
+      conversation: baseConversation({
+        turn_count: 6,
+        current_step: 'collect_project',
+        collected_data: {
+          name: 'Kaveesha',
+          phone: '+94760000000',
+          email: 'k@example.com',
+          location: 'Matara',
+          address: 'No36, Beach Road',
+          contact_reason: 'Price',
+          kitchen_type: 'L-Shape',
+        },
+      }),
+    })
+
+    // kitchen_size is disabled → the agent skips straight to budget.
+    expect(result.complete).toBe(false)
+    expect(result.reply).toContain('budget')
+    expect(result.reply).not.toContain('kitchen size')
+    expect(lastUpdate()?.current_step).toBe('collect_project')
   })
 })

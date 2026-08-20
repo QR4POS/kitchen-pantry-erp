@@ -29,6 +29,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { useToast } from "@/hooks/use-toast"
+import OnboardingQuestionsEditor from "@/components/ai-agent/onboarding-questions-editor"
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -638,6 +639,11 @@ export default function AIAgentSettingsPage() {
           </Card>
         </motion.div>
       </div>
+
+      {/* Onboarding questions editor */}
+      <motion.div variants={itemVariants}>
+        <OnboardingQuestionsEditor />
+      </motion.div>
 
       {/* Test tool */}
       <motion.div variants={itemVariants}>

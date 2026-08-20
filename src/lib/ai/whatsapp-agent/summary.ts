@@ -15,6 +15,7 @@ export interface ConversationSummaryInput {
   kitchenType?: string | null
   kitchenSize?: string | null
   constructionStage?: string | null
+  height?: string | null
   location?: string | null
   province?: string | null
   insideWesternProvince?: boolean | null
@@ -43,6 +44,7 @@ export async function saveConversationSummary(input: ConversationSummaryInput): 
   if (input.kitchenType) parts.push(`Layout: ${input.kitchenType}`)
   if (input.kitchenSize) parts.push(`Size: ${input.kitchenSize}`)
   if (input.constructionStage) parts.push(`Stage: ${input.constructionStage}`)
+  if (input.height) parts.push(`Wall height: ${input.height}`)
   if (input.location) {
     const locationLine = input.province
       ? `Location: ${input.location} (${input.province}${input.insideWesternProvince ? ', Western Province' : ''})`

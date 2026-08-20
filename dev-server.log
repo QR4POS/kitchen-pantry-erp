@@ -1,0 +1,146 @@
+
+> kitchen-pantry-erp@0.1.0 dev
+> next dev
+
+▲ Next.js 16.2.12 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.56.1:3000
+- Environments: .env.local
+✓ Ready in 452ms
+⚠ The "middleware" file convention is deprecated. Please use "proxy" instead. Learn more: https://nextjs.org/docs/messages/middleware-to-proxy
+
+ GET /api/whatsapp/health 401 in 1067ms (next.js: 1041ms, application-code: 26ms)
+ GET /api/whatsapp/health 401 in 11ms (next.js: 5ms, application-code: 6ms)
+ GET /api/whatsapp/health 401 in 18ms (next.js: 12ms, application-code: 6ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /login 200 in 1681ms (next.js: 136ms, proxy.ts: 1009ms, application-code: 535ms)
+ GET /api/whatsapp/health 401 in 9ms (next.js: 4ms, application-code: 5ms)
+ GET /meta.json 404 in 453ms (next.js: 28ms, proxy.ts: 390ms, application-code: 35ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 4ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 11ms (next.js: 4ms, application-code: 7ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 9ms (next.js: 4ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 10ms (next.js: 6ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 9ms (next.js: 6ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 4ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 4ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 4ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 4ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 6ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 6ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 4ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 6ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 9ms (next.js: 5ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 14ms (next.js: 7ms, application-code: 7ms)
+ GET /api/whatsapp/health 401 in 9ms (next.js: 4ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ POST /login 200 in 2.3s (next.js: 7ms, proxy.ts: 795ms, application-code: 1470ms)
+  └─ ƒ loginAction({}) in 1078ms src/lib/auth/actions.ts
+ GET /admin/dashboard 200 in 841ms (next.js: 70ms, proxy.ts: 380ms, application-code: 392ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 10ms (next.js: 4ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /admin/settings/ai-agent 200 in 510ms (next.js: 30ms, proxy.ts: 461ms, application-code: 19ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp-worker/status 200 in 1191ms (next.js: 90ms, application-code: 1101ms)
+ GET /api/ai-agent/logs?limit=20 200 in 1205ms (next.js: 45ms, proxy.ts: 611ms, application-code: 550ms)
+ GET /api/ai-agent/settings 200 in 1433ms (next.js: 41ms, proxy.ts: 450ms, application-code: 942ms)
+ GET /api/whatsapp-worker/status 200 in 759ms (next.js: 4ms, application-code: 755ms)
+ GET /api/ai-agent/logs?limit=20 200 in 860ms (next.js: 3ms, proxy.ts: 370ms, application-code: 486ms)
+ GET /api/ai-agent/status 200 in 2.6s (next.js: 91ms, proxy.ts: 608ms, application-code: 1918ms)
+ GET /api/whatsapp-worker/status 200 in 669ms (next.js: 2ms, application-code: 667ms)
+ GET /api/whatsapp/health 401 in 6ms (next.js: 3ms, application-code: 3ms)
+ GET /api/ai-agent/logs?limit=20 200 in 925ms (next.js: 4ms, proxy.ts: 404ms, application-code: 517ms)
+ GET /api/ai-agent/settings 200 in 1571ms (next.js: 3ms, proxy.ts: 522ms, application-code: 1046ms)
+ GET /api/whatsapp-worker/status 200 in 870ms (next.js: 2ms, application-code: 867ms)
+ GET /api/ai-agent/logs?limit=20 200 in 893ms (next.js: 5ms, proxy.ts: 299ms, application-code: 590ms)
+ GET /api/ai-agent/settings 200 in 1288ms (next.js: 4ms, proxy.ts: 305ms, application-code: 980ms)
+ GET /api/ai-agent/status 200 in 1933ms (next.js: 5ms, proxy.ts: 373ms, application-code: 1555ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/ai-agent/settings 200 in 1442ms (next.js: 4ms, proxy.ts: 418ms, application-code: 1020ms)
+ GET /api/whatsapp-worker/status 200 in 725ms (next.js: 3ms, application-code: 722ms)
+ GET /api/ai-agent/status 200 in 2.1s (next.js: 3ms, proxy.ts: 400ms, application-code: 1734ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/ai-agent/conversations 200 in 839ms (next.js: 35ms, proxy.ts: 311ms, application-code: 493ms)
+ GET /api/ai-agent/questions 200 in 953ms (next.js: 74ms, proxy.ts: 408ms, application-code: 472ms)
+ GET /api/ai-agent/status 200 in 1845ms (next.js: 3ms, proxy.ts: 299ms, application-code: 1542ms)
+ GET /api/ai-agent/questions 200 in 1014ms (next.js: 4ms, proxy.ts: 498ms, application-code: 513ms)
+ GET /api/whatsapp/health 401 in 10ms (next.js: 6ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp-worker/status 200 in 663ms (next.js: 3ms, application-code: 659ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp/health 401 in 8ms (next.js: 3ms, application-code: 5ms)
+ GET /api/whatsapp-worker/status 200 in 766ms (next.js: 4ms, application-code: 762ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 9ms (next.js: 3ms, application-code: 6ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp-worker/status 200 in 807ms (next.js: 3ms, application-code: 804ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp-worker/status 200 in 906ms (next.js: 3ms, application-code: 904ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 3ms, application-code: 4ms)
+ GET /api/whatsapp/health 401 in 7ms (next.js: 4ms, application-code: 4ms)
+ GET /api/whatsapp-worker/status 200 in 1291ms (next.js: 3ms, application-code: 1287ms)
+ GET /api/whatsapp-worker/status 200 in 782ms (next.js: 3ms, application-code: 779ms)
+[INGEST] provider_message_id=none phone=+94779990001 message="hello, i want a kitchen quote"
+[ingest] incoming received phone=+94779990001 message="hello, i want a kitchen quote"
+ GET /api/whatsapp-worker/status 200 in 687ms (next.js: 3ms, application-code: 683ms)
+[QUEUE_CREATE] outgoing_id=d58c5793-aee5-4ae1-bd34-e399ac8f3710 source_inbound_message_id=none conversation_id=7f288257-e191-4e45-924c-db06630e5689
+[QUEUE_CREATE] outgoing_id=738dbe48-7959-44cb-9d77-c215b55b8848 source_inbound_message_id=none conversation_id=7f288257-e191-4e45-924c-db06630e5689
+ GET /api/whatsapp-worker/status 200 in 739ms (next.js: 3ms, application-code: 736ms)
+ GET /api/whatsapp-worker/status 200 in 776ms (next.js: 3ms, application-code: 773ms)
+ GET /api/whatsapp-worker/status 200 in 744ms (next.js: 3ms, application-code: 741ms)
+ GET /api/whatsapp-worker/status 200 in 833ms (next.js: 3ms, application-code: 830ms)
+[QUEUE_CREATE] outgoing_id=f6c462e8-8aa8-4243-acb6-9d31f6b96f9b source_inbound_message_id=none conversation_id=7f288257-e191-4e45-924c-db06630e5689
+ POST /api/whatsapp/ingest 200 in 26.5s (next.js: 64ms, application-code: 26.4s)
+ GET /api/whatsapp-worker/status 200 in 1151ms (next.js: 3ms, application-code: 1148ms)
+ GET /api/whatsapp-worker/status 200 in 1262ms (next.js: 5ms, application-code: 1258ms)
+ GET /api/whatsapp-worker/status 200 in 787ms (next.js: 4ms, application-code: 783ms)
+ GET /api/whatsapp-worker/status 200 in 1100ms (next.js: 3ms, application-code: 1097ms)
+ GET /api/whatsapp-worker/status 200 in 837ms (next.js: 4ms, application-code: 833ms)
+[INGEST] provider_message_id=none phone=+94779990002 message="who won the cricket match yesterday"
+[ingest] incoming received phone=+94779990002 message="who won the cricket match yesterday"
+ GET /api/whatsapp-worker/status 200 in 665ms (next.js: 3ms, application-code: 662ms)
+[QUEUE_CREATE] outgoing_id=3f836fdf-3817-42b5-806c-3bdfc1089c62 source_inbound_message_id=none conversation_id=none
+ POST /api/whatsapp/ingest 200 in 6.0s (next.js: 2ms, application-code: 5.9s)
+ GET /api/whatsapp-worker/status 200 in 749ms (next.js: 3ms, application-code: 746ms)
+ GET /api/whatsapp-worker/status 200 in 793ms (next.js: 3ms, application-code: 790ms)
+ GET /api/whatsapp-worker/status 200 in 948ms (next.js: 3ms, application-code: 945ms)
+ GET /api/whatsapp-worker/status 200 in 774ms (next.js: 4ms, application-code: 770ms)
+ GET /api/whatsapp-worker/status 200 in 863ms (next.js: 3ms, application-code: 860ms)
+ GET /api/whatsapp-worker/status 200 in 815ms (next.js: 3ms, application-code: 812ms)
+ GET /api/whatsapp-worker/status 200 in 1110ms (next.js: 3ms, application-code: 1108ms)
+ GET /api/whatsapp-worker/status 200 in 1144ms (next.js: 3ms, application-code: 1141ms)
+ GET /api/whatsapp-worker/status 200 in 935ms (next.js: 4ms, application-code: 932ms)
+ GET /api/whatsapp/outbox 200 in 955ms (next.js: 77ms, application-code: 878ms)
+[INGEST] provider_message_id=msg_fallback_94760544773_fe136d7a phone=94760544773 message="Hello"
+[ingest] incoming received phone=+94760544773 message="Hello"
+[QUEUE_CREATE] outgoing_id=78942be7-c411-4dce-b439-dc665f03f749 source_inbound_message_id=msg_fallback_94760544773_fe136d7a conversation_id=25ded5d4-2546-4a1d-b14e-3d19ad48cb19
+[QUEUE_CREATE] outgoing_id=84897fd2-6103-44ae-96f7-bea48efa519f source_inbound_message_id=none conversation_id=25ded5d4-2546-4a1d-b14e-3d19ad48cb19
+ POST /api/whatsapp/ingest 200 in 8.8s (next.js: 3ms, application-code: 8.8s)
+[INGEST] provider_message_id=msg_fallback_94718453020_a9d1143c phone=94718453020 message="Hi"
+[ingest] incoming received phone=+94718453020 message="Hi"
+ GET /api/whatsapp-worker/status 200 in 694ms (next.js: 3ms, application-code: 691ms)
+[QUEUE_CREATE] outgoing_id=9c78111a-9dd7-435d-9775-80296e181686 source_inbound_message_id=msg_fallback_94718453020_a9d1143c conversation_id=44aaf9d4-f019-4c45-95ac-3139b3032349
+[QUEUE_CREATE] outgoing_id=52101426-720c-45bb-94ef-2fa96d8aab1a source_inbound_message_id=none conversation_id=44aaf9d4-f019-4c45-95ac-3139b3032349
+ POST /api/whatsapp/ingest 200 in 6.8s (next.js: 2ms, application-code: 6.8s)
+[?25h
