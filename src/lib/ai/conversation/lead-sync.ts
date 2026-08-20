@@ -20,11 +20,22 @@ function leadPatch(collected: Record<string, unknown>): Record<string, unknown> 
   if (collected.name) patch.name = String(collected.name).trim()
   if (collected.email) patch.email = String(collected.email).trim()
   if (collected.location) patch.location = String(collected.location).trim()
+  if (collected.contact_reason) patch.contact_reason = String(collected.contact_reason).trim()
   if (collected.kitchen_type) patch.kitchen_type = String(collected.kitchen_type).trim()
   if (collected.kitchen_size) patch.kitchen_size = String(collected.kitchen_size).trim()
+  if (collected.construction_stage) patch.construction_stage = String(collected.construction_stage).trim()
   const budget = parseBudget(collected.budget)
   if (budget !== null) patch.budget = budget
   if (collected.material_preference) patch.material_preference = String(collected.material_preference).trim()
+  if (collected.town) patch.town = String(collected.town).trim()
+  if (collected.district) patch.district = String(collected.district).trim()
+  if (collected.province) patch.province = String(collected.province).trim()
+  if (typeof collected.visit_fee_accepted === 'boolean') patch.visit_fee_accepted = collected.visit_fee_accepted
+  if (typeof collected.visit_fee_paid === 'boolean') patch.visit_fee_paid = collected.visit_fee_paid
+  if (typeof collected.lead_score === 'number') patch.lead_score = collected.lead_score
+  if (collected.lead_category) patch.lead_category = String(collected.lead_category).trim()
+  if (collected.next_action) patch.next_action = String(collected.next_action).trim()
+  if (collected.follow_up_date) patch.follow_up_date = String(collected.follow_up_date).trim()
   return patch
 }
 
@@ -65,10 +76,21 @@ export async function upsertLeadForCollected(input: {
       name: collected.name ? String(collected.name).trim() : null,
       email: collected.email ? String(collected.email).trim() : null,
       location: collected.location ? String(collected.location).trim() : null,
+      contact_reason: collected.contact_reason ? String(collected.contact_reason).trim() : null,
       kitchen_type: collected.kitchen_type ? String(collected.kitchen_type).trim() : null,
       kitchen_size: collected.kitchen_size ? String(collected.kitchen_size).trim() : null,
+      construction_stage: collected.construction_stage ? String(collected.construction_stage).trim() : null,
       budget: parseBudget(collected.budget),
       material_preference: collected.material_preference ? String(collected.material_preference).trim() : null,
+      province: collected.province ? String(collected.province).trim() : null,
+      district: collected.district ? String(collected.district).trim() : null,
+      town: collected.town ? String(collected.town).trim() : null,
+      visit_fee_accepted: collected.visit_fee_accepted === true,
+      visit_fee_paid: collected.visit_fee_paid === true,
+      lead_score: typeof collected.lead_score === 'number' ? collected.lead_score : null,
+      lead_category: collected.lead_category ? String(collected.lead_category).trim() : null,
+      next_action: collected.next_action ? String(collected.next_action).trim() : null,
+      follow_up_date: collected.follow_up_date ? String(collected.follow_up_date).trim() : null,
       status,
       collected_data: collected,
       conversation_id: conversationId,

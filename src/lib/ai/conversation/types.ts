@@ -18,12 +18,14 @@ export const CUSTOMER_IDENTITY_FIELDS = [
   'email',
   'location',
   'address',
+  'contact_reason',
 ] as const
 
 // Project brief fields — collected AFTER identity, all in one message.
 export const PROJECT_DETAIL_FIELDS = [
   'kitchen_type',
   'kitchen_size',
+  'construction_stage',
   'budget',
   'material_preference',
   'timeline',
@@ -42,8 +44,10 @@ export const FIELD_QUESTIONS: Record<string, string> = {
   phone: 'What is your phone number?',
   location: 'What is your city or location?',
   address: 'What is your project / delivery address? (street, area, etc.)',
+  contact_reason: 'To guide you properly, is your main priority the design, approximate price, aluminium durability, or arranging a measurement?',
   kitchen_type: 'What kitchen layout do you prefer? (Straight, L-Shape, U-Shape, Island, Parallel)',
   kitchen_size: 'What is your kitchen size? (approx length x width in feet)',
+  construction_stage: 'What stage is the property currently at? (planning, construction, plastering, tiling, ready for measurement, or renovating an existing kitchen)',
   budget: 'What is your approximate budget in Rupees?',
   material_preference: 'Do you have a material preference? (MDF, Plywood, Acrylic, Melamine, HPL, PVC)',
   timeline: 'When do you need your kitchen ready? (e.g. in 2 months, or a target date)',
@@ -61,14 +65,16 @@ export const IDENTITY_BATCH_QUESTION = `Please share the following details in on
 2. Phone number
 3. Email address
 4. City
-5. Delivery address`
+5. Delivery address
+6. What brings you to us? (design, price, durability, measurement, or something else)`
 
 export const PROJECT_BATCH_QUESTION = `Thank you! Now, so we can prepare your kitchen project, please share the following in one message:
 1. Kitchen layout (Straight, L-Shape, U-Shape, Island, Parallel)
 2. Approximate kitchen size (length x width in feet)
-3. Budget (in Rupees)
-4. Preferred material (MDF, Plywood, Acrylic, Melamine, HPL, PVC)
-5. When you need it ready (timeline)`
+3. Property stage (planning, construction, tiling, ready for measurement, renovating)
+4. Budget (in Rupees)
+5. Preferred material (MDF, Plywood, Acrylic, Melamine, HPL, PVC)
+6. When you need it ready (timeline)`
 
 // ── One-time onboarding confirmation (sent exactly once) ──
 export const ONBOARDING_CONFIRMATION = `Thank you!
@@ -143,6 +149,33 @@ export function safeParseJson(text: string): Record<string, unknown> | null {
   }
 }
 
+export const CONTACT_REASONS = [
+  'Ready to purchase',
+  'Price discovery',
+  'Design inspiration',
+  'Material comparison',
+  'Aluminium durability',
+  'Water/termite/moisture problem',
+  'New-house construction',
+  'Kitchen renovation',
+  'Competitor quotation comparison',
+  'Referral',
+  'Advertisement response',
+  'Future planning',
+  'Measurement request',
+  'After-sales/service',
+] as const
+
+export const CONSTRUCTION_STAGES = [
+  'Planning/design',
+  'Construction underway',
+  'Plastering completed',
+  'Tiling underway',
+  'Tiling completed',
+  'Ready for measurement',
+  'Renovating existing kitchen',
+] as const
+
 export function cleanExtracted(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const key of REQUIRED_FIELDS) {
@@ -150,6 +183,10 @@ export function cleanExtracted(obj: Record<string, unknown>): Record<string, unk
     if (v !== undefined && v !== null && String(v).trim() !== '') out[key] = String(v).trim()
   }
   if (typeof obj.budget === 'number') out.budget = obj.budget
+  // Preserve normalized location sub-fields if present
+  for (const key of ['town', 'district', 'province', 'inside_western_province', 'visit_fee_accepted', 'visit_fee_paid', 'lead_score', 'lead_category', 'next_action', 'follow_up_date'] as const) {
+    if (key in obj) out[key] = obj[key]
+  }
   return out
 }
 

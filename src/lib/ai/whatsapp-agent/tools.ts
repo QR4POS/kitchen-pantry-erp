@@ -94,10 +94,21 @@ export async function createLead(input: {
   name?: string | null
   email?: string | null
   location?: string | null
+  contact_reason?: string | null
   kitchen_type?: string | null
   kitchen_size?: string | null
+  construction_stage?: string | null
   budget?: number | null
   material_preference?: string | null
+  province?: string | null
+  district?: string | null
+  town?: string | null
+  visit_fee_accepted?: boolean
+  visit_fee_paid?: boolean
+  lead_score?: number | null
+  lead_category?: string | null
+  next_action?: string | null
+  follow_up_date?: string | null
   status: LeadStatus
   collected_data?: Record<string, unknown>
   images?: unknown[]
@@ -111,10 +122,21 @@ export async function createLead(input: {
       name: input.name ?? null,
       email: input.email ?? null,
       location: input.location ?? null,
+      contact_reason: input.contact_reason ?? null,
       kitchen_type: input.kitchen_type ?? null,
       kitchen_size: input.kitchen_size ?? null,
+      construction_stage: input.construction_stage ?? null,
       budget: input.budget ?? null,
       material_preference: input.material_preference ?? null,
+      province: input.province ?? null,
+      district: input.district ?? null,
+      town: input.town ?? null,
+      visit_fee_accepted: input.visit_fee_accepted ?? false,
+      visit_fee_paid: input.visit_fee_paid ?? false,
+      lead_score: input.lead_score ?? null,
+      lead_category: input.lead_category ?? null,
+      next_action: input.next_action ?? null,
+      follow_up_date: input.follow_up_date ?? null,
       status: input.status,
       collected_data: input.collected_data ?? {},
       images: input.images ?? [],

@@ -18,6 +18,10 @@ function toCustomerPatch(collected: Record<string, unknown>): Record<string, unk
   if (collected.name) patch.full_name = String(collected.name).trim()
   if (collected.email) patch.email = String(collected.email).trim()
   if (collected.location) patch.city = String(collected.location).trim()
+  if (collected.address) patch.address = String(collected.address).trim()
+  if (collected.province) patch.province = String(collected.province).trim()
+  if (collected.district) patch.district = String(collected.district).trim()
+  if (collected.town) patch.town = String(collected.town).trim()
   return patch
 }
 

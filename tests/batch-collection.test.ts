@@ -63,6 +63,11 @@ function baseConversation(overrides: Partial<AiConversationRow> = {}): AiConvers
     language_code: null,
     turn_count: 0,
     misunderstanding_count: 0,
+    summary: null,
+    lead_score: null,
+    lead_category: null,
+    next_action: null,
+    follow_up_date: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     ...overrides,
@@ -83,6 +88,7 @@ const settings: AiAgentSettingsRow = {
   welcome_message: 'Welcome to LUXUS ELEMENTE!',
   conversation_controller_enabled: false,
   human_handoff_enabled: true,
+  business_config: {},
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 }
@@ -236,6 +242,7 @@ describe('batch collection — customer identity', () => {
         email: 'kaveesha@example.com',
         location: 'Matara',
         address: 'No36, Beach Road, Matara',
+        contact_reason: 'Price discovery',
       }),
     })
 
@@ -299,6 +306,7 @@ describe('batch collection — customer identity', () => {
     expect(result.reply).toContain('email address')
     expect(result.reply).toContain('city')
     expect(result.reply).toContain('delivery address')
+    expect(result.reply).toContain('reason for contact')
     expect(result.reply).not.toContain('full name')
     expect(lastUpdate()?.current_step).toBe('collect_identity')
   })
@@ -319,6 +327,7 @@ describe('batch collection — project details', () => {
           email: 'kaveesha@example.com',
           location: 'Matara',
           address: 'No36, Beach Road, Matara',
+          contact_reason: 'Price discovery',
         },
       }),
     })
@@ -326,6 +335,7 @@ describe('batch collection — project details', () => {
     expect(result.complete).toBe(false)
     expect(result.reply).toContain('I still need')
     expect(result.reply).toContain('kitchen size')
+    expect(result.reply).toContain('construction stage')
     expect(result.reply).toContain('budget')
     expect(result.reply).toContain('preferred material')
     expect(result.reply).toContain('timeline')
@@ -337,6 +347,7 @@ describe('batch collection — project details', () => {
       content: JSON.stringify({
         kitchen_type: 'L-Shape',
         kitchen_size: '10x12',
+        construction_stage: 'Ready for measurement',
         budget: 650000,
         material_preference: 'HPL',
         timeline: 'in 2 months',
@@ -352,6 +363,7 @@ describe('batch collection — project details', () => {
           email: 'kaveesha@example.com',
           location: 'Matara',
           address: 'No36, Beach Road, Matara',
+          contact_reason: 'Price discovery',
         },
       }),
     })
@@ -374,8 +386,10 @@ describe('batch collection — confirmation', () => {
         email: 'kaveesha@example.com',
         location: 'Matara',
         address: 'No36, Beach Road, Matara',
+        contact_reason: 'Price discovery',
         kitchen_type: 'L-Shape',
         kitchen_size: '10x12',
+        construction_stage: 'Ready for measurement',
         budget: 650000,
         material_preference: 'HPL',
         timeline: 'in 2 months',

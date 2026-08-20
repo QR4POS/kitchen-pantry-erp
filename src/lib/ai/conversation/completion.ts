@@ -21,6 +21,9 @@ import { logAgent } from '@/lib/ai/agent-provider'
 import { provisionCustomerAccount } from '@/lib/customer-management/provisionCustomerAccount'
 import { upsertLeadForCollected } from './lead-sync'
 import { ONBOARDING_CONFIRMATION, findAdminId, parseBudget, type CompletionResult } from './types'
+import { getBusinessConfig } from '@/lib/ai/whatsapp-agent/business-config'
+import { saveConversationSummary } from '@/lib/ai/whatsapp-agent/summary'
+import { calculateLeadScore } from '@/lib/ai/whatsapp-agent/scoring'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
 
 export async function runOnboardingCompletion(input: {
@@ -307,6 +310,104 @@ export async function runOnboardingCompletion(input: {
     }
   }
 
+  // 6. Save conversation summary + lead score to ERP
+  const scoreResult = calculateLeadScore({
+    location: collected.location as string | null,
+    province: collected.province as string | null,
+    insideWesternProvince: collected.inside_western_province as boolean | null,
+    photosReceived: Boolean(collected.photos_received),
+    constructionStage: collected.construction_stage as string | null,
+    timeline: collected.timeline as string | null,
+    budget: typeof collected.budget === 'number' ? collected.budget : null,
+    visitFeeAccepted: collected.visit_fee_accepted === true,
+    visitFeePaid: collected.visit_fee_paid === true,
+    kitchenType: collected.kitchen_type as string | null,
+    kitchenSize: collected.kitchen_size as string | null,
+    materialPreference: collected.material_preference as string | null,
+    contactReason: collected.contact_reason as string | null,
+    returningCustomer: Boolean(conversation.customer_id),
+  })
+
+  const businessConfig = await getBusinessConfig().catch(() => null)
+
+  // Outside primary service province → request visit fee and hand off to sales
+  const isOutsideServiceArea = collected.inside_western_province === false
+  const needsVisitFee = isOutsideServiceArea && collected.visit_fee_paid !== true
+  const nextAction = needsVisitFee
+    ? 'Request LKR 5,000 site-visit fee and hand off to sales'
+    : scoreResult.recommendedNextAction
+  const followUpDate = scoreResult.category === 'nurture'
+    ? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
+    : null
+
+  await saveConversationSummary({
+    conversationId: conversation.id,
+    customerName: collected.name as string | null,
+    phoneNumber: phone,
+    contactReason: collected.contact_reason as string | null,
+    kitchenType: collected.kitchen_type as string | null,
+    kitchenSize: collected.kitchen_size as string | null,
+    constructionStage: collected.construction_stage as string | null,
+    location: collected.location as string | null,
+    province: collected.province as string | null,
+    insideWesternProvince: collected.inside_western_province as boolean | null,
+    budget: typeof collected.budget === 'number' ? collected.budget : null,
+    materialPreference: collected.material_preference as string | null,
+    timeline: collected.timeline as string | null,
+    photosReceived: Boolean(collected.photos_received),
+    leadScore: scoreResult.score,
+    leadCategory: scoreResult.category,
+    visitFeeAccepted: collected.visit_fee_accepted === true,
+    visitFeePaid: collected.visit_fee_paid === true,
+    nextAction,
+    followUpDate,
+  })
+
+  // 7. Western Province visit-fee branch
+  if (needsVisitFee && settings.auto_reply_enabled) {
+    const visitFeeMessage = `Thank you for confirming your details.
+
+Because your project is outside our primary Western Province service area, a site visit for measurement requires a LKR ${businessConfig?.visitFeeAmount ?? 5000} advance payment to confirm the appointment.
+
+Our sales team will contact you shortly with the payment link and to schedule the visit.`
+
+    const visitFeeQueued = Boolean(await queueOutgoingMessage(phone, visitFeeMessage, true, {
+      conversationId: conversation.id,
+      sourceInboundMessageId: providerMessageId ?? null,
+      decisionAction: 'handoff',
+      postSendState: 'human_active',
+    }))
+
+    await admin
+      .from('ai_conversations')
+      .update({
+        conversation_status: 'human_active',
+        ai_suppressed: true,
+        handoff_reason: 'Outside Western Province — visit fee required before measurement',
+        next_action: nextAction,
+        follow_up_date: followUpDate,
+        updated_at: now,
+      })
+      .eq('id', conversation.id)
+
+    await logAgent('onboarding_completed', null, 'success', {
+      phone,
+      conversationId: conversation.id,
+      customerId: customerId ?? null,
+      leadId: lead?.id ?? null,
+      confirmationQueued: visitFeeQueued,
+      visitFeeRequired: true,
+      credentialsSent: provisionResult?.password ? true : false,
+    })
+
+    return {
+      customerId: customerId ?? conversation.customer_id,
+      leadId: lead?.id ?? null,
+      projectId,
+      confirmationQueued: visitFeeQueued,
+    }
+  }
+
   await logAgent('onboarding_completed', null, 'success', {
     phone,
     conversationId: conversation.id,
@@ -492,10 +593,13 @@ async function maybeCreateOnboardingProject(input: {
 
 function descriptionFromCollected(collected: Record<string, unknown>): string | null {
   const parts = [
+    collected.contact_reason ? `Reason: ${String(collected.contact_reason)}` : null,
     collected.kitchen_type ? `Layout: ${String(collected.kitchen_type)}` : null,
     collected.kitchen_size ? `Size: ${String(collected.kitchen_size)}` : null,
-    collected.budget ? `Budget: ${typeof collected.budget === 'number' ? `Rs. ${collected.budget.toLocaleString()}` : String(collected.budget)}` : null,
+    collected.construction_stage ? `Stage: ${String(collected.construction_stage)}` : null,
+    collected.budget ? `Budget: ${typeof collected.budget === 'number' ? `LKR ${collected.budget.toLocaleString()}` : String(collected.budget)}` : null,
     collected.material_preference ? `Material: ${String(collected.material_preference)}` : null,
+    collected.province ? `Province: ${String(collected.province)}` : null,
   ].filter(Boolean)
   return parts.length > 0 ? parts.join('\n') : null
 }

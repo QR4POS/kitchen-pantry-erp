@@ -48,6 +48,8 @@ import {
   isOnboardingComplete,
   type OnboardingTurnResult,
 } from './types'
+import { normalizeLocation } from '@/lib/ai/whatsapp-agent/location'
+import { calculateLeadScore } from '@/lib/ai/whatsapp-agent/scoring'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
 
 const ADDRESS_STEP = 'collect_address'
@@ -63,26 +65,52 @@ function buildIdentitySummary(collected: Record<string, unknown>): string {
   const phone = collected.phone ?? ''
   const city = collected.location ?? ''
   const address = collected.address ?? ''
+  const contactReason = collected.contact_reason ?? ''
   const kitchenType = collected.kitchen_type ?? ''
   const kitchenSize = collected.kitchen_size ?? ''
-  const budget = typeof collected.budget === 'number' ? `Rs. ${collected.budget.toLocaleString()}` : (collected.budget ?? '')
+  const constructionStage = collected.construction_stage ?? ''
+  const budget = typeof collected.budget === 'number' ? `LKR ${collected.budget.toLocaleString()}` : (collected.budget ?? '')
   const material = collected.material_preference ?? ''
   const timeline = collected.timeline ?? ''
+  const province = collected.province ?? ''
+  const visitFeeLine = collected.inside_western_province === false
+    ? `\nNote: A site visit outside Western Province requires a LKR 5,000 visit fee before measurement.`
+    : ''
   return `Please confirm your details:
 
 Name: ${name}
 Email: ${email}
 Phone: ${phone}
-City: ${city}
+City: ${city}${province ? ` (${province})` : ''}
 Address: ${address}
+Reason for contact: ${contactReason}
 
 Kitchen layout: ${kitchenType}
 Kitchen size: ${kitchenSize}
+Construction stage: ${constructionStage}
 Budget: ${budget}
 Material: ${material}
-Timeline: ${timeline}
+Timeline: ${timeline}${visitFeeLine}
 
 Reply YES to confirm, or tell me what to change.`
+}
+
+function enrichCollectedData(collected: Record<string, unknown>): Record<string, unknown> {
+  // Normalize location whenever location changes
+  const rawLocation = collected.location as string | undefined
+  if (rawLocation && typeof rawLocation === 'string') {
+    const normalized = normalizeLocation(rawLocation)
+    if (normalized.town) collected.town = normalized.town
+    if (normalized.district) collected.district = normalized.district
+    if (normalized.province) collected.province = normalized.province
+    collected.inside_western_province = normalized.insideWesternProvince
+  }
+
+  // Ensure visit fee booleans exist
+  if (typeof collected.visit_fee_accepted !== 'boolean') collected.visit_fee_accepted = false
+  if (typeof collected.visit_fee_paid !== 'boolean') collected.visit_fee_paid = false
+
+  return collected
 }
 
 function parseConfirmationReply(text: string): 'yes' | 'no' | 'unclear' {
@@ -154,7 +182,10 @@ ${missing.join(', ')}`
 }
 
 function buildExtractionPrompt(collected: Record<string, unknown>): string {
-  return `Extract kitchen customer details from the conversation. Return ONLY a JSON object (no markdown, no code fences) with these keys where found: name, email, phone, location, address, kitchen_type, kitchen_size, budget (number), material_preference, timeline. Merge with existing data — do not overwrite provided existing values unless the conversation clearly gives a new value.
+  return `Extract kitchen customer details from the conversation. Return ONLY a JSON object (no markdown, no code fences) with these keys where found: name, email, phone, location, address, contact_reason, kitchen_type, kitchen_size, construction_stage, budget (number), material_preference, timeline. Merge with existing data — do not overwrite provided existing values unless the conversation clearly gives a new value.
+
+For contact_reason, infer from the user's first message: design, price, durability, measurement, new house, renovation, service, or general enquiry.
+For construction_stage, infer: planning/design, construction underway, plastering completed, tiling underway, tiling completed, ready for measurement, or renovating existing kitchen.
 
 Existing collected data:
 ${JSON.stringify(collected)}
@@ -174,14 +205,16 @@ function computeSlotPriority(
   const relatedKeywords: Record<string, RegExp> = {
     kitchen_type: /straight|l.?shape|u.?shape|island|parallel/i,
     kitchen_size: /\d+\s*(x|by|×)\s*\d+|\d+\s*(sq|square|ft|feet)/i,
+    construction_stage: /planning|design|construction|plastering|tiling|renovation|renovating|measurement|measure/i,
     budget: /budget|price|cost|rupees|rs\.?\s*\d+|\d+\s*(k|lakh|lac)/i,
     material_preference: /material|mdf|plywood|acrylic|melamine|hpl|pvc/i,
-    location: /colombo|gampaha|kandy|negombo|moratuwa|dehiwala|nugegoda|kotte|jaffna|galle|matara|kurunegala/i,
+    location: /colombo|gampaha|kandy|negombo|moratuwa|dehiwala|nugegoda|kotte|jaffna|galle|matara|kurunegala|kalutara|panadura/i,
     address: /(street|road|lane|no\.?\s*\d|house|home|flat|apt|colony|villa)/i,
     timeline: /(week|month|day|soon|urgent|asap|ready|complete|install|date|june|july|august|september|october|november|december|january|february|march|april|may)/i,
     name: /my name is|i'?m |i am/i,
     email: /@/,
     phone: /^[\d\s+-]{7,15}$/,
+    contact_reason: /design|price|cost|budget|durability|measurement|renovation|new house|service|warranty|material/i,
   }
 
   const prerequisites: Record<string, string[]> = {
@@ -446,6 +479,29 @@ async function applyControllerDecision(input: {
     const fallbackEmail = extractEmailFromText(decideInput.incomingText)
     if (fallbackEmail) nextCollected.email = fallbackEmail
   }
+
+  // Enrich with normalized location, scoring, and follow-up metadata
+  enrichCollectedData(nextCollected)
+  const scoreResult = calculateLeadScore({
+    location: nextCollected.location as string | null,
+    province: nextCollected.province as string | null,
+    insideWesternProvince: nextCollected.inside_western_province as boolean | null,
+    photosReceived: Boolean(nextCollected.photos_received),
+    constructionStage: nextCollected.construction_stage as string | null,
+    timeline: nextCollected.timeline as string | null,
+    budget: typeof nextCollected.budget === 'number' ? nextCollected.budget : null,
+    visitFeeAccepted: nextCollected.visit_fee_accepted === true,
+    visitFeePaid: nextCollected.visit_fee_paid === true,
+    kitchenType: nextCollected.kitchen_type as string | null,
+    kitchenSize: nextCollected.kitchen_size as string | null,
+    materialPreference: nextCollected.material_preference as string | null,
+    contactReason: nextCollected.contact_reason as string | null,
+    returningCustomer: isReturning,
+  })
+  nextCollected.lead_score = scoreResult.score
+  nextCollected.lead_category = scoreResult.category
+  nextCollected.next_action = scoreResult.recommendedNextAction
+
 
   const nextMissingField = REQUIRED_FIELDS.find((f) => !nextCollected[f]) || null
   const effectiveQuestion =
@@ -777,8 +833,10 @@ const FIELD_LABELS: Record<string, string> = {
   email: 'email address',
   location: 'city',
   address: 'delivery address',
+  contact_reason: 'reason for contact',
   kitchen_type: 'kitchen layout',
   kitchen_size: 'kitchen size',
+  construction_stage: 'construction stage',
   budget: 'budget',
   material_preference: 'preferred material',
   timeline: 'timeline',

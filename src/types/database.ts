@@ -38,6 +38,9 @@ export interface CustomerRow {
   email: string | null
   address: string | null
   city: string | null
+  province: string | null
+  district: string | null
+  town: string | null
   notes: string | null
   created_by: string | null
   created_at: string
@@ -292,6 +295,7 @@ export interface AiAgentSettingsRow {
   welcome_message: string | null
   conversation_controller_enabled: boolean
   human_handoff_enabled: boolean
+  business_config: Record<string, unknown> | null
   created_at: string
   updated_at: string
 }
@@ -316,6 +320,11 @@ export interface AiConversationRow {
   language_code: string | null
   turn_count: number
   misunderstanding_count: number
+  summary: string | null
+  lead_score: number | null
+  lead_category: string | null
+  next_action: string | null
+  follow_up_date: string | null
   created_at: string
   updated_at: string
 }
@@ -393,8 +402,10 @@ export interface LeadRow {
   name: string | null
   email: string | null
   location: string | null
+  contact_reason: string | null
   kitchen_type: string | null
   kitchen_size: string | null
+  construction_stage: string | null
   budget: number | null
   material_preference: string | null
   status: LeadStatus
@@ -403,6 +414,16 @@ export interface LeadRow {
   images: unknown[] | null
   conversation_id: string | null
   assigned_admin: string | null
+  province: string | null
+  district: string | null
+  town: string | null
+  visit_fee_accepted: boolean
+  visit_fee_paid: boolean
+  lead_score: number | null
+  lead_category: string | null
+  next_action: string | null
+  follow_up_date: string | null
+  summary: string | null
   created_at: string
   updated_at: string
 }

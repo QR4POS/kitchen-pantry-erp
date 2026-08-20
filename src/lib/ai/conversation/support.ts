@@ -28,6 +28,7 @@ import {
 } from '@/lib/ai/whatsapp-agent/provider-fallback'
 import { applyLeadUpdates } from './lead-sync'
 import { applyCustomerUpdates } from './customer-sync'
+import { normalizeLocation } from '@/lib/ai/whatsapp-agent/location'
 import { safeParseJson, findAdminId, type SupportTurnResult } from './types'
 import type { AiAgentSettingsRow, AiConversationRow } from '@/types/database'
 import type { KnowledgeChunk, Recommendation } from '@/lib/ai/knowledge/types'
@@ -83,6 +84,15 @@ async function applySupportUpdates(
     filtered[k] = String(v).trim()
   }
   if (Object.keys(filtered).length === 0) return
+
+  // Normalize location if updated
+  if (filtered.location && typeof filtered.location === 'string') {
+    const normalized = normalizeLocation(filtered.location)
+    if (normalized.town) filtered.town = normalized.town
+    if (normalized.district) filtered.district = normalized.district
+    if (normalized.province) filtered.province = normalized.province
+    filtered.inside_western_province = normalized.insideWesternProvince
+  }
 
   const merged = { ...(conversation.collected_data ?? {}), ...filtered }
   await createAdminClient()

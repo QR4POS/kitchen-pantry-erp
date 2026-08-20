@@ -17,10 +17,14 @@ const fieldNameSchema = z.enum([
   'email',
   'phone',
   'location',
+  'address',
+  'contact_reason',
   'kitchen_type',
   'kitchen_size',
+  'construction_stage',
   'budget',
   'material_preference',
+  'timeline',
   'photos_expected',
 ])
 
@@ -188,7 +192,10 @@ BUSINESS RULES
 - Never ask for a field already collected or declined.
 - The WhatsApp phone number is already known; do not ask to confirm it.
 - Email, exact budget and exact material are optional.
-- Collect the customer's full project address (street, area, etc.) and their target timeline (when the kitchen needs to be ready); both are required for automated customer and project creation.
+- Capture why the customer contacted you (contact_reason) early: design, price, durability, measurement, new house, renovation, service, etc.
+- Collect the full project address (street, area, city) and the current construction stage (planning, construction, plastering, tiling, ready for measurement, renovating existing kitchen).
+- Collect the target timeline (when the kitchen needs to be ready); timeline and address are required for automated customer and project creation.
+- If the location is outside Western Province (e.g. Kandy, Galle, Jaffna), mention that a site-visit measurement requires a LKR 5,000 advance payment and hand off to sales for scheduling — do not invent prices beyond that.
 - If the customer says later, tomorrow, busy, or will send photos: acknowledge once and set paused.
 - If the customer asks for a person, complains, disputes payment, or needs an urgent project decision: hand off.
 - If a short acknowledgement needs no response: action=wait and reply=null.
