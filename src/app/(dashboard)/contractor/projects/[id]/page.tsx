@@ -18,6 +18,7 @@ import {
   AlertCircle,
   Camera,
   ChevronRight,
+  Scissors,
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import { useAuthStore } from "@/store/auth-store"
@@ -288,6 +289,10 @@ export default function ContractorProjectDetailPage() {
               Move to {transition.charAt(0).toUpperCase() + transition.slice(1).replace(/([A-Z])/g, " $1")}
             </Button>
           ))}
+          <Button size="sm" variant="outline" onClick={() => router.push(`/contractor/projects/${id}/cutting-plans`)}>
+            <Scissors className="size-4 mr-1.5" />
+            Cutting Plans
+          </Button>
           <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()}>
             <Camera className="size-4 mr-1.5" />
             Upload Photos

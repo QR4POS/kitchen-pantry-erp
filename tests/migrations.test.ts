@@ -36,4 +36,12 @@ describe('migrations', () => {
     expect(sql).toMatch(/whatsapp_agent_enabled = true/)
     expect(sql).toMatch(/ALTER COLUMN whatsapp_agent_enabled SET DEFAULT true/)
   })
+
+  it('adds an isolated cutting_plan_documents table', () => {
+    const sql = migration('20260820091511_add_cutting_plan_documents.sql')
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS cutting_plan_documents/)
+    expect(sql).toMatch(/project_id.*REFERENCES projects/)
+    expect(sql).toMatch(/design_hash/)
+    expect(sql).toMatch(/ENABLE ROW LEVEL SECURITY/)
+  })
 })

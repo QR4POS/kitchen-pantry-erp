@@ -6,9 +6,10 @@ import { motion } from "framer-motion"
 import {
   ArrowLeft, Edit, Trash2, Building, Phone, Mail, MapPin,
   Ruler, Home, HardDrive, Percent, CreditCard, DollarSign,
-  Clock, Image, FileText, Upload, MessageSquare, Send,
+  Clock, Image,   FileText, Upload, MessageSquare, Send,
   Paperclip, Download, Calendar, Users, TrendingUp,
   MoreVertical, Plus, Check, X, Loader2, AlertCircle,
+  Scissors,
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import { formatCurrency, formatDate } from "@/lib/auth/helpers"
@@ -404,6 +405,10 @@ export default function ProjectDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => router.push(`/admin/projects/${id}/cutting-plan`)}>
+            <Scissors className="size-4 mr-2" />
+            Cutting Plan
+          </Button>
           <Button variant="outline" size="sm">
             <Edit className="size-4 mr-2" />
             Edit

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useMemo } from "react"
+import { useRouter } from "next/navigation"
 import { motion } from "framer-motion"
 import { FolderKanban, Plus } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
@@ -79,6 +80,7 @@ export default function ProjectsPage() {
   const [form, setForm] = useState(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
 
+  const router = useRouter()
   const supabase = createClient()
 
   useEffect(() => {
@@ -224,6 +226,7 @@ export default function ProjectsPage() {
               columns={columns}
               data={filtered}
               loading={loading}
+              onRowClick={(project) => router.push(`/admin/projects/${project.id}`)}
               emptyMessage="No projects found"
             />
           </CardContent>

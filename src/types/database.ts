@@ -205,6 +205,21 @@ export interface ProjectFileRow {
   created_at: string
 }
 
+export interface CuttingPlanDocumentRow {
+  id: string
+  project_id: string
+  version: number
+  storage_path: string
+  file_name: string
+  status: string
+  generated_at: string
+  generated_by: string | null
+  design_hash: string
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
 export interface ConversationRow {
   id: string
   project_id: string
@@ -409,6 +424,7 @@ export interface Database {
       contractor_payments: { Row: ContractorPaymentRow; Insert: Partial<ContractorPaymentRow>; Update: Partial<ContractorPaymentRow> }
       inventory_transactions: { Row: InventoryTransactionRow; Insert: Partial<InventoryTransactionRow>; Update: Partial<InventoryTransactionRow> }
       project_files: { Row: ProjectFileRow; Insert: Partial<ProjectFileRow>; Update: Partial<ProjectFileRow> }
+      cutting_plan_documents: { Row: CuttingPlanDocumentRow; Insert: Partial<CuttingPlanDocumentRow>; Update: Partial<CuttingPlanDocumentRow> }
       conversations: { Row: ConversationRow; Insert: Partial<ConversationRow>; Update: Partial<ConversationRow> }
       messages: { Row: MessageRow; Insert: Partial<MessageRow>; Update: Partial<MessageRow> }
       notifications: { Row: NotificationRow; Insert: Partial<NotificationRow>; Update: Partial<NotificationRow> }
