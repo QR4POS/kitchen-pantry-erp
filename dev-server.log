@@ -411,3 +411,149 @@
  POST /api/cutting-plans 200 in 1881ms (next.js: 9ms, proxy.ts: 280ms, application-code: 1592ms)
  GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 969ms (next.js: 4ms, proxy.ts: 294ms, application-code: 671ms)
  GET /api/cutting-plans/cbe80c49-ac84-42ba-ba9c-144b859cecc7?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 1395ms (next.js: 127ms, proxy.ts: 278ms, application-code: 990ms)
+ GET /admin/contractors 200 in 1672ms (next.js: 141ms, proxy.ts: 1502ms, application-code: 29ms)
+ GET /admin/customers 200 in 443ms (next.js: 98ms, proxy.ts: 321ms, application-code: 25ms)
+ GET /admin/customers 200 in 4.0s (next.js: 85ms, proxy.ts: 3.5s, application-code: 426ms)
+ GET /admin/customers 200 in 971ms (next.js: 6ms, proxy.ts: 676ms, application-code: 289ms)
+ GET /admin/customers 200 in 721ms (next.js: 7ms, proxy.ts: 440ms, application-code: 274ms)
+ GET /admin/customers 200 in 727ms (next.js: 12ms, proxy.ts: 406ms, application-code: 309ms)
+ GET /admin/customers 200 in 746ms (next.js: 5ms, proxy.ts: 417ms, application-code: 324ms)
+ GET /admin/customers 200 in 925ms (next.js: 6ms, proxy.ts: 463ms, application-code: 456ms)
+ GET /admin/customers 200 in 3.1s (next.js: 75ms, proxy.ts: 3.0s, application-code: 41ms)
+ GET /admin/customers 200 in 315ms (next.js: 6ms, proxy.ts: 281ms, application-code: 28ms)
+ GET /admin/customers 200 in 1103ms (next.js: 72ms, proxy.ts: 988ms, application-code: 44ms)
+ GET /admin/customers 200 in 1822ms (next.js: 5ms, proxy.ts: 1793ms, application-code: 24ms)
+ GET /admin/customers 200 in 3.9s (next.js: 78ms, proxy.ts: 3.7s, application-code: 58ms)
+ GET /admin/customers 200 in 527ms (next.js: 6ms, proxy.ts: 492ms, application-code: 29ms)
+ GET /admin/customers 200 in 5.5s (next.js: 85ms, proxy.ts: 5.4s, application-code: 49ms)
+ GET /admin/customers 200 in 340ms (next.js: 7ms, proxy.ts: 300ms, application-code: 33ms)
+ GET /admin/customers 200 in 1914ms (next.js: 77ms, proxy.ts: 1783ms, application-code: 54ms)
+ GET /admin/customers 200 in 1741ms (next.js: 5ms, proxy.ts: 1712ms, application-code: 23ms)
+ GET /admin/customers 200 in 841ms (next.js: 83ms, proxy.ts: 714ms, application-code: 44ms)
+ GET /admin/customers 200 in 1965ms (next.js: 6ms, proxy.ts: 1923ms, application-code: 36ms)
+ GET /admin/customers 200 in 689ms (next.js: 84ms, proxy.ts: 540ms, application-code: 65ms)
+ GET /admin/customers 200 in 3.2s (next.js: 5ms, proxy.ts: 3.2s, application-code: 25ms)
+ GET /admin/customers 200 in 617ms (next.js: 84ms, proxy.ts: 483ms, application-code: 50ms)
+ GET /admin/customers 200 in 1807ms (next.js: 5ms, proxy.ts: 1780ms, application-code: 22ms)
+ GET /admin/customers 200 in 819ms (next.js: 80ms, proxy.ts: 695ms, application-code: 44ms)
+ GET /admin/customers 200 in 2.6s (next.js: 8ms, proxy.ts: 2.6s, application-code: 21ms)
+ GET /admin/dashboard 200 in 1610ms (next.js: 147ms, proxy.ts: 456ms, application-code: 1007ms)
+ GET /admin/customers 200 in 5.1s (next.js: 110ms, proxy.ts: 4.9s, application-code: 46ms)
+ GET /admin/customers 200 in 978ms (next.js: 5ms, proxy.ts: 942ms, application-code: 31ms)
+ GET /admin/customers 200 in 2.3s (next.js: 7ms, proxy.ts: 2.3s, application-code: 27ms)
+ GET /admin/customers 200 in 890ms (next.js: 5ms, proxy.ts: 859ms, application-code: 26ms)
+ GET /admin/customers 200 in 5.8s (next.js: 89ms, proxy.ts: 5.7s, application-code: 44ms)
+ GET /admin/customers 200 in 1354ms (next.js: 5ms, proxy.ts: 1322ms, application-code: 27ms)
+ GET /admin/customers 200 in 5.9s (next.js: 87ms, proxy.ts: 5.8s, application-code: 51ms)
+ GET /admin/customers 200 in 3.3s (next.js: 6ms, proxy.ts: 3.3s, application-code: 26ms)
+ GET /admin/customers 200 in 1173ms (next.js: 83ms, proxy.ts: 1049ms, application-code: 42ms)
+ GET /admin/customers 200 in 3.5s (next.js: 5ms, proxy.ts: 3.5s, application-code: 27ms)
+ GET /admin/customers 200 in 5.1s (next.js: 93ms, proxy.ts: 5.0s, application-code: 42ms)
+ GET /admin/customers 200 in 480ms (next.js: 5ms, proxy.ts: 448ms, application-code: 27ms)
+ GET /admin/customers 200 in 683ms (next.js: 94ms, proxy.ts: 535ms, application-code: 54ms)
+ GET /admin/customers 200 in 3.3s (next.js: 6ms, proxy.ts: 3.3s, application-code: 31ms)
+ GET /admin/customers 200 in 635ms (next.js: 81ms, proxy.ts: 508ms, application-code: 46ms)
+✓ Compiled in 315ms
+ GET /admin/customers 200 in 600ms (next.js: 60ms, proxy.ts: 503ms, application-code: 37ms)
+✓ Compiled in 334ms
+ GET /admin/customers 200 in 642ms (next.js: 66ms, proxy.ts: 538ms, application-code: 39ms)
+✓ Compiled in 125ms
+ GET /admin/customers 200 in 644ms (next.js: 63ms, proxy.ts: 546ms, application-code: 35ms)
+✓ Compiled in 98ms
+ GET /admin/customers 200 in 607ms (next.js: 61ms, proxy.ts: 515ms, application-code: 30ms)
+✓ Compiled in 97ms
+ GET /admin/customers 200 in 656ms (next.js: 60ms, proxy.ts: 568ms, application-code: 28ms)
+✓ Compiled in 598ms
+ GET /admin/customers 200 in 1085ms (next.js: 57ms, proxy.ts: 987ms, application-code: 41ms)
+ GET /admin/customers 200 in 3.3s (next.js: 4ms, proxy.ts: 3.3s, application-code: 22ms)
+ GET /admin/customers 200 in 312ms (next.js: 5ms, proxy.ts: 287ms, application-code: 20ms)
+✓ Compiled in 171ms
+ GET /admin/customers 200 in 640ms (next.js: 58ms, proxy.ts: 547ms, application-code: 35ms)
+ GET /admin/customers 200 in 3.4s (next.js: 64ms, proxy.ts: 3.3s, application-code: 32ms)
+ GET /admin/customers 200 in 311ms (next.js: 6ms, proxy.ts: 285ms, application-code: 20ms)
+✓ Compiled in 220ms
+ GET /admin/customers 200 in 4.2s (next.js: 80ms, proxy.ts: 4.1s, application-code: 33ms)
+ GET /admin/customers 200 in 461ms (next.js: 5ms, proxy.ts: 436ms, application-code: 21ms)
+ GET /admin/customers 200 in 3.3s (next.js: 58ms, proxy.ts: 3.2s, application-code: 51ms)
+ GET /admin/customers 200 in 309ms (next.js: 5ms, proxy.ts: 279ms, application-code: 25ms)
+ GET /admin/customers 200 in 1187ms (next.js: 63ms, proxy.ts: 1081ms, application-code: 43ms)
+ GET /admin/customers 200 in 2.9s (next.js: 5ms, proxy.ts: 2.9s, application-code: 22ms)
+ GET /admin/customers 200 in 5.2s (next.js: 62ms, proxy.ts: 5.1s, application-code: 35ms)
+ GET /admin/customers 200 in 739ms (next.js: 7ms, proxy.ts: 712ms, application-code: 20ms)
+ GET /admin/customers 200 in 597ms (next.js: 63ms, proxy.ts: 489ms, application-code: 46ms)
+ GET /admin/customers 200 in 1473ms (next.js: 6ms, proxy.ts: 1442ms, application-code: 25ms)
+ GET /admin/customers 200 in 1100ms (next.js: 6ms, proxy.ts: 535ms, application-code: 558ms)
+ GET /admin/projects 200 in 498ms (next.js: 24ms, proxy.ts: 453ms, application-code: 22ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 344ms (next.js: 33ms, proxy.ts: 284ms, application-code: 27ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 354ms (next.js: 85ms, proxy.ts: 247ms, application-code: 22ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 1446ms (next.js: 78ms, proxy.ts: 286ms, application-code: 1082ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 950ms (next.js: 6ms, proxy.ts: 251ms, application-code: 693ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 949ms (next.js: 3ms, proxy.ts: 294ms, application-code: 652ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 879ms (next.js: 3ms, proxy.ts: 235ms, application-code: 641ms)
+ POST /api/cutting-plans 200 in 1879ms (next.js: 5ms, proxy.ts: 268ms, application-code: 1607ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 894ms (next.js: 3ms, proxy.ts: 245ms, application-code: 646ms)
+ GET /api/cutting-plans/69cccb5e-da86-4d50-9adb-a8615c9adb27?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6&inline=1 200 in 1579ms (next.js: 69ms, proxy.ts: 536ms, application-code: 974ms)
+ GET /meta.json 404 in 453ms (next.js: 81ms, proxy.ts: 256ms, application-code: 116ms)
+ GET /meta.json 404 in 360ms (next.js: 21ms, proxy.ts: 313ms, application-code: 27ms)
+ GET /meta.json 404 in 355ms (next.js: 9ms, proxy.ts: 312ms, application-code: 34ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 3.6s (next.js: 90ms, proxy.ts: 3.4s, application-code: 66ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 298ms (next.js: 10ms, proxy.ts: 255ms, application-code: 33ms)
+✓ Compiled in 102ms
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 605ms (next.js: 97ms, proxy.ts: 455ms, application-code: 53ms)
+✓ Compiled in 1203ms
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 3.0s (next.js: 76ms, proxy.ts: 2.9s, application-code: 50ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 320ms (next.js: 9ms, proxy.ts: 230ms, application-code: 81ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 1169ms (next.js: 49ms, proxy.ts: 421ms, application-code: 699ms)
+✓ Compiled in 644ms
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 3.0s (next.js: 85ms, proxy.ts: 2.9s, application-code: 66ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 346ms (next.js: 6ms, proxy.ts: 302ms, application-code: 37ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 323ms (next.js: 11ms, proxy.ts: 285ms, application-code: 27ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 303ms (next.js: 7ms, proxy.ts: 260ms, application-code: 36ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 269ms (next.js: 11ms, proxy.ts: 224ms, application-code: 34ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 276ms (next.js: 9ms, proxy.ts: 225ms, application-code: 41ms)
+✓ Compiled in 108ms
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 631ms (next.js: 78ms, proxy.ts: 495ms, application-code: 58ms)
+✓ Compiled in 377ms
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+[browser] Uncaught ReferenceError: Trash2 is not defined
+    at eval (file://D:/kitchen-pantry-erp/.next/dev/static/chunks/src_1cthh3d._.js?id=%255Bproject%255D%252Fsrc%252Fapp%252F%2528dashboard%2529%252Fadmin%252Fprojects%252F%255Bid%255D%252Fcutting-plan%252Fpage.tsx+%255Bapp-client%255D+%2528ecmascript%2529:707:266)
+    at Array.map (<anonymous>)
+    at AdminCuttingPlanPage (file://D:/kitchen-pantry-erp/.next/dev/static/chunks/src_1cthh3d._.js?id=%255Bproject%255D%252Fsrc%252Fapp%252F%2528dashboard%2529%252Fadmin%252Fprojects%252F%255Bid%255D%252Fcutting-plan%252Fpage.tsx+%255Bapp-client%255D+%2528ecmascript%2529:547:45)
+[browser] Encountered a script tag while rendering React component. Scripts inside React components are never executed when rendering on the client. Consider using template tag instead (https://developer.mozilla.org/en-US/docs/Web/HTML/Element/template). 
+    at Set.forEach (<anonymous>) (<anonymous>)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 5.3s (next.js: 90ms, proxy.ts: 685ms, application-code: 4.5s)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 4.7s (next.js: 52ms, proxy.ts: 4.6s, application-code: 27ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 917ms (next.js: 3ms, proxy.ts: 272ms, application-code: 642ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 925ms (next.js: 6ms, proxy.ts: 235ms, application-code: 683ms)
+[browser] Uncaught ReferenceError: Trash2 is not defined
+    at <unknown> (src/app/(dashboard)/admin/projects/[id]/cutting-plan/page.tsx:364:24)
+    at Array.map (<anonymous>)
+    at AdminCuttingPlanPage (src/app/(dashboard)/admin/projects/[id]/cutting-plan/page.tsx:295:22)
+    at run (chrome-extension://egjidjbpglichdcondbcbdnbeeppgdph/inpage.js:1:1902896)
+    at runIfPresent (chrome-extension://egjidjbpglichdcondbcbdnbeeppgdph/inpage.js:1:1903023)
+    at onGlobalMessage (chrome-extension://egjidjbpglichdcondbcbdnbeeppgdph/inpage.js:1:1902223)
+  362 |                       disabled={deleting}
+  363 |                     >
+> 364 |                       <Trash2 className="size-4" />
+      |                        ^
+  365 |                     </Button>
+  366 |                   </div>
+  367 |                 </div>
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+✓ Compiled in 363ms
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 4.3s (next.js: 80ms, proxy.ts: 474ms, application-code: 3.7s)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 1167ms (next.js: 53ms, proxy.ts: 292ms, application-code: 822ms)
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 986ms (next.js: 3ms, proxy.ts: 266ms, application-code: 716ms)
+ POST /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 2.3s (next.js: 15ms, proxy.ts: 499ms, application-code: 1809ms)
+  └─ ƒ deleteCuttingPlan("475ed5ef-7cdc-4545-a903-0becb4f574b6", "cbe80c49-ac84-42ba-ba9c-144b859cecc7") in 1783ms src/lib/cutting-plane/actions.ts
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 970ms (next.js: 8ms, proxy.ts: 288ms, application-code: 674ms)
+ POST /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 1281ms (next.js: 11ms, proxy.ts: 265ms, application-code: 1005ms)
+  └─ ƒ deleteCuttingPlan("475ed5ef-7cdc-4545-a903-0becb4f574b6", "5b9796ca-963a-4304-a6e8-98296e7a99eb") in 998ms src/lib/cutting-plane/actions.ts
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 1008ms (next.js: 3ms, proxy.ts: 289ms, application-code: 716ms)
+ POST /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 5.4s (next.js: 15ms, proxy.ts: 4.1s, application-code: 1307ms)
+  └─ ƒ deleteCuttingPlan("475ed5ef-7cdc-4545-a903-0becb4f574b6", "e5d2d4d5-84da-4ac8-873c-6652ed1cf06d") in 1295ms src/lib/cutting-plane/actions.ts
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 1002ms (next.js: 6ms, proxy.ts: 277ms, application-code: 718ms)
+ POST /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6/cutting-plan 200 in 1550ms (next.js: 10ms, proxy.ts: 284ms, application-code: 1256ms)
+  └─ ƒ deleteCuttingPlan("475ed5ef-7cdc-4545-a903-0becb4f574b6", "69cccb5e-da86-4d50-9adb-a8615c9adb27") in 1249ms src/lib/cutting-plane/actions.ts
+ GET /api/cutting-plans?projectId=475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 969ms (next.js: 3ms, proxy.ts: 383ms, application-code: 583ms)
+ GET /admin/projects/475ed5ef-7cdc-4545-a903-0becb4f574b6 200 in 301ms (next.js: 36ms, proxy.ts: 241ms, application-code: 23ms)

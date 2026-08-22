@@ -5,15 +5,27 @@ import { useParams, useRouter } from "next/navigation"
 import { motion } from "framer-motion"
 import {
   ArrowLeft, FileText, RefreshCw, Download, AlertCircle,
-  CheckCircle2, Loader2, Printer,
+  CheckCircle2, Loader2, Printer, Eye, Trash2,
 } from "lucide-react"
 
 import { createClient } from "@/lib/supabase/client"
 import { formatDate } from "@/lib/auth/helpers"
+import { deleteCuttingPlan } from "@/lib/cutting-plane/actions"
+import { useToast } from "@/hooks/use-toast"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 
 interface CuttingPlanRecord {
   id: string
@@ -28,7 +40,19 @@ interface CuttingPlanRecord {
     panelCount?: number
     uniquePanelCount?: number
     pageCount?: number
+    cuttingListCount?: number
+    sheetsCount?: number
+    cabinetCount?: number
+    changeDescription?: string
   }
+}
+
+const STATUS_VARIANT: Record<string, "success" | "secondary" | "warning" | "destructive"> = {
+  generated: "success",
+  approved: "success",
+  draft: "secondary",
+  superseded: "secondary",
+  failed: "destructive",
 }
 
 export default function AdminCuttingPlanPage() {
@@ -40,11 +64,15 @@ export default function AdminCuttingPlanPage() {
   const [projectName, setProjectName] = useState("")
   const [plans, setPlans] = useState<CuttingPlanRecord[]>([])
   const [latestIsCurrent, setLatestIsCurrent] = useState(true)
+  const [validationError, setValidationError] = useState<string | null>(null)
   const [generating, setGenerating] = useState(false)
   const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const supabase = createClient()
+  const { addToast } = useToast()
 
   async function reloadPlans() {
     setLoading(true)
@@ -63,6 +91,7 @@ export default function AdminCuttingPlanPage() {
 
       setPlans(json.plans ?? [])
       setLatestIsCurrent(json.latestIsCurrent ?? true)
+      setValidationError(json.validationError ?? null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -92,6 +121,7 @@ export default function AdminCuttingPlanPage() {
         if (!cancelled) {
           setPlans(json.plans ?? [])
           setLatestIsCurrent(json.latestIsCurrent ?? true)
+          setValidationError(json.validationError ?? null)
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
@@ -118,6 +148,27 @@ export default function AdminCuttingPlanPage() {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setGenerating(false)
+    }
+  }
+
+  async function handleDelete() {
+    if (!confirmDeleteId) return
+    setDeleting(true)
+    setError(null)
+    try {
+      const result = await deleteCuttingPlan(projectId, confirmDeleteId)
+      if (!result.success) throw new Error(result.error ?? "Delete failed")
+      addToast({ title: "Cutting plan deleted", description: "The revision and its PDF were removed." })
+      setConfirmDeleteId(null)
+      await reloadPlans()
+    } catch (err) {
+      addToast({
+        title: "Error",
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      })
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -193,7 +244,7 @@ export default function AdminCuttingPlanPage() {
         </Card>
       )}
 
-      {!latestIsCurrent && plans.length > 0 && (
+      {!latestIsCurrent && plans.length > 0 && !validationError && (
         <Card className="border-amber-500 bg-amber-50 dark:bg-amber-950/20">
           <CardContent className="p-4 flex items-start gap-3">
             <AlertCircle className="size-5 text-amber-600 mt-0.5" />
@@ -202,6 +253,18 @@ export default function AdminCuttingPlanPage() {
               <p className="text-sm text-amber-700 dark:text-amber-200">
                 The kitchen design has changed since the last cutting plan was generated.
               </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {validationError && (
+        <Card className="border-destructive">
+          <CardContent className="p-4 flex items-start gap-3">
+            <AlertCircle className="size-5 text-destructive mt-0.5" />
+            <div>
+              <p className="font-medium text-sm text-destructive">Cannot generate a valid cutting plan</p>
+              <p className="text-sm text-muted-foreground whitespace-pre-line">{validationError}</p>
             </div>
           </CardContent>
         </Card>
@@ -241,7 +304,10 @@ export default function AdminCuttingPlanPage() {
                     <div>
                       <div className="flex items-center gap-2">
                         <p className="font-medium text-sm">{plan.file_name}</p>
-                        {index === 0 && (
+                        <Badge variant={STATUS_VARIANT[plan.status] ?? "secondary"}>
+                          {plan.status}
+                        </Badge>
+                        {index === 0 && plan.status !== "superseded" && (
                           <Badge variant="success" className="gap-1">
                             <CheckCircle2 className="size-3" />
                             Latest
@@ -249,29 +315,90 @@ export default function AdminCuttingPlanPage() {
                         )}
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Generated {formatDate(plan.generated_at)} · {plan.metadata?.panelCount ?? 0} parts · {plan.metadata?.pageCount ?? 0} pages
+                        {formatDate(plan.generated_at)}
+                        {plan.metadata?.changeDescription ? ` · ${plan.metadata.changeDescription}` : ""}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {plan.metadata?.cabinetCount ?? 0} cabinets ·{" "}
+                        {plan.metadata?.cuttingListCount ?? 0} parts ·{" "}
+                        {plan.metadata?.sheetsCount ?? 0} sheets ·{" "}
+                        {plan.metadata?.pageCount ?? 0} pages
                       </p>
                     </div>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleDownload(plan.id)}
-                    disabled={downloadingId === plan.id}
-                  >
-                    {downloadingId === plan.id ? (
-                      <Loader2 className="size-4 mr-2 animate-spin" />
-                    ) : (
-                      <Download className="size-4 mr-2" />
-                    )}
-                    Download
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        window.open(
+                          `/api/cutting-plans/${plan.id}?projectId=${encodeURIComponent(projectId)}&inline=1`,
+                          "_blank"
+                        )
+                      }
+                    >
+                      <Eye className="size-4 mr-2" />
+                      View
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleDownload(plan.id)}
+                      disabled={downloadingId === plan.id}
+                    >
+                      {downloadingId === plan.id ? (
+                        <Loader2 className="size-4 mr-2 animate-spin" />
+                      ) : (
+                        <Download className="size-4 mr-2" />
+                      )}
+                      Download
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-8 text-destructive hover:text-destructive"
+                      aria-label={`Delete cutting plan v${plan.version}`}
+                      onClick={() => setConfirmDeleteId(plan.id)}
+                      disabled={deleting}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
                 </div>
               ))}
             </div>
           )}
         </CardContent>
       </Card>
+
+      <AlertDialog open={!!confirmDeleteId} onOpenChange={(open) => { if (!open) setConfirmDeleteId(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Cutting Plan</AlertDialogTitle>
+            <AlertDialogDescription>
+              Delete revision v{plans.find((p) => p.id === confirmDeleteId)?.version ?? ""}? The stored PDF will be
+              permanently removed and the revision cannot be recovered. Older revisions are not affected.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleting}
+              onClick={(e) => { e.preventDefault(); handleDelete() }}
+            >
+              {deleting ? (
+                <>
+                  <Loader2 className="size-4 mr-2 animate-spin" />
+                  Deleting…
+                </>
+              ) : (
+                "Delete"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </motion.div>
   )
 }

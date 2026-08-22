@@ -331,6 +331,20 @@ export function deriveGeometry(input: {
   material: string
   finish?: string
 }): CabinetModule[] {
+  return deriveGeometryDetailed(input).modules
+}
+
+export function deriveGeometryDetailed(input: {
+  projectId: string
+  projectName: string
+  customerName?: string
+  length: number
+  width: number
+  height: number
+  kitchenType: string
+  material: string
+  finish?: string
+}): { modules: CabinetModule[]; configs: ModuleConfig[] } {
   const measurements: ProjectMeasurements = {
     length: input.length,
     width: input.width,
@@ -340,7 +354,8 @@ export function deriveGeometry(input: {
     finish: input.finish,
   }
   const configs = deriveModuleConfigs(measurements)
-  return buildModules(configs, input.material, input.finish ?? 'Standard')
+  const modules = buildModules(configs, input.material, input.finish ?? 'Standard')
+  return { modules, configs }
 }
 
 function capitalize(s: string): string {

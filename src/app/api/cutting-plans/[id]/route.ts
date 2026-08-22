@@ -23,11 +23,13 @@ export async function GET(
       return NextResponse.json({ error: result.error ?? 'Download failed' }, { status: 400 })
     }
 
+    // inline=1 serves the PDF for in-browser viewing/printing instead of download.
+    const inline = searchParams.get('inline') === '1'
     return new NextResponse(new Blob([new Uint8Array(result.buffer)]), {
       status: 200,
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="${result.fileName ?? 'cutting-plan.pdf'}"`,
+        'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${result.fileName ?? 'cutting-plan.pdf'}"`,
       },
     })
   } catch (err) {

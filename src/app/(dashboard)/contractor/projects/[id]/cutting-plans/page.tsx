@@ -25,6 +25,10 @@ interface CuttingPlanRecord {
     panelCount?: number
     uniquePanelCount?: number
     pageCount?: number
+    cabinetCount?: number
+    cuttingListCount?: number
+    sheetsCount?: number
+    changeDescription?: string
   }
 }
 
@@ -94,20 +98,13 @@ export default function ContractorCuttingPlansPage() {
     }
   }
 
-  async function handleView(planId: string) {
-    try {
-      const res = await fetch(`/api/cutting-plans/${planId}?projectId=${encodeURIComponent(projectId)}`)
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}))
-        throw new Error(json.error ?? "View failed")
-      }
-      const blob = await res.blob()
-      const url = window.URL.createObjectURL(blob)
-      window.open(url, "_blank")
-      // Note: object URL is intentionally left for the browser tab to load
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
+  function handleView(planId: string) {
+    // Same-origin authenticated stream; inline=1 lets the browser's
+    // built-in viewer handle navigation, zoom and printing.
+    window.open(
+      `/api/cutting-plans/${planId}?projectId=${encodeURIComponent(projectId)}&inline=1`,
+      "_blank"
+    )
   }
 
   if (loading) {
@@ -176,7 +173,10 @@ export default function ContractorCuttingPlansPage() {
                     <div>
                       <div className="flex items-center gap-2">
                         <p className="font-medium text-sm">{plan.file_name}</p>
-                        {index === 0 && (
+                        <Badge variant={plan.status === "superseded" ? "secondary" : "success"}>
+                          {plan.status}
+                        </Badge>
+                        {index === 0 && plan.status !== "superseded" && (
                           <Badge variant="success" className="gap-1">
                             <CheckCircle2 className="size-3" />
                             Latest
@@ -184,7 +184,8 @@ export default function ContractorCuttingPlansPage() {
                         )}
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Generated {formatDate(plan.generated_at)} · {plan.metadata?.panelCount ?? 0} parts · {plan.metadata?.pageCount ?? 0} pages
+                        Generated {formatDate(plan.generated_at)} · {plan.metadata?.cabinetCount ?? 0} cabinets ·{" "}
+                        {plan.metadata?.cuttingListCount ?? 0} parts · {plan.metadata?.pageCount ?? 0} pages
                       </p>
                     </div>
                   </div>
