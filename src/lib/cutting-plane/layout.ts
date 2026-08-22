@@ -1,19 +1,20 @@
 // ============================================================
 // CUTTING PLANE MODULE — LAYOUT
 // ============================================================
-// Guillotine-style bin packing for arranging panel drawings on A4
-// pages. Inspired by the reference project's GuillotineBin class.
+// Guillotine-style bin packing for arranging panel drawings on
+// A4 pages. All geometry is computed directly in PDF points so
+// positions can be drawn 1:1 without unit conversion.
 
 import type { Panel, LayoutBox, PlacedPanel, CuttingPlanPage } from './types'
 import { fitRectInside } from './dimensions'
 
-const PAGE_WIDTH_MM = 210
-const PAGE_HEIGHT_MM = 297
-const MARGIN_MM = 14
-const HEADER_HEIGHT_MM = 42
-const FOOTER_HEIGHT_MM = 20
-const CARD_TITLE_HEIGHT_MM = 14
-const CARD_PADDING_MM = 8
+export const PAGE_W = 595.28 // A4 points
+export const PAGE_H = 841.89
+export const PAGE_MARGIN = 36
+export const HEADER_H = 88 // reserved header band below the top margin
+export const FOOTER_H = 40 // reserved footer band above the bottom margin
+export const CARD_TITLE_H = 20 // panel-card title bar height
+export const CARD_PAD = 10 // panel-card inner padding
 
 export interface FreeRect {
   x: number
@@ -27,11 +28,11 @@ export class PageBin {
   placed: PlacedPanel[] = []
 
   constructor(
-    public pageWidth = PAGE_WIDTH_MM,
-    public pageHeight = PAGE_HEIGHT_MM,
-    public margin = MARGIN_MM,
-    public headerHeight = HEADER_HEIGHT_MM,
-    public footerHeight = FOOTER_HEIGHT_MM
+    public pageWidth = PAGE_W,
+    public pageHeight = PAGE_H,
+    public margin = PAGE_MARGIN,
+    public headerHeight = HEADER_H,
+    public footerHeight = FOOTER_H
   ) {
     this.freeRects = [
       {
@@ -57,12 +58,12 @@ export class PageBin {
 
   insert(panel: Panel, maxCardWidth: number, maxCardHeight: number): LayoutBox | null {
     const drawingBounds = {
-      width: maxCardWidth - CARD_PADDING_MM * 2,
-      height: maxCardHeight - CARD_TITLE_HEIGHT_MM - CARD_PADDING_MM * 2,
+      width: maxCardWidth - CARD_PAD * 2,
+      height: maxCardHeight - CARD_TITLE_H - CARD_PAD * 2,
     }
     const fitted = fitRectInside(panel.dimensions, drawingBounds, 4)
-    const cardW = fitted.width + CARD_PADDING_MM * 2
-    const cardH = fitted.height + CARD_TITLE_HEIGHT_MM + CARD_PADDING_MM * 2
+    const cardW = fitted.width + CARD_PAD * 2
+    const cardH = fitted.height + CARD_TITLE_H + CARD_PAD * 2
 
     let bestIdx = -1
     let bestScore = Infinity
@@ -96,8 +97,8 @@ export class PageBin {
 
 export function layoutPanelsOnPages(
   panels: Panel[],
-  maxCardWidth = 95,
-  maxCardHeight = 120
+  maxCardWidth = 250,
+  maxCardHeight = 300
 ): CuttingPlanPage[] {
   // Sort by area descending to pack larger panels first
   const sorted = [...panels].sort((a, b) => {
@@ -107,6 +108,7 @@ export function layoutPanelsOnPages(
   })
 
   const pages: PageBin[] = []
+  const fallbackCard = { w: PAGE_W - PAGE_MARGIN * 2, h: PAGE_H - PAGE_MARGIN * 2 - HEADER_H - FOOTER_H }
 
   for (const panel of sorted) {
     let placed = false
@@ -120,9 +122,9 @@ export function layoutPanelsOnPages(
       const newPage = new PageBin()
       const box = newPage.insert(panel, maxCardWidth, maxCardHeight)
       if (!box) {
-        // Even a single panel doesn't fit — enlarge card size and retry
+        // Even a single panel doesn't fit at card size — give it a full sheet
         const biggerPage = new PageBin()
-        biggerPage.insert(panel, PAGE_WIDTH_MM - MARGIN_MM * 2, PAGE_HEIGHT_MM - MARGIN_MM * 2 - HEADER_HEIGHT_MM - FOOTER_HEIGHT_MM)
+        biggerPage.insert(panel, fallbackCard.w, fallbackCard.h)
         pages.push(biggerPage)
       } else {
         pages.push(newPage)

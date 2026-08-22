@@ -1,84 +1,93 @@
 // ============================================================
 // CUTTING PLANE MODULE — RENDERER
 // ============================================================
-// PDFKit drawing primitives for panels, dimension lines, arrows,
+// PDFKit drawing primitives for panel cards, dimension lines,
 // grain direction, edge banding markers, and labels.
+// All coordinates are PDF points.
 
-import type { Panel, PlacedPanel, Dimensions } from './types'
+import type { Panel, PlacedPanel } from './types'
 
 type PDFDocumentType = PDFKit.PDFDocument
 import { fitRectInside, formatDimensions } from './dimensions'
+import { CARD_TITLE_H, CARD_PAD } from './layout'
 
-const PRIMARY = '#1e3a5f'
-const ACCENT = '#2563eb'
-const MUTED = '#64748b'
-const TEXT = '#1e293b'
-const EDGE_BAND_COLOR = '#dc2626'
-const CARD_TITLE_HEIGHT_MM = 14
-const CARD_PADDING_MM = 8
+export const COLORS = {
+  primary: '#1e3a5f',
+  accent: '#2563eb',
+  muted: '#64748b',
+  text: '#1e293b',
+  border: '#94a3b8',
+  lightFill: '#f8fafc',
+  edgeBand: '#dc2626',
+}
 
 export function drawPanelCard(
   doc: PDFDocumentType,
-  placed: PlacedPanel,
-  originX: number,
-  originY: number
+  placed: PlacedPanel
 ): void {
-  const { panel, box, scale } = placed
-  const cardX = originX + box.x
-  const cardY = originY + box.y
+  const { panel, box } = placed
 
-  // Card background
-  doc.roundedRect(cardX, cardY, box.width, box.height, 3).lineWidth(0.3).stroke('#cbd5e1')
+  // Card frame
+  doc.roundedRect(box.x, box.y, box.width, box.height, 4)
+    .lineWidth(0.75).stroke(COLORS.border)
 
-  // Title block
-  doc.rect(cardX, cardY, box.width, 14).fill(PRIMARY)
-  doc.fontSize(7).font('Helvetica-Bold').fillColor('#ffffff')
-  doc.text(`${panel.moduleId} — ${panel.partName}`, cardX + 4, cardY + 4, {
-    width: box.width - 8,
+  // Title bar
+  doc.rect(box.x, box.y, box.width, CARD_TITLE_H).fill(COLORS.primary)
+  doc.fillColor('#ffffff').fontSize(7.5).font('Helvetica-Bold')
+  doc.text(`${panel.moduleId} · ${panel.partName}`, box.x + CARD_PAD / 2, box.y + 6, {
+    width: box.width - CARD_PAD * 1.5,
     ellipsis: true,
+    lineBreak: false,
+  })
+  doc.fontSize(7).fillColor('#bfdbfe')
+  doc.text(`×${panel.quantity}`, box.x + CARD_PAD / 2, box.y + 6, {
+    width: box.width - CARD_PAD,
+    align: 'right',
+    lineBreak: false,
   })
 
-  const drawingX = cardX + 8
-  const drawingW = box.width - 16
-  const infoHeight = panel.notes ? 22 : 15
-  const drawingH = Math.max(20, box.height - CARD_TITLE_HEIGHT_MM - CARD_PADDING_MM * 2 - infoHeight)
-  const drawingY = cardY + CARD_TITLE_HEIGHT_MM + CARD_PADDING_MM
+  // Drawing area (light fill so the white panel pops)
+  const drawingX = box.x + CARD_PAD
+  const drawingW = box.width - CARD_PAD * 2
+  const infoH = panel.notes ? 26 : 17
+  const drawingH = Math.max(24, box.height - CARD_TITLE_H - CARD_PAD - infoH)
+  const drawingY = box.y + CARD_TITLE_H + CARD_PAD / 2
 
-  const fitted = fitRectInside(panel.dimensions, { width: drawingW, height: drawingH }, 6)
-  // Center the fitted rectangle inside the drawing area
-  const centerX = drawingX + drawingW / 2
-  const centerY = drawingY + drawingH / 2
-  const rectDrawX = centerX - fitted.width / 2
-  const rectDrawY = centerY - fitted.height / 2
+  doc.rect(drawingX, drawingY, drawingW, drawingH)
+    .fill(COLORS.lightFill)
 
-  // Panel rectangle
-  doc.rect(rectDrawX, rectDrawY, fitted.width, fitted.height).lineWidth(0.5).stroke(TEXT)
+  const fitted = fitRectInside(panel.dimensions, { width: drawingW, height: drawingH }, 14)
+  const rectX = drawingX + fitted.x
+  const rectY = drawingY + fitted.y
 
-  // Edge banding markers
-  drawEdgeBands(doc, rectDrawX, rectDrawY, fitted.width, fitted.height, panel)
+  // Panel body
+  doc.rect(rectX, rectY, fitted.width, fitted.height)
+    .lineWidth(0.75).stroke(COLORS.text)
 
-  // Grain direction arrow
+  drawEdgeBands(doc, rectX, rectY, fitted.width, fitted.height, panel)
   if (panel.grain !== 'none') {
-    drawGrainArrow(doc, rectDrawX, rectDrawY, fitted.width, fitted.height, panel.grain)
+    drawGrainArrow(doc, rectX, rectY, fitted.width, fitted.height, panel.grain)
   }
+  drawDrillHoles(doc, rectX, rectY, panel, fitted.scale, drawingX, drawingY, drawingW, drawingH)
 
-  // Drill holes
-  drawDrillHoles(doc, rectDrawX, rectDrawY, fitted.width, fitted.height, panel, scale)
+  // Dimension lines with labels
+  drawDimensions(doc, rectX, rectY, fitted.width, fitted.height, panel.dimensions)
 
-  // Dimensions
-  drawDimensions(doc, rectDrawX, rectDrawY, fitted.width, fitted.height, panel.dimensions)
-
-  // Info block at bottom of card
-  const infoY = drawingY + drawingH + 4
-  doc.fontSize(5.5).font('Helvetica').fillColor(MUTED)
-  doc.text(formatDimensions(panel.dimensions), cardX + 4, infoY, { width: box.width - 8 })
-  doc.text(`Qty: ${panel.quantity} · ${panel.material} · ${panel.finish}`, cardX + 4, infoY + 7, {
-    width: box.width - 8,
-    ellipsis: true,
+  // Info block at the bottom of the card
+  const infoY = drawingY + drawingH + CARD_PAD / 2
+  doc.fontSize(6.5).font('Helvetica-Bold').fillColor(COLORS.text)
+  doc.text(formatDimensions(panel.dimensions), box.x + CARD_PAD / 2, infoY, {
+    width: box.width - CARD_PAD,
+    align: 'left',
+    lineBreak: false,
   })
-  if (panel.notes) {
-    doc.text(panel.notes, cardX + 4, infoY + 14, { width: box.width - 8, ellipsis: true })
-  }
+  doc.fontSize(6).font('Helvetica').fillColor(COLORS.muted)
+  doc.text(`${panel.material}${panel.finish ? ` · ${panel.finish}` : ''}${panel.notes ? ` · ${panel.notes}` : ''}`, box.x + CARD_PAD / 2, infoY + 9, {
+    width: box.width - CARD_PAD,
+    align: 'left',
+    ellipsis: true,
+    lineBreak: false,
+  })
 }
 
 function drawEdgeBands(
@@ -89,9 +98,10 @@ function drawEdgeBands(
   h: number,
   panel: Panel
 ): void {
-  doc.strokeColor(EDGE_BAND_COLOR).lineWidth(1)
   const eb = panel.edgeBanding
-  const inset = 2
+  if (!eb.l1 && !eb.l2 && !eb.w1 && !eb.w2) return
+  doc.strokeColor(COLORS.edgeBand).lineWidth(1.25)
+  const inset = 2.5
   if (eb.l1) doc.moveTo(x + inset, y + inset).lineTo(x + w - inset, y + inset).stroke()
   if (eb.l2) doc.moveTo(x + inset, y + h - inset).lineTo(x + w - inset, y + h - inset).stroke()
   if (eb.w1) doc.moveTo(x + inset, y + inset).lineTo(x + inset, y + h - inset).stroke()
@@ -109,13 +119,13 @@ function drawGrainArrow(
   const cx = x + w / 2
   const cy = y + h / 2
   const length = Math.min(w, h) * 0.35
-  doc.strokeColor(ACCENT).lineWidth(0.6)
+  doc.strokeColor(COLORS.accent).lineWidth(0.8)
   if (grain === 'lengthwise') {
     doc.moveTo(cx - length / 2, cy).lineTo(cx + length / 2, cy).stroke()
-    doc.moveTo(cx + length / 2 - 2, cy - 2).lineTo(cx + length / 2, cy).lineTo(cx + length / 2 - 2, cy + 2).stroke()
+    doc.moveTo(cx + length / 2 - 3, cy - 3).lineTo(cx + length / 2, cy).lineTo(cx + length / 2 - 3, cy + 3).stroke()
   } else {
     doc.moveTo(cx, cy - length / 2).lineTo(cx, cy + length / 2).stroke()
-    doc.moveTo(cx - 2, cy + length / 2 - 2).lineTo(cx, cy + length / 2).lineTo(cx + 2, cy + length / 2 - 2).stroke()
+    doc.moveTo(cx - 3, cy + length / 2 - 3).lineTo(cx, cy + length / 2).lineTo(cx + 3, cy + length / 2 - 3).stroke()
   }
 }
 
@@ -123,20 +133,21 @@ function drawDrillHoles(
   doc: PDFDocumentType,
   x: number,
   y: number,
-  w: number,
-  h: number,
   panel: Panel,
-  scale: number
+  scale: number,
+  clipX: number,
+  clipY: number,
+  clipW: number,
+  clipH: number
 ): void {
   if (!panel.drillHoles.length) return
-  doc.fillColor('#000000')
   for (const hole of panel.drillHoles) {
     const hx = x + hole.x * scale
     const hy = y + hole.y * scale
+    if (hx < clipX || hx > clipX + clipW || hy < clipY || hy > clipY + clipH) continue
     const r = Math.max(1, (hole.diameter * scale) / 2)
-    if (hx >= x && hx <= x + w && hy >= y && hy <= y + h) {
-      doc.circle(hx, hy, r).fill()
-    }
+    doc.circle(hx, hy, r).fillColor('#334155').fill()
+    doc.circle(hx, hy, r * 0.45).fillColor('#ffffff').fill()
   }
 }
 
@@ -146,38 +157,47 @@ function drawDimensions(
   y: number,
   w: number,
   h: number,
-  source: Dimensions
+  source: { width: number; height: number }
 ): void {
-  const offset = 10
-  doc.strokeColor(MUTED).lineWidth(0.25)
-  doc.fontSize(5.5).font('Helvetica').fillColor(TEXT)
+  const offset = 11
+  doc.strokeColor(COLORS.muted).lineWidth(0.5)
+  doc.fontSize(6.5).font('Helvetica').fillColor(COLORS.text)
 
-  // Horizontal dimension line
+  // Horizontal (width) dimension below the panel
   const hy = y + h + offset
+  doc.moveTo(x, y + h + 1.5).lineTo(x, hy + 2).stroke()
+  doc.moveTo(x + w, y + h + 1.5).lineTo(x + w, hy + 2).stroke()
   doc.moveTo(x, hy).lineTo(x + w, hy).stroke()
-  // Extension lines
-  doc.moveTo(x, y + h).lineTo(x, hy + 2).stroke()
-  doc.moveTo(x + w, y + h).lineTo(x + w, hy + 2).stroke()
-  // Arrows
-  drawArrow(doc, x + 2, hy, -1, 0)
-  drawArrow(doc, x + w - 2, hy, 1, 0)
-  doc.text(`${Math.round(source.width)}`, x + w / 2 - 10, hy - 4, { width: 20, align: 'center' })
+  drawArrowHead(doc, x, hy, 1, 0)
+  drawArrowHead(doc, x + w, hy, -1, 0)
+  doc.text(String(Math.round(source.width)), x + w / 2 - 16, hy - 8.5, {
+    width: 32, align: 'center', lineBreak: false,
+  })
 
-  // Vertical dimension line
+  // Vertical (height) dimension right of the panel
   const vx = x + w + offset
+  doc.moveTo(x + w + 1.5, y).lineTo(vx + 2, y).stroke()
+  doc.moveTo(x + w + 1.5, y + h).lineTo(vx + 2, y + h).stroke()
   doc.moveTo(vx, y).lineTo(vx, y + h).stroke()
-  doc.moveTo(x + w, y).lineTo(vx + 2, y).stroke()
-  doc.moveTo(x + w, y + h).lineTo(vx + 2, y + h).stroke()
-  drawArrow(doc, vx, y + 2, 0, -1)
-  drawArrow(doc, vx, y + h - 2, 0, 1)
-  doc.text(`${Math.round(source.height)}`, vx + 2, y + h / 2 - 3, { width: 20, align: 'left' })
+  drawArrowHead(doc, vx, y, 0, 1)
+  drawArrowHead(doc, vx, y + h, 0, -1)
+  doc.text(String(Math.round(source.height)), vx + 3, y + h / 2 - 4, {
+    width: 20, align: 'left', lineBreak: false,
+  })
 }
 
-function drawArrow(doc: PDFDocumentType, x: number, y: number, dx: number, dy: number): void {
-  const size = 1.5
-  doc.moveTo(x, y)
-    .lineTo(x - dy * size - dx * size, y + dx * size - dy * size)
-    .lineTo(x + dy * size - dx * size, y - dx * size - dy * size)
-    .fillColor(MUTED)
+function drawArrowHead(
+  doc: PDFDocumentType,
+  tipX: number,
+  tipY: number,
+  dirX: number,
+  dirY: number
+): void {
+  const s = 2.6
+  doc.moveTo(tipX, tipY)
+    .lineTo(tipX + dirX * s - dirY * s * 0.45, tipY + dirY * s + dirX * s * 0.45)
+    .lineTo(tipX + dirX * s + dirY * s * 0.45, tipY + dirY * s - dirX * s * 0.45)
+    .closePath()
+    .fillColor(COLORS.muted)
     .fill()
 }

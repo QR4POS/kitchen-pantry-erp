@@ -52,6 +52,8 @@ let fn: {
   hasSentExactText: (meta: Record<string, unknown> | undefined, text: string, phone: string) => boolean
   recordSentRowId: (state: Record<string, unknown>, id: string, phone: string) => void
   hasSentRowId: (meta: Record<string, unknown> | undefined, id: string, phone: string) => boolean
+  recordForwardedIncoming: (state: Record<string, unknown>, phone: string, text: string) => void
+  hasForwardedIncoming: (meta: Record<string, unknown> | undefined, phone: string, text: string) => boolean
 }
 
 beforeAll(() => {
@@ -61,6 +63,8 @@ beforeAll(() => {
   const consts = [
     extractConst(src, 'RECENT_SENT_MAX'),
     extractConst(src, 'RECENT_SENT_TTL_MS'),
+    extractConst(src, 'RECENT_INCOMING_MAX'),
+    extractConst(src, 'RECENT_INCOMING_TTL_MS'),
     extractConst(src, 'INVISIBLE_UNICODE_RE'),
   ].join('\n')
 
@@ -88,13 +92,15 @@ beforeAll(() => {
     extractFunction(src, 'hasSentExactText'),
     extractFunction(src, 'recordSentRowId'),
     extractFunction(src, 'hasSentRowId'),
+    extractFunction(src, 'recordForwardedIncoming'),
+    extractFunction(src, 'hasForwardedIncoming'),
   ].join('\n')
 
   const sandbox = new Function(
     'saveMessageState',
     'DEBUG',
     'createHash',
-    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, finalizeMessageIdentity, readIncomingFromPreview, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, isTerminalSkipReason, hasSentExactText, recordSentRowId, hasSentRowId };`
+    `${consts}\n${fns}\nreturn { canonicalPhone, chatStateKey, recordSentMessage, metaHasRecentSent, generateFallbackId, finalizeMessageIdentity, readIncomingFromPreview, resolveRowDirection, isIngestHandled, isAlreadyProcessedBoundary, previewSuggestsNewer, isRowUnchangedTerminal, isTerminalSkipReason, hasSentExactText, recordSentRowId, hasSentRowId, recordForwardedIncoming, hasForwardedIncoming };`
   )
   // Deterministic fake createHash so generateFallbackId produces distinct ids
   // for distinct (chat, text, timestamp) inputs.
@@ -378,6 +384,50 @@ describe('hasSentRowId — outbox duplicate-send guard (row-id keyed)', () => {
     // …but a NEW outbox row with the same text must still be delivered.
     fn.recordSentRowId(state, 'row-old', '94760544773')
     expect(fn.hasSentRowId(state.meta, 'row-new', '94760544773')).toBe(false)
+  })
+})
+
+describe('recordForwardedIncoming / hasForwardedIncoming — hardened message dedup', () => {
+  it('a forwarded-and-answered message is never re-forwarded for the same chat', () => {
+    const state = makeState()
+    expect(fn.hasForwardedIncoming(state.meta, '94760544773', 'Hello')).toBe(false)
+    fn.recordForwardedIncoming(state, '+94 76 054 4773', 'Hello')
+    expect(fn.hasForwardedIncoming(state.meta, '94760544773', 'Hello')).toBe(true)
+  })
+
+  it('per-chat isolation: A\'s forwarded "Hello" never suppresses B\'s "Hello"', () => {
+    const state = makeState()
+    fn.recordForwardedIncoming(state, '94760544773', 'Hello')
+    expect(fn.hasForwardedIncoming(state.meta, '94760544773', 'Hello')).toBe(true)
+    expect(fn.hasForwardedIncoming(state.meta, '94771234567', 'Hello')).toBe(false)
+  })
+
+  it('catches a re-extracted message whose fallback id changed (boundary lost)', () => {
+    // Same text+phone as an already-forwarded message → blocked even though its
+    // id differs from the stored boundary (the exact bug that caused the agent
+    // to re-ask "full name" after the customer already sent it).
+    const state = makeState()
+    fn.recordForwardedIncoming(state, '94760544773', 'vihanga kaveesha')
+    expect(fn.hasForwardedIncoming(state.meta, '94760544773', 'vihanga  kaveesha')).toBe(true)
+  })
+
+  it('does NOT suppress a different text from the same chat', () => {
+    const state = makeState()
+    fn.recordForwardedIncoming(state, '94760544773', 'Hello')
+    expect(fn.hasForwardedIncoming(state.meta, '94760544773', 'What is the price?')).toBe(false)
+  })
+
+  it('ignores empty text and unresolvable phones', () => {
+    const state = makeState()
+    fn.recordForwardedIncoming(state, '94760544773', '   ')
+    expect(fn.hasForwardedIncoming(state.meta, '94760544773', '')).toBe(false)
+    expect(fn.hasForwardedIncoming(state.meta, 'no-digits', 'Hello')).toBe(false)
+  })
+
+  it('returns false when nothing was ever forwarded', () => {
+    const state = makeState()
+    expect(fn.hasForwardedIncoming(state.meta, '94760544773', 'Hello')).toBe(false)
+    expect(fn.hasForwardedIncoming(undefined, '94760544773', 'Hello')).toBe(false)
   })
 })
 

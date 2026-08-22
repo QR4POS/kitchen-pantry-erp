@@ -68,7 +68,14 @@ const STATUS_CONFIG: Record<string, { label: string; variant: "success" | "secon
   cancelled: { label: "Cancelled", variant: "destructive" },
 }
 
-const EMPTY_FORM = { project_name: "", customer_id: "", kitchen_type: "straight", material_type: "MDF" }
+const EMPTY_FORM = { project_name: "", customer_id: "", kitchen_type: "straight", material_type: "MDF", length: "", width: "", height: "" }
+
+function parseDimension(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const num = Number(trimmed)
+  return Number.isFinite(num) && num > 0 ? num : null
+}
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<ProjectRow[]>([])
@@ -119,6 +126,9 @@ export default function ProjectsPage() {
           customer_id: form.customer_id,
           kitchen_type: form.kitchen_type,
           material_type: form.material_type,
+          length: parseDimension(form.length),
+          width: parseDimension(form.width),
+          height: parseDimension(form.height),
           status: "inquiry",
           priority: "medium",
         })
@@ -282,6 +292,20 @@ export default function ProjectsPage() {
                   <SelectItem value="PVC">PVC</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="grid gap-2">
+                <Label>Length (ft)</Label>
+                <Input type="number" step="0.01" min="0" value={form.length} onChange={(e) => setForm({ ...form, length: e.target.value })} placeholder="0" />
+              </div>
+              <div className="grid gap-2">
+                <Label>Width (ft)</Label>
+                <Input type="number" step="0.01" min="0" value={form.width} onChange={(e) => setForm({ ...form, width: e.target.value })} placeholder="0" />
+              </div>
+              <div className="grid gap-2">
+                <Label>Height (ft)</Label>
+                <Input type="number" step="0.01" min="0" value={form.height} onChange={(e) => setForm({ ...form, height: e.target.value })} placeholder="0" />
+              </div>
             </div>
           </div>
           <DialogFooter>

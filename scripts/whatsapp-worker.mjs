@@ -228,6 +228,14 @@ function readStatus() {
 const RECENT_SENT_MAX = 100
 const RECENT_SENT_TTL_MS = 60 * 60 * 1000
 
+// Forwarded-incoming fingerprint history. The single stored boundary only
+// remembers the NEWEST handled message; this list remembers EVERY forwarded
+// text+phone within the TTL so a re-extracted OLDER message whose fallback id
+// changed is never re-forwarded as if it were brand new (which would make the
+// backend run the AI again and send a duplicate reply).
+const RECENT_INCOMING_MAX = 200
+const RECENT_INCOMING_TTL_MS = 24 * 60 * 60 * 1000
+
 // Ensures the persistent outgoing-evidence fields exist on the state object.
 // Backward compatible: existing state files without meta load fine and the
 // missing fields are initialized automatically.
@@ -235,6 +243,7 @@ function ensureMessageStateMeta(state) {
   const meta = state.meta || {}
   if (!Array.isArray(meta.recentSent)) meta.recentSent = []
   if (!Array.isArray(meta.recentSentIds)) meta.recentSentIds = []
+  if (!Array.isArray(meta.recentIncoming)) meta.recentIncoming = []
   if (!meta.ownSenderToken) meta.ownSenderToken = null
   state.meta = meta
   return meta
@@ -326,6 +335,43 @@ function recordSentMessage(state, text, phone) {
   fresh.push({ text: norm, ts: now, phone: canonicalPhone(phone) || null })
   meta.recentSent = fresh.slice(-RECENT_SENT_MAX)
   saveMessageState(state)
+}
+
+// Record an incoming message this chat already forwarded AND had answered (or
+// handled via a terminal skip such as already_replied / matches_outgoing /
+// duplicate). This is the hardened multi-message dedup history: the single
+// stored boundary only remembers the newest handled message, but the
+// recentIncoming fingerprint remembers EVERY forwarded text+phone within the
+// TTL, so a re-extracted OLDER message (whose fallback id changed because the
+// timestamp hash differed) is never re-forwarded as if it were new — which would
+// otherwise make the backend treat it as a fresh message and reply AGAIN.
+// Scoped to the SAME chat (canonical phone) so Customer A's history never
+// suppresses Customer B.
+function recordForwardedIncoming(state, phone, text) {
+  const meta = ensureMessageStateMeta(state)
+  const norm = normalizeMessageText(text)
+  const chatKey = canonicalPhone(phone)
+  if (!norm || !chatKey) return
+  const now = Date.now()
+  const fresh = (meta.recentIncoming || []).filter((e) => now - (e.ts || 0) < RECENT_INCOMING_TTL_MS)
+  if (fresh.some((e) => e.phone === chatKey && e.text === norm)) return
+  fresh.push({ text: norm, ts: now, phone: chatKey })
+  meta.recentIncoming = fresh.slice(-RECENT_INCOMING_MAX)
+  saveMessageState(state)
+}
+
+// True when this chat already forwarded this exact normalized text within the
+// TTL and got it answered — the message must never be re-forwarded, even when
+// the stored boundary no longer covers it (boundary lost after a restart or the
+// message being older than the newest handled boundary).
+function hasForwardedIncoming(meta, phone, text) {
+  const norm = normalizeMessageText(text)
+  const chatKey = canonicalPhone(phone)
+  if (!norm || !chatKey) return false
+  const now = Date.now()
+  return ((meta && meta.recentIncoming) || []).some(
+    (e) => e.phone === chatKey && e.text === norm && (now - (e.ts || 0)) < RECENT_INCOMING_TTL_MS
+  )
 }
 
 // True when a normalized message text matches something this account sent
@@ -3810,6 +3856,36 @@ async function detectAndForwardIncoming(page, state) {
         continue
       }
 
+      // ── HARDENED DEDUP: never re-forward a message already answered ──
+      // The stored boundary only remembers the NEWEST handled message. A
+      // re-extraction can surface an OLDER message whose fallback id no longer
+      // matches the boundary (the timestamp-derived hash changed), which the
+      // backend would treat as brand-new and reply AGAIN. The recentIncoming
+      // fingerprint history remembers every forwarded text+phone within the TTL
+      // regardless of boundary position, so a previously-answered message is
+      // skipped even when its id no longer matches the stored boundary.
+      if (hasForwardedIncoming(state.meta, phone, messageToSend)) {
+        console.log(`[DEDUP_FORWARDED_SKIP] chat=${key} text+phone already forwarded previously — not re-forwarding`)
+        console.log(`[INGEST_DECISION] chat=${key} shouldForward=false reason=already_forwarded`)
+        state.chats[key] = {
+          ...(stored || {}),
+          title: chat.title,
+          phone,
+          preview: chat.preview,
+          rowSig: chat.raw || stored?.rowSig || null,
+          extractRetries: 0,
+          lastIncomingText: last.text,
+          lastIncomingId: last.id || null,
+          lastIncomingTs: last.ts,
+          lastOutcome: 'handled',
+          lastSentText: stored?.lastSentText || null,
+          conversationState: stored?.conversationState || 'WAITING_FOR_CUSTOMER',
+          updatedAt: new Date().toISOString(),
+        }
+        saveMessageState(state)
+        continue
+      }
+
       console.log(`[INGEST_DECISION] chat=${key} shouldForward=true reason=new_incoming_message`)
       console.log(`[INGEST] provider_message_id=${last.id ?? 'none'} phone=${phone} message="${messageToSend.slice(0, 80)}"`)
 
@@ -3911,6 +3987,12 @@ async function detectAndForwardIncoming(page, state) {
           saveMessageState(state)
           continue
         }
+
+        // This message was genuinely handled (reply queued, handoff/close, or a
+        // terminal skip such as already_replied / matches_outgoing / duplicate).
+        // Remember its text+phone so a future re-extraction of the same message
+        // (with a different fallback id) can never re-forward it as new.
+        recordForwardedIncoming(state, phone, messageToSend)
 
         // If the ingest result says handled but no reply was queued and it was not
         // a legitimately terminal skip, do NOT treat this as a completed turn.

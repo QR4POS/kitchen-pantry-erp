@@ -363,7 +363,7 @@ export default function EstimatesPage() {
 
       {/* Estimate Builder Dialog */}
       <Dialog open={showBuilder} onOpenChange={setShowBuilder}>
-        <DialogContent className="max-w-5xl max-h-[90vh]">
+        <DialogContent className="w-[calc(100%-2rem)] sm:max-w-5xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Create New Estimate</DialogTitle>
             <DialogDescription>Build a complete kitchen estimate with measurements, materials, and pricing</DialogDescription>

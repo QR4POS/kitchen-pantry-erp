@@ -32,6 +32,17 @@ import {
 import { StatusBadge } from "@/components/shared/status-badge"
 import { ProjectTimeline } from "@/components/shared/project-timeline"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import { useToast } from "@/hooks/use-toast"
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -159,10 +170,28 @@ export default function ProjectDetailPage() {
   const [messageInput, setMessageInput] = useState("")
   const [activeTab, setActiveTab] = useState("overview")
   const [changeStatusOpen, setChangeStatusOpen] = useState(false)
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const supabase = createClient()
+  const { addToast } = useToast()
+
+  async function handleDelete() {
+    setDeleting(true)
+    try {
+      const { error } = await supabase.from("projects").delete().eq("id", id)
+      if (error) throw error
+      addToast({ title: "Project deleted", description: "The project has been removed." })
+      router.push("/admin/projects")
+    } catch {
+      addToast({ title: "Error", description: "Failed to delete project.", variant: "destructive" })
+      setConfirmDeleteOpen(false)
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   useEffect(() => {
     async function fetchData() {
@@ -437,7 +466,7 @@ export default function ProjectDetailPage() {
               <SelectItem value={ProjectStatus.Cancelled}>Cancelled</SelectItem>
             </SelectContent>
           </Select>
-          <Button variant="destructive" size="sm">
+          <Button variant="destructive" size="sm" onClick={() => setConfirmDeleteOpen(true)} disabled={deleting}>
             <Trash2 className="size-4 mr-2" />
             Delete
           </Button>
@@ -1023,6 +1052,27 @@ export default function ProjectDetailPage() {
           </Card>
         </div>
       </motion.div>
+
+      <AlertDialog open={confirmDeleteOpen} onOpenChange={setConfirmDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Project</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete "{project?.name}"? This will permanently remove the project and all its related data. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleting}
+              onClick={(e) => { e.preventDefault(); handleDelete() }}
+            >
+              {deleting ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </motion.div>
   )
 }

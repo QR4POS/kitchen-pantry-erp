@@ -483,17 +483,17 @@ export function EstimateBuilder({
           </div>
         )}
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Card className="bg-muted/30">
+        <div className="flex flex-wrap gap-4">
+          <Card className="bg-muted/30 flex-1 min-w-[150px]">
             <CardContent className="p-4">
               <p className="text-sm text-muted-foreground">Calculated Area</p>
-              <p className="text-2xl font-bold">{result.areaCalculated.toFixed(1)} <span className="text-sm font-normal text-muted-foreground">sq.ft</span></p>
+              <p className="text-2xl font-bold whitespace-nowrap">{result.areaCalculated.toFixed(1)} <span className="text-sm font-normal text-muted-foreground">sq.ft</span></p>
             </CardContent>
           </Card>
-          <Card className="bg-muted/30">
+          <Card className="bg-muted/30 flex-1 min-w-[150px]">
             <CardContent className="p-4">
               <p className="text-sm text-muted-foreground">Material Cost (est.)</p>
-              <p className="text-2xl font-bold">{formatCurrency(result.totalMaterialsCost)}</p>
+              <p className="text-2xl font-bold whitespace-nowrap">{formatCurrency(result.totalMaterialsCost)}</p>
             </CardContent>
           </Card>
         </div>
@@ -588,8 +588,8 @@ export function EstimateBuilder({
           <p className="text-sm text-muted-foreground">Add transportation, installation, and other charges</p>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-5">
-          <div className="space-y-2 sm:col-span-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="space-y-2 flex-1 min-w-[150px]">
             <Label>Cost Name</Label>
             <Input
               placeholder="e.g. Transportation"
@@ -597,7 +597,7 @@ export function EstimateBuilder({
               onChange={e => setNewCostName(e.target.value)}
             />
           </div>
-          <div className="space-y-2">
+          <div className="space-y-2 w-40 min-w-[130px]">
             <Label>Type</Label>
             <Select value={newCostType} onValueChange={(v) => setNewCostType(v as AdditionalCost['type'])}>
               <SelectTrigger>
@@ -610,7 +610,7 @@ export function EstimateBuilder({
               </SelectContent>
             </Select>
           </div>
-          <div className="space-y-2">
+          <div className="space-y-2 w-32 min-w-[110px]">
             <Label>{newCostIsPct ? "Percentage %" : "Amount"}</Label>
             <Input
               type="number"
@@ -622,16 +622,14 @@ export function EstimateBuilder({
               }}
             />
           </div>
-          <div className="space-y-2 flex items-end">
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => setNewCostIsPct(!newCostIsPct)}>
-                <Percent className="size-3 mr-1" />
-                {newCostIsPct ? "Fixed" : "%"}
-              </Button>
-              <Button size="sm" onClick={addAdditionalCost} disabled={!newCostName}>
-                <Plus className="size-4" />
-              </Button>
-            </div>
+          <div className="flex gap-2 pb-0.5">
+            <Button variant="outline" size="sm" onClick={() => setNewCostIsPct(!newCostIsPct)} type="button">
+              <Percent className="size-3 mr-1" />
+              {newCostIsPct ? "Fixed" : "%"}
+            </Button>
+            <Button size="sm" onClick={addAdditionalCost} disabled={!newCostName} type="button">
+              <Plus className="size-4" />
+            </Button>
           </div>
         </div>
 
@@ -660,7 +658,7 @@ export function EstimateBuilder({
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
             <Label>Labour Calculation</Label>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <Select value={useFixedLabor ? "fixed" : "percentage"} onValueChange={(v) => setUseFixedLabor(v === "fixed")}>
                 <SelectTrigger className="w-36">
                   <SelectValue />
@@ -901,23 +899,23 @@ export function EstimateBuilder({
           </CardContent>
         </Card>
 
-        <div className="grid gap-4 sm:grid-cols-3">
-          <Card className="bg-muted/30">
+        <div className="flex flex-wrap gap-4">
+          <Card className="bg-muted/30 flex-1 min-w-[150px]">
             <CardContent className="p-4 text-center">
               <p className="text-sm text-muted-foreground">Total Area</p>
-              <p className="text-xl font-bold">{result.areaCalculated.toFixed(1)} sq.ft</p>
+              <p className="text-xl font-bold whitespace-nowrap">{result.areaCalculated.toFixed(1)} sq.ft</p>
             </CardContent>
           </Card>
-          <Card className="bg-muted/30">
+          <Card className="bg-muted/30 flex-1 min-w-[150px]">
             <CardContent className="p-4 text-center">
               <p className="text-sm text-muted-foreground">Profit Margin</p>
-              <p className="text-xl font-bold text-emerald-600">{result.profitPercentage}%</p>
+              <p className="text-xl font-bold text-emerald-600 whitespace-nowrap">{result.profitPercentage}%</p>
             </CardContent>
           </Card>
-          <Card className="bg-muted/30">
+          <Card className="bg-muted/30 flex-1 min-w-[150px]">
             <CardContent className="p-4 text-center">
               <p className="text-sm text-muted-foreground">Total Items</p>
-              <p className="text-xl font-bold">{result.breakdownItems.length}</p>
+              <p className="text-xl font-bold whitespace-nowrap">{result.breakdownItems.length}</p>
             </CardContent>
           </Card>
         </div>
@@ -928,7 +926,7 @@ export function EstimateBuilder({
   return (
     <div className="space-y-6">
       {/* Step indicator */}
-      <div className="flex items-center gap-1 overflow-x-auto pb-2">
+      <div className="flex flex-wrap items-center gap-1.5 pb-2">
         {steps.map((step, i) => (
           <button
             key={step.id}
@@ -939,7 +937,7 @@ export function EstimateBuilder({
                 ? "bg-primary text-primary-foreground font-medium"
                 : i < currentStep
                   ? "text-muted-foreground hover:bg-accent"
-                  : "text-muted-foreground/50"
+                  : "text-muted-foreground hover:bg-accent/60"
             )}
           >
             <step.icon className="size-4" />

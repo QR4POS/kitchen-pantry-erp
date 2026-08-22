@@ -75,7 +75,7 @@ export default function StaffProjectsPage() {
   const [search, setSearch] = useState("")
   const [statusFilter, setStatusFilter] = useState("all")
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [formData, setFormData] = useState({ name: "", customer_id: "", kitchen_type: "", material_type: "", length: "", width: "" })
+  const [formData, setFormData] = useState({ name: "", customer_id: "", kitchen_type: "", material_type: "", length: "", width: "", height: "" })
   const [saving, setSaving] = useState(false)
   const supabase = createClient()
 
@@ -262,14 +262,18 @@ export default function StaffProjectsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <div className="grid gap-2">
                 <Label>Length (ft)</Label>
-                <Input type="number" value={formData.length} onChange={(e) => setFormData({ ...formData, length: e.target.value })} placeholder="0" />
+                <Input type="number" step="0.01" min="0" value={formData.length} onChange={(e) => setFormData({ ...formData, length: e.target.value })} placeholder="0" />
               </div>
               <div className="grid gap-2">
                 <Label>Width (ft)</Label>
-                <Input type="number" value={formData.width} onChange={(e) => setFormData({ ...formData, width: e.target.value })} placeholder="0" />
+                <Input type="number" step="0.01" min="0" value={formData.width} onChange={(e) => setFormData({ ...formData, width: e.target.value })} placeholder="0" />
+              </div>
+              <div className="grid gap-2">
+                <Label>Height (ft)</Label>
+                <Input type="number" step="0.01" min="0" value={formData.height} onChange={(e) => setFormData({ ...formData, height: e.target.value })} placeholder="0" />
               </div>
             </div>
           </div>
