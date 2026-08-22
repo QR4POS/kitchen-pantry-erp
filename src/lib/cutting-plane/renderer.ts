@@ -23,7 +23,8 @@ export const COLORS = {
 
 export function drawPanelCard(
   doc: PDFDocumentType,
-  placed: PlacedPanel
+  placed: PlacedPanel,
+  opts: { edgeLabels?: boolean } = {}
 ): void {
   const { panel, box } = placed
 
@@ -56,7 +57,8 @@ export function drawPanelCard(
   doc.rect(drawingX, drawingY, drawingW, drawingH)
     .fill(COLORS.lightFill)
 
-  const fitted = fitRectInside(panel.dimensions, { width: drawingW, height: drawingH }, 14)
+  // Extra clearance so dimension lines/labels never touch the outline
+  const fitted = fitRectInside(panel.dimensions, { width: drawingW, height: drawingH }, 20)
   const rectX = drawingX + fitted.x
   const rectY = drawingY + fitted.y
 
@@ -64,7 +66,9 @@ export function drawPanelCard(
   doc.rect(rectX, rectY, fitted.width, fitted.height)
     .lineWidth(0.75).stroke(COLORS.text)
 
-  drawEdgeBands(doc, rectX, rectY, fitted.width, fitted.height, panel)
+  drawEdgeBands(doc, rectX, rectY, fitted.width, fitted.height, panel, {
+    labels: opts.edgeLabels === true && fitted.width > 130 && fitted.height > 80,
+  })
   if (panel.grain !== 'none') {
     drawGrainArrow(doc, rectX, rectY, fitted.width, fitted.height, panel.grain)
   }
@@ -90,13 +94,18 @@ export function drawPanelCard(
   })
 }
 
+/**
+ * Edge convention: A = top (length), B = right (width),
+ * C = bottom (length), D = left (width).
+ */
 function drawEdgeBands(
   doc: PDFDocumentType,
   x: number,
   y: number,
   w: number,
   h: number,
-  panel: Panel
+  panel: Panel,
+  opts: { labels?: boolean } = {}
 ): void {
   const eb = panel.edgeBanding
   if (!eb.l1 && !eb.l2 && !eb.w1 && !eb.w2) return
@@ -106,6 +115,23 @@ function drawEdgeBands(
   if (eb.l2) doc.moveTo(x + inset, y + h - inset).lineTo(x + w - inset, y + h - inset).stroke()
   if (eb.w1) doc.moveTo(x + inset, y + inset).lineTo(x + inset, y + h - inset).stroke()
   if (eb.w2) doc.moveTo(x + w - inset, y + inset).lineTo(x + w - inset, y + h - inset).stroke()
+
+  if (!opts.labels) return
+  doc.fontSize(4.8).font('Helvetica-Bold').fillColor(COLORS.edgeBand)
+  const lenW = String(Math.round(panel.dimensions.width))
+  const lenH = String(Math.round(panel.dimensions.height))
+  if (eb.l1) doc.text(`A ${lenW}`, x + w / 2 - 14, Math.max(y - 7, y + 3), { width: 28, align: 'center', lineBreak: false })
+  if (eb.l2) doc.text(`C ${lenW}`, x + w / 2 - 14, y + h - 9, { width: 28, align: 'center', lineBreak: false })
+  if (eb.w1) {
+    doc.save(); doc.translate(x + 4, y + h / 2); doc.rotate(-90)
+    doc.text(`D ${lenH}`, -14, -2, { width: 28, align: 'center', lineBreak: false })
+    doc.restore()
+  }
+  if (eb.w2) {
+    doc.save(); doc.translate(x + w - 4, y + h / 2); doc.rotate(90)
+    doc.text(`B ${lenH}`, -14, -2, { width: 28, align: 'center', lineBreak: false })
+    doc.restore()
+  }
 }
 
 function drawGrainArrow(

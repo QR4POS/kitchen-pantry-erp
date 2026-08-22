@@ -95,11 +95,30 @@ export class PageBin {
   }
 }
 
+export interface LayoutOptions {
+  pageWidth?: number
+  pageHeight?: number
+  margin?: number
+  headerHeight?: number
+  footerHeight?: number
+  maxCardWidth?: number
+  maxCardHeight?: number
+}
+
 export function layoutPanelsOnPages(
   panels: Panel[],
-  maxCardWidth = 250,
-  maxCardHeight = 300
+  options: LayoutOptions = {}
 ): CuttingPlanPage[] {
+  const {
+    pageWidth = PAGE_W,
+    pageHeight = PAGE_H,
+    margin = PAGE_MARGIN,
+    headerHeight = HEADER_H,
+    footerHeight = FOOTER_H,
+    maxCardWidth = 250,
+    maxCardHeight = 300,
+  } = options
+
   // Sort by area descending to pack larger panels first
   const sorted = [...panels].sort((a, b) => {
     const areaA = a.dimensions.width * a.dimensions.height
@@ -108,7 +127,8 @@ export function layoutPanelsOnPages(
   })
 
   const pages: PageBin[] = []
-  const fallbackCard = { w: PAGE_W - PAGE_MARGIN * 2, h: PAGE_H - PAGE_MARGIN * 2 - HEADER_H - FOOTER_H }
+  const fallbackCard = { w: pageWidth - margin * 2, h: pageHeight - margin * 2 - headerHeight - footerHeight }
+  const makeBin = () => new PageBin(pageWidth, pageHeight, margin, headerHeight, footerHeight)
 
   for (const panel of sorted) {
     let placed = false
@@ -119,11 +139,11 @@ export function layoutPanelsOnPages(
       }
     }
     if (!placed) {
-      const newPage = new PageBin()
+      const newPage = makeBin()
       const box = newPage.insert(panel, maxCardWidth, maxCardHeight)
       if (!box) {
         // Even a single panel doesn't fit at card size — give it a full sheet
-        const biggerPage = new PageBin()
+        const biggerPage = makeBin()
         biggerPage.insert(panel, fallbackCard.w, fallbackCard.h)
         pages.push(biggerPage)
       } else {

@@ -33,6 +33,8 @@ export interface GenerateCuttingPlanInput {
   preparedBy?: string
   /** Revision change description shown on the approval sheet. */
   changeDescription?: string
+  /** Record status at generation time (shown in the document header). */
+  status?: string
 }
 
 export function generateCuttingPlan(input: GenerateCuttingPlanInput): CuttingPlanDocument {
@@ -122,7 +124,15 @@ export async function generateCuttingPlanPDFBuffer(input: GenerateCuttingPlanInp
   document: CuttingPlanDocument
 }> {
   const document = generateCuttingPlan(input)
+  // A4 portrait layout feeds the panel-drawing fallback; A3 landscape gives
+  // manufacturing drawings room to breathe.
   const pages = layoutPanelsOnPages(document.panels)
+  const pagesA3 = layoutPanelsOnPages(document.panels, {
+    pageWidth: 1190.55,
+    pageHeight: 841.89,
+    maxCardWidth: 340,
+    maxCardHeight: 300,
+  })
   const buffer = await generateCuttingPlanPDF({
     project: document.project,
     generatedAt: document.generatedAt,
@@ -134,9 +144,12 @@ export async function generateCuttingPlanPDFBuffer(input: GenerateCuttingPlanInp
     sheets: document.sheets,
     modules: document.modules,
     runs: document.runs,
+    positions: document.positions,
     warnings: document.warnings,
     preparedBy: input.preparedBy,
     changeDescription: input.changeDescription,
+    status: input.status ?? 'generated',
+    pagesA3,
   })
   return { buffer, document }
 }
