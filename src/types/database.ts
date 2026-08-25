@@ -280,6 +280,23 @@ export type WhatsappDirection = 'incoming' | 'outgoing'
 export type WhatsappMessageStatus = 'pending' | 'processing' | 'sent' | 'failed'
 export type WhatsappMessageType = 'text' | 'image'
 export type LeadStatus = 'new' | 'collecting' | 'waiting_approval' | 'approved' | 'rejected' | 'converted'
+export type WhatsAppProvider = 'web_playwright' | 'cloud_api'
+
+export interface WhatsappTransportConfigRow {
+  id: string
+  active_provider: WhatsAppProvider
+  cloud_api_enabled: boolean
+  cloud_api_phone_number_id: string | null
+  cloud_api_business_account_id: string | null
+  cloud_api_access_token: string | null
+  cloud_api_verify_token: string | null
+  cloud_api_api_version: string
+  webhook_status: 'not_configured' | 'configured' | 'verified'
+  webhook_verified_at: string | null
+  updated_by: string | null
+  created_at: string
+  updated_at: string
+}
 
 export interface AiAgentSettingsRow {
   id: string
@@ -361,6 +378,8 @@ export interface WhatsappMessageRow {
   conversation_id: string | null
   decision_action: ConversationAction | null
   post_send_state: AiConversationStatus | null
+  delivered_at: string | null
+  read_at: string | null
   is_sensitive: boolean
   created_at: string
 }
@@ -469,6 +488,7 @@ export interface Database {
       ai_agent_logs: { Row: AiAgentLogRow; Insert: Partial<AiAgentLogRow>; Update: Partial<AiAgentLogRow> }
       leads: { Row: LeadRow; Insert: Partial<LeadRow>; Update: Partial<LeadRow> }
       whatsapp_customer_account_provisioning: { Row: WhatsappCustomerAccountProvisioningRow; Insert: Partial<WhatsappCustomerAccountProvisioningRow>; Update: Partial<WhatsappCustomerAccountProvisioningRow> }
+      whatsapp_transport_config: { Row: WhatsappTransportConfigRow; Insert: Partial<WhatsappTransportConfigRow>; Update: Partial<WhatsappTransportConfigRow> }
     }
     Functions: {
       get_user_role: { Args: never; Returns: UserRole }

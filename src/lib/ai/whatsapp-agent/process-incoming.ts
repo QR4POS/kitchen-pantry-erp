@@ -22,6 +22,15 @@ export async function handleIncomingMessage(
     // Persisted for history but NOT processed by the AI (only the newest message
     // of a turn generates a reply).
     olderMessages?: string[]
+    // Transport-level metadata (provider, timestamp, location payload…).
+    // Additive + optional: business logic may read it but never requires it.
+    metadata?: {
+      provider?: 'web_playwright' | 'cloud_api'
+      timestamp?: string | null
+      messageType?: string
+      location?: { latitude: number; longitude: number; name: string | null; address: string | null } | null
+      phoneNumberId?: string | null
+    }
   }
 ): Promise<{
   processed: boolean
@@ -38,6 +47,7 @@ export async function handleIncomingMessage(
     phone: normalized,
     hasProviderMessageId: Boolean(meta?.providerMessageId),
     media: Boolean(meta?.mediaUrl),
+    provider: meta?.metadata?.provider ?? 'web_playwright',
   })
   console.log(`[ingest] incoming received phone=${normalized} message="${String(message).slice(0, 80)}"`)
 

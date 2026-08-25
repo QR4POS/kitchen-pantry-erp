@@ -13,11 +13,6 @@ import {
   Send,
   Phone,
   Loader2,
-  Play,
-  Square,
-  RotateCw,
-  Wifi,
-  WifiOff,
 } from "lucide-react"
 import { cn } from "@/utils/cn"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -30,6 +25,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { useToast } from "@/hooks/use-toast"
 import OnboardingQuestionsEditor from "@/components/ai-agent/onboarding-questions-editor"
+import WhatsAppConnection from "@/components/ai-agent/whatsapp-connection"
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -103,18 +99,6 @@ interface TestResult {
   } | null
 }
 
-interface WorkerStatus {
-  running: boolean
-  connected: boolean
-  qr_pending: boolean
-  agent_enabled: boolean
-  last_ping: string | null
-  last_error: string | null
-  pid: number | null
-  started_at: string | null
-  last_action: "start" | "stop" | "restart" | null
-  worker_pids: number[]
-}
 
 export default function AIAgentSettingsPage() {
   const { addToast: toast } = useToast()
@@ -128,10 +112,6 @@ export default function AIAgentSettingsPage() {
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
-  const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null)
-  const [starting, setStarting] = useState(false)
-  const [stopping, setStopping] = useState(false)
-  const [restarting, setRestarting] = useState(false)
   const [welcomeDraft, setWelcomeDraft] = useState("")
   const [conversations, setConversations] = useState<any[]>([])
   const [convAction, setConvAction] = useState<string | null>(null)
@@ -162,42 +142,6 @@ export default function AIAgentSettingsPage() {
   useEffect(() => {
     fetchData()
   }, [fetchData])
-
-  const fetchWorkerStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/api/whatsapp-worker/status")
-      if (!res.ok) return
-      setWorkerStatus(await res.json())
-    } catch {
-      // transient — keep showing the last known state
-    }
-  }, [])
-
-  useEffect(() => {
-    fetchWorkerStatus()
-    const interval = setInterval(fetchWorkerStatus, 5000)
-    return () => clearInterval(interval)
-  }, [fetchWorkerStatus])
-
-  async function runWorkerAction(action: "start" | "stop" | "restart") {
-    if (starting || stopping || restarting) return
-    if (action === "start") setStarting(true)
-    if (action === "stop") setStopping(true)
-    if (action === "restart") setRestarting(true)
-    try {
-      const res = await fetch(`/api/whatsapp-worker/${action}`, { method: "POST" })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || `Failed to ${action} worker`)
-      toast({ title: "WhatsApp Worker", description: data.message })
-      fetchWorkerStatus()
-    } catch (e) {
-      toast({ title: "Error", description: (e as Error).message, variant: "destructive" })
-    } finally {
-      setStarting(false)
-      setStopping(false)
-      setRestarting(false)
-    }
-  }
 
   async function saveSettings(patch: Partial<AgentSettings>) {
     setSaving(true)
@@ -360,102 +304,9 @@ export default function AIAgentSettingsPage() {
         </Card>
       </motion.div>
 
-      {/* WhatsApp Worker Control */}
+      {/* WhatsApp transport connection (Web worker + Cloud API + Webhook) */}
       <motion.div variants={itemVariants}>
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Activity className="size-4" />
-              WhatsApp Worker Control
-            </CardTitle>
-            <CardDescription>Start, stop or restart the WhatsApp worker process (npm run whatsapp-worker)</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div className="flex items-start gap-4">
-                <div className={cn(
-                  "size-12 rounded-xl flex items-center justify-center shrink-0",
-                  workerStatus?.running ? "bg-emerald-500/15 text-emerald-600" : "bg-muted text-muted-foreground"
-                )}>
-                  {workerStatus?.running ? <Wifi className="size-6" /> : <WifiOff className="size-6" />}
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-semibold">Worker Process</h2>
-                    {workerStatus?.running ? (
-                      <Badge variant="success">Running</Badge>
-                    ) : (
-                      <Badge variant="secondary">Stopped</Badge>
-                    )}
-                  </div>
-                  <p className="text-sm text-muted-foreground max-w-lg">
-                    {workerStatus?.running
-                      ? workerStatus.connected
-                        ? "Worker is running and connected to WhatsApp."
-                        : workerStatus.qr_pending
-                          ? "Worker is running and waiting for a QR scan."
-                          : "Worker is running but not yet connected."
-                      : "Worker process is not running. Use Start Worker to launch it."}
-                  </p>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 shrink-0">
-                <Button onClick={() => runWorkerAction("start")} disabled={starting || stopping || restarting || !!workerStatus?.running}>
-                  {starting ? <Loader2 className="size-4 mr-1.5 animate-spin" /> : <Play className="size-4 mr-1.5" />}
-                  {starting ? "Starting..." : "Start Worker"}
-                </Button>
-                <Button variant="destructive" onClick={() => runWorkerAction("stop")} disabled={starting || stopping || restarting || !workerStatus?.running}>
-                  {stopping ? <Loader2 className="size-4 mr-1.5 animate-spin" /> : <Square className="size-4 mr-1.5" />}
-                  {stopping ? "Stopping..." : "Stop Worker"}
-                </Button>
-                <Button variant="outline" onClick={() => runWorkerAction("restart")} disabled={starting || stopping || restarting}>
-                  {restarting ? <Loader2 className="size-4 mr-1.5 animate-spin" /> : <RotateCw className="size-4 mr-1.5" />}
-                  {restarting ? "Restarting..." : "Restart Worker"}
-                </Button>
-              </div>
-            </div>
-
-            <Separator />
-
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="rounded-lg border p-3">
-                <p className="text-xs text-muted-foreground">Connection</p>
-                <p className="text-sm font-medium mt-1 capitalize">
-                  {workerStatus?.connected ? "Connected" : workerStatus?.qr_pending ? "QR scan required" : "Disconnected"}
-                </p>
-              </div>
-              <div className="rounded-lg border p-3">
-                <p className="text-xs text-muted-foreground">Process</p>
-                <p className="text-sm font-medium mt-1">
-                  {workerStatus?.running ? `Running${workerStatus.pid ? ` (PID ${workerStatus.pid})` : ""}` : "Not running"}
-                </p>
-              </div>
-              <div className="rounded-lg border p-3">
-                <p className="text-xs text-muted-foreground">Last Started</p>
-                <p className="text-sm font-medium mt-1">
-                  {workerStatus?.started_at ? new Date(workerStatus.started_at).toLocaleString("en-IN") : "Never"}
-                </p>
-              </div>
-              <div className="rounded-lg border p-3">
-                <p className="text-xs text-muted-foreground">AI Agent (master switch)</p>
-                <p className="text-sm font-medium mt-1 capitalize">{workerStatus?.agent_enabled ? "Enabled" : "Disabled"}</p>
-                {!workerStatus?.agent_enabled && (
-                  <p className="text-xs text-muted-foreground mt-1">Enable the AI Agent toggle above to start auto-replies</p>
-                )}
-              </div>
-            </div>
-
-            {workerStatus?.last_error && (
-              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
-                <AlertTriangle className="size-4 text-destructive shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-medium text-destructive">Last Error</p>
-                  <p className="text-muted-foreground">{workerStatus.last_error}</p>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+        <WhatsAppConnection />
       </motion.div>
 
       <div className="grid gap-6 lg:grid-cols-2">
