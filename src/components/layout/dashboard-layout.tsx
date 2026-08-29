@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useEffect, useCallback } from "react"
 import { usePathname } from "next/navigation"
 import { motion, AnimatePresence } from "framer-motion"
 import { cn } from "@/utils/cn"
@@ -9,7 +9,7 @@ import { Sidebar } from "@/components/layout/sidebar"
 import { Navbar } from "@/components/layout/navbar"
 import { MobileNav } from "@/components/layout/mobile-nav"
 import { Toaster, ToastProvider } from "@/components/ui/toast"
-import { type User as UserType, Role } from "@/types"
+import { type User as UserType } from "@/types"
 import { useAuthStore } from "@/store/auth-store"
 import { useUiStore } from "@/store/ui-store"
 import { logoutAction } from "@/lib/auth/actions"
@@ -24,14 +24,12 @@ export function DashboardLayout({ children, user }: DashboardLayoutProps) {
   const isMobile = useMediaQuery("(max-width: 1023px)")
   const { sidebarCollapsed, setSidebarCollapsed, sidebarOpen, setSidebarOpen } = useUiStore()
   const { logout, setUser } = useAuthStore()
-  const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
     if (user) setUser(user)
   }, [user, setUser])
 
   useEffect(() => {
-    setMounted(true)
     // Force light theme and clear any saved dark preference
     if (typeof window !== "undefined") {
       try {
@@ -69,10 +67,6 @@ export function DashboardLayout({ children, user }: DashboardLayoutProps) {
     await logoutAction()
     logout()
   }, [logout])
-
-  if (!mounted) {
-    return null
-  }
 
   return (
     <ToastProvider>

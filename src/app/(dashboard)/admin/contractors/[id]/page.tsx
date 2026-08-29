@@ -1,11 +1,12 @@
 "use client"
 
 import { use, useState, useEffect, useMemo } from "react"
+import { useRouter } from "next/navigation"
+import Link from "next/link"
 import { motion } from "framer-motion"
 import { AssignProjectDialog } from "./components/AssignProjectDialog"
 import {
   ArrowLeft,
-  Building2,
   Phone,
   Mail,
   MapPin,
@@ -37,6 +38,15 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -63,69 +73,6 @@ const monthlyEarningsData = [
   { month: "Dec", earnings: 76000 },
 ]
 
-const mockContractor: Contractor = {
-  id: "mock-1",
-  user_id: "user-mock-1",
-  company_name: "Sharma Construction Works",
-  phone: "+91-98765-43210",
-  email: "info@sharmaconstruction.com",
-  address: "12, Industrial Layout, Peenya",
-  city: "Bengaluru",
-  state: "Karnataka",
-  specialization: "Carpentry & Woodwork",
-  experience_years: 12,
-  payment_terms: "Net 30",
-  is_active: true,
-  created_at: "2024-01-15T00:00:00Z",
-}
-
-const mockProjects: Project[] = [
-  {
-    id: "mp-1", name: "Modern Kitchen - Sharma Residence", description: "", customer_id: "c1",
-    kitchen_type: "LShape" as any, length: 0, width: 0, height: 0, material_type: "Plywood" as any,
-    status: ProjectStatus.Completed, contractor_cost: 450000, customer_price: 0,
-    start_date: "2024-03-01", expected_end_date: "2024-03-31", completed_date: "2024-03-28",
-    created_at: "2024-03-01T00:00:00Z", updated_at: "2024-03-28T00:00:00Z",
-  },
-  {
-    id: "mp-2", name: "Villa Interior - Patel Project", description: "", customer_id: "c2",
-    kitchen_type: "UShape" as any, length: 0, width: 0, height: 0, material_type: "MDF" as any,
-    status: ProjectStatus.Production, contractor_cost: 780000, customer_price: 0,
-    start_date: "2024-06-15", expected_end_date: "2024-08-15",
-    created_at: "2024-06-10T00:00:00Z", updated_at: "2024-07-20T00:00:00Z",
-  },
-  {
-    id: "mp-3", name: "Office Cabinets - TechCorp", description: "", customer_id: "c3",
-    kitchen_type: "Straight" as any, length: 0, width: 0, height: 0, material_type: "Melamine" as any,
-    status: ProjectStatus.Completed, contractor_cost: 320000, customer_price: 0,
-    start_date: "2024-04-01", expected_end_date: "2024-04-25", completed_date: "2024-04-22",
-    created_at: "2024-03-28T00:00:00Z", updated_at: "2024-04-22T00:00:00Z",
-  },
-  {
-    id: "mp-4", name: "Modular Kitchen - Desai Residency", description: "", customer_id: "c4",
-    kitchen_type: "LShape" as any, length: 0, width: 0, height: 0, material_type: "Acrylic" as any,
-    status: ProjectStatus.Installation, contractor_cost: 560000, customer_price: 0,
-    start_date: "2024-08-01", expected_end_date: "2024-09-15",
-    created_at: "2024-07-25T00:00:00Z", updated_at: "2024-08-30T00:00:00Z",
-  },
-  {
-    id: "mp-5", name: "Wardrobe & Storage - Gupta Home", description: "", customer_id: "c5",
-    kitchen_type: "Straight" as any, length: 0, width: 0, height: 0, material_type: "Plywood" as any,
-    status: ProjectStatus.Approved, contractor_cost: 280000, customer_price: 0,
-    start_date: "2024-09-10", expected_end_date: "2024-10-10",
-    created_at: "2024-09-01T00:00:00Z", updated_at: "2024-09-08T00:00:00Z",
-  },
-]
-
-const mockPayments: Payment[] = [
-  { id: "pay-1", project_id: "mp-1", contractor_id: "mock-1", amount: 180000, payment_type: PaymentType.CONTRACTOR_PAYMENT, status: "Paid", due_date: "2024-04-01", paid_date: "2024-03-30", created_at: "2024-04-01T00:00:00Z" },
-  { id: "pay-2", project_id: "mp-1", contractor_id: "mock-1", amount: 270000, payment_type: PaymentType.CONTRACTOR_PAYMENT, status: "Paid", due_date: "2024-04-15", paid_date: "2024-04-12", created_at: "2024-04-15T00:00:00Z" },
-  { id: "pay-3", project_id: "mp-3", contractor_id: "mock-1", amount: 320000, payment_type: PaymentType.CONTRACTOR_PAYMENT, status: "Paid", due_date: "2024-05-01", paid_date: "2024-04-28", created_at: "2024-05-01T00:00:00Z" },
-  { id: "pay-4", project_id: "mp-2", contractor_id: "mock-1", amount: 300000, payment_type: PaymentType.CONTRACTOR_PAYMENT, status: "Pending", due_date: "2024-09-01", created_at: "2024-09-01T00:00:00Z" },
-  { id: "pay-5", project_id: "mp-4", contractor_id: "mock-1", amount: 200000, payment_type: PaymentType.CONTRACTOR_PAYMENT, status: "Pending", due_date: "2024-10-01", created_at: "2024-10-01T00:00:00Z" },
-  { id: "pay-6", project_id: "mp-2", contractor_id: "mock-1", amount: 480000, payment_type: PaymentType.CONTRACTOR_PAYMENT, status: "Pending", due_date: "2024-11-01", created_at: "2024-11-01T00:00:00Z" },
-]
-
 export default function ContractorProfilePage({
   params,
 }: {
@@ -138,6 +85,24 @@ export default function ContractorProfilePage({
   const [projects, setProjects] = useState<Project[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
   const [loading, setLoading] = useState(true)
+  const [editOpen, setEditOpen] = useState(false)
+  const router = useRouter()
+  const [editForm, setEditForm] = useState({ company_name: "", phone: "", email: "", address: "", city: "", state: "", specialization: "" })
+
+  const openEdit = () => {
+    if (contractor) {
+      setEditForm({
+        company_name: contractor.company_name ?? "",
+        phone: contractor.phone ?? "",
+        email: contractor.email ?? "",
+        address: contractor.address ?? "",
+        city: contractor.city ?? "",
+        state: contractor.state ?? "",
+        specialization: contractor.specialization ?? "",
+      })
+    }
+    setEditOpen(true)
+  }
 
   useEffect(() => {
     async function fetchData() {
@@ -152,9 +117,9 @@ export default function ContractorProfilePage({
         if (projectsRes.data) setProjects(projectsRes.data as unknown as Project[])
         if (paymentsRes.data) setPayments(paymentsRes.data as unknown as Payment[])
       } catch {
-        setContractor(mockContractor)
-        setProjects(mockProjects)
-        setPayments(mockPayments)
+        setContractor(null)
+        setProjects([])
+        setPayments([])
       } finally {
         setLoading(false)
       }
@@ -177,7 +142,27 @@ export default function ContractorProfilePage({
 
   const completionRate = stats.assigned > 0 ? Math.round((stats.completed / stats.assigned) * 100) : 0
 
-  const displayContractor = contractor ?? mockContractor
+  const displayContractor = contractor
+
+  if (!displayContractor) {
+    return (
+      <motion.div variants={containerVariants} initial="hidden" animate="visible" className="space-y-6">
+        <Button variant="ghost" size="icon" asChild>
+          <Link href="/admin/contractors">
+            <ArrowLeft className="size-5" />
+          </Link>
+        </Button>
+        <div className="flex flex-col items-center justify-center py-20 gap-4">
+          <p className="text-xl font-semibold">Contractor not found</p>
+          <p className="text-muted-foreground">The requested contractor does not exist.</p>
+          <Button variant="outline" onClick={() => router.push("/admin/contractors")}>
+            <ArrowLeft className="size-4 mr-2" />
+            Back to Contractors
+          </Button>
+        </div>
+      </motion.div>
+    )
+  }
 
   const initials = displayContractor.company_name
     .split(" ")
@@ -245,9 +230,9 @@ export default function ContractorProfilePage({
     <motion.div variants={containerVariants} initial="hidden" animate="visible" className="space-y-6">
       <motion.div variants={itemVariants} className="flex items-center gap-4">
         <Button variant="ghost" size="icon" asChild>
-          <a href="/admin/contractors">
+          <Link href="/admin/contractors">
             <ArrowLeft className="size-5" />
-          </a>
+          </Link>
         </Button>
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Contractor Profile</h1>
@@ -282,7 +267,7 @@ export default function ContractorProfilePage({
                       <DollarSign className="size-4 mr-1" />
                       Payment
                     </Button>
-                    <Button size="sm">
+                    <Button size="sm" onClick={openEdit}>
                       <FileEdit className="size-4 mr-1" />
                       Edit
                     </Button>
@@ -497,6 +482,89 @@ export default function ContractorProfilePage({
           </TabsContent>
         </Tabs>
       </motion.div>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Contractor</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-2">
+              <Label>Company Name</Label>
+              <Input
+                value={editForm.company_name}
+                onChange={(e) => setEditForm({ ...editForm, company_name: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>Phone</Label>
+              <Input
+                value={editForm.phone}
+                onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>Email</Label>
+              <Input
+                value={editForm.email}
+                onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>Address</Label>
+              <Input
+                value={editForm.address}
+                onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="grid gap-2">
+                <Label>City</Label>
+                <Input
+                  value={editForm.city}
+                  onChange={(e) => setEditForm({ ...editForm, city: e.target.value })}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label>State</Label>
+                <Input
+                  value={editForm.state}
+                  onChange={(e) => setEditForm({ ...editForm, state: e.target.value })}
+                />
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label>Specialization</Label>
+              <Input
+                value={editForm.specialization}
+                onChange={(e) => setEditForm({ ...editForm, specialization: e.target.value })}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={async () => {
+                try {
+                  const { data, error } = await supabase
+                    .from("contractors")
+                    .update(editForm)
+                    .eq("id", id)
+                    .select()
+                    .single()
+                  if (error) throw error
+                  setContractor(data as unknown as Contractor)
+                  setEditOpen(false)
+                } catch { /* ignore */ }
+              }}
+            >
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </motion.div>
   )
 }

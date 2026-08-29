@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation"
 import { useEffect } from "react"
 
-export default function MyProjectsPage() {
+export default function ContractorMyProjectsPage() {
   const router = useRouter()
   useEffect(() => {
     router.replace("/contractor/projects")

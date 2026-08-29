@@ -48,76 +48,6 @@ const itemVariants = {
   visible: { opacity: 1, y: 0 },
 }
 
-const MOCK_PROJECTS: Project[] = [
-  {
-    id: "mock-p1",
-    name: "Modern Modular Kitchen - Sharma Residence",
-    customer_id: "cust-1",
-    contractor_id: "mock-contractor",
-    kitchen_type: "LShape" as Project["kitchen_type"],
-    length: 12,
-    width: 8,
-    height: 10,
-    material_type: "Acrylic" as Project["material_type"],
-    status: ProjectStatus.Production,
-    estimated_cost: 285000,
-    contractor_cost: 225000,
-    customer_price: 385000,
-    start_date: "2026-06-01",
-    expected_end_date: "2026-09-15",
-    address: "42, Greenfield Apartments, MG Road",
-    city: "Mumbai",
-    notes: "Matte finish preferred",
-    created_at: "2026-05-20T10:30:00Z",
-    updated_at: "2026-07-28T14:00:00Z",
-  },
-  {
-    id: "mock-p2",
-    name: "Compact Kitchen - Patel Flat",
-    customer_id: "cust-2",
-    contractor_id: "mock-contractor",
-    kitchen_type: "Straight" as Project["kitchen_type"],
-    length: 8,
-    width: 6,
-    height: 10,
-    material_type: "Plywood" as Project["material_type"],
-    status: ProjectStatus.Completed,
-    estimated_cost: 145000,
-    contractor_cost: 115000,
-    customer_price: 195000,
-    start_date: "2026-04-10",
-    expected_end_date: "2026-06-30",
-    completed_date: "2026-06-25",
-    address: "7, Sunshine Apartments",
-    city: "Pune",
-    notes: "",
-    created_at: "2026-04-01T08:00:00Z",
-    updated_at: "2026-06-25T16:00:00Z",
-  },
-  {
-    id: "mock-p3",
-    name: "Luxury U-Shape Kitchen - Verma Villa",
-    customer_id: "cust-3",
-    contractor_id: "mock-contractor",
-    kitchen_type: "UShape" as Project["kitchen_type"],
-    length: 15,
-    width: 10,
-    height: 12,
-    material_type: "HPL" as Project["material_type"],
-    status: ProjectStatus.Installation,
-    estimated_cost: 420000,
-    contractor_cost: 340000,
-    customer_price: 560000,
-    start_date: "2026-05-15",
-    expected_end_date: "2026-08-30",
-    address: "15, Palm Grove Estate",
-    city: "Bangalore",
-    notes: "Requires soft-close hinges and matte black handles",
-    created_at: "2026-05-01T09:00:00Z",
-    updated_at: "2026-07-28T11:00:00Z",
-  },
-]
-
 export default function ContractorProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
@@ -146,7 +76,7 @@ export default function ContractorProjectsPage() {
 
         setProjects((data as unknown as Project[]) ?? [])
       } catch {
-        setProjects(MOCK_PROJECTS)
+        setProjects([])
       } finally {
         setLoading(false)
       }

@@ -28,7 +28,16 @@ export function AssignProjectDialog({ contractorId }: AssignProjectDialogProps) 
           .select("*")
           .is("contractor_id", null)
           .order("created_at", { ascending: false })
-        setProjects((data as unknown as Project[]) ?? [])
+if (data) {
+          const formatted = (data as unknown as Array<{
+            id: string; project_name: string; status: string;
+            [key: string]: unknown
+          }>).map(p => ({
+            ...p,
+            name: p.project_name,
+          })) as unknown as Project[]
+          setProjects(formatted)
+        }
       } catch {
         setProjects([])
       }

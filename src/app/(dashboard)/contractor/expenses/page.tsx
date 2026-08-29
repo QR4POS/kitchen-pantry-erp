@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { motion } from "framer-motion"
 import {
   DollarSign,
@@ -11,15 +11,14 @@ import {
   Receipt,
   Upload,
 } from "lucide-react"
+import { createClient } from "@/lib/supabase/client"
+import { useAuthStore } from "@/store/auth-store"
 import { formatCurrency, formatDate } from "@/lib/auth/helpers"
 import { cn } from "@/utils/cn"
 import { StatCard } from "@/components/shared/stat-card"
 import {
   Card,
   CardContent,
-  CardHeader,
-  CardTitle,
-  CardDescription,
 } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -67,15 +66,6 @@ interface Expense {
   receipt_url?: string
 }
 
-const MOCK_EXPENSES: Expense[] = [
-  { id: "e1", type: "Material", description: "Extra acrylic sheets for corner joints", amount: 8500, status: "Approved", date: "2026-07-15T10:00:00Z" },
-  { id: "e2", type: "Transport", description: "Material delivery - Sharma site", amount: 2200, status: "Approved", date: "2026-07-12T08:30:00Z" },
-  { id: "e3", type: "Material", description: "Hardware fittings (hinges, handles)", amount: 12500, status: "Pending", date: "2026-07-20T14:00:00Z" },
-  { id: "e4", type: "Additional", description: "Extra labor for weekend work", amount: 6000, status: "Pending", date: "2026-07-22T09:00:00Z" },
-  { id: "e5", type: "Transport", description: "Tool transport - Patel site", amount: 1800, status: "Rejected", date: "2026-06-28T11:00:00Z" },
-  { id: "e6", type: "Material", description: "Edge banding tape purchase", amount: 3200, status: "Approved", date: "2026-07-10T15:30:00Z" },
-]
-
 const statusStyles: Record<ExpenseStatus, string> = {
   Approved: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   Pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
@@ -95,12 +85,44 @@ const typeStyles: Record<ExpenseType, string> = {
 }
 
 export default function ContractorExpensesPage() {
-  const [expenses, setExpenses] = useState<Expense[]>(MOCK_EXPENSES)
+  const [expenses, setExpenses] = useState<Expense[]>([])
   const [dialogOpen, setDialogOpen] = useState(false)
   const [expenseType, setExpenseType] = useState<ExpenseType>("Material")
   const [description, setDescription] = useState("")
   const [amount, setAmount] = useState("")
   const [receiptFile, setReceiptFile] = useState<File | null>(null)
+  const supabase = createClient()
+  const user = useAuthStore((state) => state.user)
+  const userId = user?.id ?? ""
+
+  useEffect(() => {
+    async function fetchExpenses() {
+      if (!userId) return
+      try {
+        const { data } = await supabase
+          .from("business_expenses")
+          .select("*")
+          .eq("created_by", userId)
+          .order("created_at", { ascending: false })
+        if (data) {
+          const formatted: Expense[] = (data as unknown as Array<{
+            id: string; category: string; description: string;
+            amount: number; created_at: string; receipt_url?: string
+          }>).map(e => ({
+            id: e.id,
+            type: (e.category as ExpenseType) || "Material",
+            description: e.description,
+            amount: e.amount,
+            status: "Pending",
+            date: e.created_at,
+            receipt_url: e.receipt_url,
+          }))
+          setExpenses(formatted)
+        }
+      } catch { /* ignore */ }
+    }
+    fetchExpenses()
+  }, [userId, supabase])
 
   const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0)
   const approvedTotal = expenses
@@ -111,16 +133,26 @@ export default function ContractorExpensesPage() {
     .reduce((sum, e) => sum + e.amount, 0)
 
   function handleAddExpense() {
-    if (!description.trim() || !amount) return
-    const newExpense: Expense = {
-      id: `e-${Date.now()}`,
-      type: expenseType,
+    if (!description.trim() || !amount || !userId) return
+    const expenseData = {
+      category: expenseType,
       description: description.trim(),
       amount: parseFloat(amount),
-      status: "Pending",
-      date: new Date().toISOString(),
+      date: new Date().toISOString().split("T")[0],
+      created_by: userId,
     }
-    setExpenses((prev) => [newExpense, ...prev])
+    setExpenses((prev) => {
+      const newExpense: Expense = {
+        id: `e-${Date.now()}`,
+        type: expenseType,
+        description: description.trim(),
+        amount: parseFloat(amount),
+        status: "Pending",
+        date: new Date().toISOString(),
+      }
+      return [newExpense, ...prev]
+    })
+    supabase.from("business_expenses").insert(expenseData)
     setDialogOpen(false)
     setDescription("")
     setAmount("")

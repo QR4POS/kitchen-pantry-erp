@@ -1,25 +1,23 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { motion } from "framer-motion"
 import {
   Banknote,
-  Wallet,
   Clock,
   CheckCircle2,
   Plus,
   ArrowDownRight,
   Receipt,
 } from "lucide-react"
+import { createClient } from "@/lib/supabase/client"
+import { useAuthStore } from "@/store/auth-store"
 import { formatCurrency, formatDate } from "@/lib/auth/helpers"
 import { cn } from "@/utils/cn"
 import { StatCard } from "@/components/shared/stat-card"
 import {
   Card,
   CardContent,
-  CardHeader,
-  CardTitle,
-  CardDescription,
 } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -65,20 +63,6 @@ interface ContractorPayment {
   note?: string
 }
 
-const MOCK_PROJECTS = [
-  { id: "p1", name: "Modern Modular Kitchen - Sharma Residence" },
-  { id: "p2", name: "Compact Kitchen - Patel Flat" },
-  { id: "p3", name: "Luxury U-Shape Kitchen - Verma Villa" },
-]
-
-const MOCK_PAYMENTS: ContractorPayment[] = [
-  { id: "pay1", project_name: "Modern Modular Kitchen - Sharma Residence", amount: 90000, status: "Paid", date: "2026-06-20T10:00:00Z", note: "Advance payment - 40%" },
-  { id: "pay2", project_name: "Compact Kitchen - Patel Flat", amount: 57500, status: "Paid", date: "2026-05-15T09:00:00Z" },
-  { id: "pay3", project_name: "Modern Modular Kitchen - Sharma Residence", amount: 67500, status: "Approved", date: "2026-07-25T14:00:00Z", note: "Progress payment - 30%" },
-  { id: "pay4", project_name: "Luxury U-Shape Kitchen - Verma Villa", amount: 136000, status: "Requested", date: "2026-07-28T11:00:00Z", note: "Advance payment - 40%" },
-  { id: "pay5", project_name: "Compact Kitchen - Patel Flat", amount: 28750, status: "Pending", date: "2026-07-10T08:30:00Z", note: "Final payment - 25%" },
-]
-
 const statusStyles: Record<PaymentStatus, string> = {
   Paid: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
   Approved: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
@@ -87,11 +71,59 @@ const statusStyles: Record<PaymentStatus, string> = {
 }
 
 export default function ContractorPaymentsPage() {
-  const [payments, setPayments] = useState<ContractorPayment[]>(MOCK_PAYMENTS)
+  const [payments, setPayments] = useState<ContractorPayment[]>([])
+  const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([])
   const [dialogOpen, setDialogOpen] = useState(false)
   const [selectedProject, setSelectedProject] = useState("")
   const [requestAmount, setRequestAmount] = useState("")
   const [requestNote, setRequestNote] = useState("")
+  const supabase = createClient()
+  const user = useAuthStore((state) => state.user)
+  const userId = user?.id ?? ""
+
+  useEffect(() => {
+    async function fetchPayments() {
+      if (!userId) return
+      try {
+        const { data } = await supabase
+          .from("contractor_payments")
+          .select("*, projects(project_name)")
+          .eq("contractor_id", userId)
+          .order("created_at", { ascending: false })
+        if (data) {
+          const formatted: ContractorPayment[] = (data as unknown as Array<{
+            id: string; project: { project_name: string }; amount: number;
+            status: string; created_at: string; paid_date?: string
+          }>).map(p => ({
+            id: p.id,
+            project_name: p.project?.project_name ?? "Unknown Project",
+            amount: p.amount,
+            status: p.status as PaymentStatus,
+            date: p.created_at,
+            note: p.paid_date ? `Paid on ${p.paid_date}` : undefined,
+          }))
+          setPayments(formatted)
+        }
+      } catch { /* ignore */ }
+    }
+    async function fetchProjects() {
+      if (!userId) return
+      try {
+        const { data } = await supabase
+          .from("projects")
+          .select("id, project_name")
+          .eq("contractor_id", userId)
+        if (data) {
+          const formatted = (data as unknown as Array<{ id: string; project_name: string }>).map(p => ({
+            id: p.id, name: p.project_name,
+          }))
+          setProjects(formatted)
+        }
+      } catch { /* ignore */ }
+    }
+    fetchPayments()
+    fetchProjects()
+  }, [userId, supabase])
 
   const totalEarned = payments
     .filter((p) => p.status === "Paid")
@@ -102,8 +134,8 @@ export default function ContractorPaymentsPage() {
     .reduce((sum, p) => sum + p.amount, 0)
 
   function handleRequestPayment() {
-    if (!selectedProject || !requestAmount) return
-    const project = MOCK_PROJECTS.find((p) => p.id === selectedProject)
+    if (!selectedProject || !requestAmount || !userId) return
+    const project = projects.find((p) => p.id === selectedProject)
     const newPayment: ContractorPayment = {
       id: `pay-${Date.now()}`,
       project_name: project?.name ?? "Unknown Project",
@@ -113,6 +145,14 @@ export default function ContractorPaymentsPage() {
       note: requestNote.trim() || undefined,
     }
     setPayments((prev) => [newPayment, ...prev])
+    supabase.from("contractor_payments").insert({
+      project_id: selectedProject,
+      contractor_id: userId,
+      amount: parseFloat(requestAmount),
+      status: "pending",
+      created_by: userId,
+      paid_date: null,
+    })
     setDialogOpen(false)
     setSelectedProject("")
     setRequestAmount("")
@@ -246,7 +286,7 @@ export default function ContractorPaymentsPage() {
                   <SelectValue placeholder="Select project" />
                 </SelectTrigger>
                 <SelectContent>
-                  {MOCK_PROJECTS.map((p) => (
+                  {projects.map((p) => (
                     <SelectItem key={p.id} value={p.id}>
                       {p.name}
                     </SelectItem>
