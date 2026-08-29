@@ -22,7 +22,7 @@ import {
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import { useAuthStore } from "@/store/auth-store"
-import { formatDate } from "@/lib/auth/helpers"
+import { formatDate, resolveRecordIdByProfile } from "@/lib/auth/helpers"
 import { cn } from "@/utils/cn"
 import type { Project } from "@/types"
 import { ProjectStatus, KitchenType, MaterialType } from "@/types"
@@ -118,13 +118,12 @@ export default function ContractorProjectDetailPage() {
     async function fetchProject() {
       if (!user?.id) return
       try {
-        const { data: contractor } = await supabase
-          .from("contractors")
-          .select("id")
-          .eq("user_id", user.id)
-          .single()
-        const contractorId = (contractor as unknown as { id: string })?.id
-        if (!contractorId) return
+        const contractorId = await resolveRecordIdByProfile(supabase, "contractors", user.id)
+        if (!contractorId) {
+          setProject(null)
+          setLoading(false)
+          return
+        }
 
         const { data } = await supabase
           .from("projects")

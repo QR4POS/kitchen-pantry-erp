@@ -809,6 +809,8 @@ DROP POLICY IF EXISTS inventory_transactions_read_all ON inventory_transactions;
 -- 7.18  BUSINESS EXPENSES
 DROP POLICY IF EXISTS expenses_admin_all ON business_expenses; CREATE POLICY expenses_admin_all ON business_expenses FOR ALL TO authenticated USING (get_user_role() = 'admin') WITH CHECK (get_user_role() = 'admin');
 DROP POLICY IF EXISTS expenses_staff_crud ON business_expenses; CREATE POLICY expenses_staff_crud ON business_expenses FOR ALL TO authenticated USING (get_user_role() = 'staff') WITH CHECK (get_user_role() = 'staff');
+DROP POLICY IF EXISTS expenses_contractor_self_read ON business_expenses; CREATE POLICY expenses_contractor_self_read ON business_expenses FOR SELECT TO authenticated USING (created_by = auth.uid() AND get_user_role() = 'contractor');
+DROP POLICY IF EXISTS expenses_contractor_self_insert ON business_expenses; CREATE POLICY expenses_contractor_self_insert ON business_expenses FOR INSERT TO authenticated WITH CHECK (created_by = auth.uid() AND get_user_role() = 'contractor' AND category IN ('transport', 'electricity', 'salary', 'rent', 'tools', 'marketing', 'other'));
 
 -- 7.19  PROJECT FILES
 DROP POLICY IF EXISTS project_files_admin_all ON project_files; CREATE POLICY project_files_admin_all ON project_files FOR ALL TO authenticated USING (get_user_role() = 'admin') WITH CHECK (get_user_role() = 'admin');

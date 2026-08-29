@@ -111,13 +111,7 @@ export default function CustomerProjectDetailPage() {
     async function fetchProject() {
       if (!user?.id || !projectId) return
       try {
-        const { data: customer } = await supabase
-          .from("customers")
-          .select("id")
-          .eq("user_id", user.id)
-          .single()
-
-        const customerId = (customer as unknown as { id: string })?.id
+        const customerId = await resolveRecordIdByProfile(supabase, "customers", user.id)
         if (!customerId) {
           setLoading(false)
           return

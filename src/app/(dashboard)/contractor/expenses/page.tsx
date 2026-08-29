@@ -13,7 +13,7 @@ import {
 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import { useAuthStore } from "@/store/auth-store"
-import { formatCurrency, formatDate } from "@/lib/auth/helpers"
+import { formatCurrency, formatDate, normalizeBusinessExpenseCategory } from "@/lib/auth/helpers"
 import { cn } from "@/utils/cn"
 import { StatCard } from "@/components/shared/stat-card"
 import {
@@ -132,32 +132,44 @@ export default function ContractorExpensesPage() {
     .filter((e) => e.status === "Pending")
     .reduce((sum, e) => sum + e.amount, 0)
 
-  function handleAddExpense() {
+  async function handleAddExpense() {
     if (!description.trim() || !amount || !userId) return
+
+    const parsedAmount = Number.parseFloat(amount)
+    if (Number.isNaN(parsedAmount) || parsedAmount <= 0) return
+
     const expenseData = {
-      category: expenseType,
+      category: normalizeBusinessExpenseCategory(expenseType),
       description: description.trim(),
-      amount: parseFloat(amount),
+      amount: parsedAmount,
       date: new Date().toISOString().split("T")[0],
       created_by: userId,
     }
-    setExpenses((prev) => {
+
+    try {
+      const { error } = await supabase.from("business_expenses").insert(expenseData)
+      if (error) throw error
+
       const newExpense: Expense = {
         id: `e-${Date.now()}`,
         type: expenseType,
         description: description.trim(),
-        amount: parseFloat(amount),
+        amount: parsedAmount,
         status: "Pending",
         date: new Date().toISOString(),
       }
-      return [newExpense, ...prev]
-    })
-    supabase.from("business_expenses").insert(expenseData)
-    setDialogOpen(false)
-    setDescription("")
-    setAmount("")
-    setExpenseType("Material")
-    setReceiptFile(null)
+
+      setExpenses((prev) => [newExpense, ...prev])
+      setDialogOpen(false)
+      setDescription("")
+      setAmount("")
+      setExpenseType("Material")
+      setReceiptFile(null)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error"
+      console.error("Failed to save expense:", error)
+      alert(`Unable to save expense. ${message}`)
+    }
   }
 
   return (

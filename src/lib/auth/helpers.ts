@@ -40,6 +40,46 @@ export function isAuthorized(userRole: Role, requiredRoles: Role[]): boolean {
   return requiredRoles.includes(userRole)
 }
 
+export async function resolveRecordIdByProfile<T extends { id: string }>(
+  supabase: { from: (table: string) => any },
+  table: 'contractors' | 'customers',
+  profileId: string
+): Promise<string | null> {
+  const { data } = await supabase
+    .from(table)
+    .select('id')
+    .eq('profile_id', profileId)
+    .maybeSingle()
+
+  const recordId = (data as T | null)?.id
+  if (recordId) return recordId
+
+  const { data: legacyData } = await supabase
+    .from(table)
+    .select('id')
+    .eq('user_id', profileId)
+    .maybeSingle()
+
+  return (legacyData as T | null)?.id ?? null
+}
+
+export function normalizeBusinessExpenseCategory(category: string): string {
+  const normalized = category.trim().toLowerCase()
+  const mapping: Record<string, string> = {
+    material: 'tools',
+    tools: 'tools',
+    transport: 'transport',
+    additional: 'other',
+    other: 'other',
+    electricity: 'electricity',
+    salary: 'salary',
+    rent: 'rent',
+    marketing: 'marketing',
+  }
+
+  return mapping[normalized] ?? 'other'
+}
+
 /**
  * Maps route prefix → required role keys.
  * Used by middleware to block cross‑role access.
