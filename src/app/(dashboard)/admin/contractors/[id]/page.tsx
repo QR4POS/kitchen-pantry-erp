@@ -2,6 +2,7 @@
 
 import { use, useState, useEffect, useMemo } from "react"
 import { motion } from "framer-motion"
+import { AssignProjectDialog } from "./components/AssignProjectDialog"
 import {
   ArrowLeft,
   Building2,
@@ -12,7 +13,6 @@ import {
   CheckCircle2,
   Banknote,
   Clock,
-  Plus,
   DollarSign,
   FileEdit,
 } from "lucide-react"
@@ -277,10 +277,7 @@ export default function ContractorProfilePage({
                     </p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <Button size="sm" variant="outline">
-                      <Plus className="size-4 mr-1" />
-                      Assign Project
-                    </Button>
+                    <AssignProjectDialog contractorId={id} />
                     <Button size="sm" variant="outline">
                       <DollarSign className="size-4 mr-1" />
                       Payment
