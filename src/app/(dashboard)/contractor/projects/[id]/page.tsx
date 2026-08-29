@@ -71,41 +71,6 @@ const CONTRACTOR_TIMELINE = [
   { label: "Completed", key: ProjectStatus.Completed },
 ]
 
-const MOCK_PROJECT: Project = {
-  id: "mock-1",
-  name: "Modern Modular Kitchen - Sharma Residence",
-  customer_id: "cust-1",
-  contractor_id: "contr-1",
-  kitchen_type: KitchenType.LShape,
-  length: 12,
-  width: 8,
-  height: 10,
-  material_type: MaterialType.Acrylic,
-  status: ProjectStatus.Production,
-  start_date: "2026-06-01",
-  expected_end_date: "2026-09-15",
-  notes: "Customer prefers matte finish. Soft-close hinges requested.",
-  created_at: "2026-05-20T10:30:00Z",
-  updated_at: "2026-07-28T14:00:00Z",
-}
-
-const MOCK_FILES: ProjectFile[] = [
-  { id: "f1", name: "Floor_Plan_v2.dwg", url: "#", type: "drawing", uploadedAt: "2026-05-22", size: "2.4 MB" },
-  { id: "f2", name: "Elevation_Front.pdf", url: "#", type: "drawing", uploadedAt: "2026-05-22", size: "1.8 MB" },
-  { id: "f3", name: "Site_Photo_1.jpg", url: "#", type: "photo", uploadedAt: "2026-05-23", size: "4.2 MB" },
-  { id: "f4", name: "Site_Photo_2.jpg", url: "#", type: "photo", uploadedAt: "2026-05-23", size: "3.6 MB" },
-  { id: "f5", name: "Material_Specs.pdf", url: "#", type: "document", uploadedAt: "2026-05-25", size: "0.9 MB" },
-]
-
-const MOCK_MATERIALS: Material[] = [
-  { id: "m1", name: "Acrylic Sheets (White Gloss)", quantity: 45, unit: "sq.ft", status: "delivered" },
-  { id: "m2", name: "Plywood 18mm (Marine Grade)", quantity: 30, unit: "sheets", status: "delivered" },
-  { id: "m3", name: "Soft-Close Hinges", quantity: 24, unit: "pcs", status: "delivered" },
-  { id: "m4", name: "Drawer Channels (Full Extension)", quantity: 12, unit: "pairs", status: "ordered" },
-  { id: "m5", name: "SS Handles (Matte Black)", quantity: 20, unit: "pcs", status: "delivered" },
-  { id: "m6", name: "Edge Banding Tape", quantity: 100, unit: "ft", status: "installed" },
-]
-
 const fileTypeIcons: Record<string, typeof FileText> = {
   drawing: FileText,
   photo: Image,
@@ -142,8 +107,8 @@ export default function ContractorProjectDetailPage() {
 
   const [loading, setLoading] = useState(true)
   const [project, setProject] = useState<Project | null>(null)
-  const [files] = useState<ProjectFile[]>(MOCK_FILES)
-  const [materials] = useState<Material[]>(MOCK_MATERIALS)
+  const [files, setFiles] = useState<ProjectFile[]>([])
+  const [materials, setMaterials] = useState<Material[]>([])
   const [activeTab, setActiveTab] = useState("overview")
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -192,12 +157,50 @@ export default function ContractorProjectDetailPage() {
           setProject(null)
         }
       } catch {
-        setProject(MOCK_PROJECT)
+        setProject(null)
       } finally {
         setLoading(false)
       }
     }
 
+    async function fetchFiles() {
+      try {
+        const { data } = await supabase
+          .from("project_files")
+          .select("*")
+          .eq("project_id", id)
+          .order("created_at", { ascending: false })
+        if (data) {
+          const formatted: ProjectFile[] = (data as unknown as Array<{ id: string; file_name: string; file_url: string; file_type: string; created_at: string }>).map(f => ({
+            id: f.id, name: f.file_name, url: f.file_url,
+            type: (f.file_type as ProjectFile["type"]) || "document",
+            uploadedAt: f.created_at, size: "-",
+          }))
+          setFiles(formatted)
+        }
+      } catch { /* ignore */ }
+    }
+
+    async function fetchMaterials() {
+      try {
+        const { data } = await supabase
+          .from("project_materials")
+          .select("*, materials(id, name, unit)")
+          .eq("project_id", id)
+          const formatted: Material[] = (data as unknown as Array<{
+            id: string; quantity: number; unit: string;
+            materials: { id: string; name: string; unit: string }
+          }>).map(pm => ({
+            id: pm.id, name: pm.materials.name,
+            quantity: pm.quantity, unit: pm.materials.unit,
+            status: "ordered" as const,
+          }))
+          setMaterials(formatted)
+      } catch { /* ignore */ }
+    }
+
+    fetchFiles()
+    fetchMaterials()
     fetchProject()
   }, [id, supabase, user?.id])
 
