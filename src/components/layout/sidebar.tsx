@@ -26,7 +26,7 @@ const navItems: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard, roles: [Role.ADMIN, Role.CONTRACTOR, Role.STAFF, Role.CUSTOMER] },
   { label: "Customers", href: "/customers", icon: Users, roles: [Role.ADMIN, Role.STAFF] },
   { label: "Contractors", href: "/contractors", icon: Building2, roles: [Role.ADMIN] },
-  { label: "Staff", href: "/staff", icon: UserCog, roles: [Role.ADMIN] },
+  { label: "Staff", href: "/admin/staff", icon: UserCog, roles: [Role.ADMIN] },
   { label: "Projects", href: "/projects", icon: FolderKanban, roles: [Role.ADMIN, Role.STAFF] },
   { label: "Estimates", href: "/admin/estimates", icon: Calculator, roles: [Role.ADMIN] },
   { label: "Quotations", href: "/admin/quotations", icon: FileSignature, roles: [Role.ADMIN] },

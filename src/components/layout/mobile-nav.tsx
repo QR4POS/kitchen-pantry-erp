@@ -15,7 +15,7 @@ const navConfig: Record<Role, MobileNavItem[]> = {
   [Role.ADMIN]: [
     { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { label: "Customers", href: "/customers", icon: Users },
-    { label: "Staff", href: "/staff", icon: UserCog },
+    { label: "Staff", href: "/admin/staff", icon: UserCog },
     { label: "Projects", href: "/projects", icon: FolderKanban },
     { label: "Estimates", href: "/admin/estimates", icon: Calculator },
     { label: "Payments", href: "/payments", icon: CreditCard },
