@@ -165,6 +165,8 @@ export async function createUserAction(formData: FormData): Promise<ActionResult
   const password = formData.get('password') as string
   const fullName = formData.get('full_name') as string
   const role = formData.get('role') as string
+  const phone = (formData.get('phone') as string)?.trim() || null
+  const designation = (formData.get('designation') as string)?.trim() || null
 
   if (!email || !password || !fullName || !role) {
     return { success: false, error: 'All fields are required' }
@@ -197,7 +199,9 @@ export async function createUserAction(formData: FormData): Promise<ActionResult
     .from('profiles')
     .update({
       full_name: fullName,
-      role: role as any,
+      phone,
+      designation,
+      role: role as 'admin' | 'staff' | 'contractor' | 'customer',
       force_password_change: true,
     })
     .eq('id', authData.user.id)

@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from "react"
 import { motion } from "framer-motion"
 import { UserCog, Plus, Shield, ShieldOff, Trash2 } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
+import { createUserAction } from "@/lib/auth/actions"
 import type { Staff } from "@/types"
 import { formatDate } from "@/lib/auth/helpers"
 import { DataTable, type Column } from "@/components/shared/data-table"
@@ -68,7 +69,7 @@ export default function StaffPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editStaff, setEditStaff] = useState<StaffProfile | null>(null)
   const [deleteId, setDeleteId] = useState<string | null>(null)
-  const [formData, setFormData] = useState({ full_name: "", email: "", phone: "", designation: "" })
+  const [formData, setFormData] = useState({ full_name: "", email: "", phone: "", designation: "", password: "" })
   const [saving, setSaving] = useState(false)
   const supabase = createClient()
   const { addToast: toast } = useToast()
@@ -137,6 +138,22 @@ export default function StaffPage() {
   async function handleSave() {
     setSaving(true)
     try {
+      if (!editStaff) {
+        const accountForm = new FormData()
+        accountForm.append("full_name", formData.full_name.trim())
+        accountForm.append("email", formData.email.trim())
+        accountForm.append("password", formData.password)
+        accountForm.append("phone", formData.phone)
+        accountForm.append("designation", formData.designation)
+        accountForm.append("role", "staff")
+        const result = await createUserAction(accountForm)
+        if (!result.success) throw new Error(result.error || "Failed to create staff account")
+        toast({ title: "Staff added", description: "The staff account has been created." })
+        setDialogOpen(false)
+        setFormData({ full_name: "", email: "", phone: "", designation: "", password: "" })
+        await fetchStaff()
+        return
+      }
       const { error } = await supabase
         .from("profiles")
         .update({
@@ -170,7 +187,14 @@ export default function StaffPage() {
       email: staffMember.email,
       phone: staffMember.phone || "",
       designation: staffMember.designation || "",
+      password: "",
     })
+    setDialogOpen(true)
+  }
+
+  function openAdd() {
+    setEditStaff(null)
+    setFormData({ full_name: "", email: "", phone: "", designation: "", password: "" })
     setDialogOpen(true)
   }
 
@@ -228,6 +252,10 @@ export default function StaffPage() {
 
       <motion.div variants={itemVariants} className="flex items-center gap-3">
         <SearchInput value={search} onChange={setSearch} placeholder="Search staff..." className="max-w-xs" />
+        <Button onClick={openAdd}>
+          <Plus className="size-4 mr-2" />
+          Add Staff
+        </Button>
       </motion.div>
 
       <motion.div variants={itemVariants}>
@@ -246,7 +274,7 @@ export default function StaffPage() {
       <Dialog open={dialogOpen} onOpenChange={(open) => { if (!open) { setDialogOpen(false); setEditStaff(null) } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Staff</DialogTitle>
+            <DialogTitle>{editStaff ? "Edit Staff" : "Add Staff"}</DialogTitle>
           </DialogHeader>
           <div className="grid gap-4 py-2">
             <div className="grid gap-2">
@@ -255,8 +283,14 @@ export default function StaffPage() {
             </div>
             <div className="grid gap-2">
               <Label>Email</Label>
-              <Input value={formData.email} disabled className="bg-muted" />
+              <Input value={formData.email} disabled={!!editStaff} onChange={(e) => setFormData({ ...formData, email: e.target.value })} type="email" placeholder="staff@example.com" />
             </div>
+            {!editStaff && (
+              <div className="grid gap-2">
+                <Label>Temporary Password</Label>
+                <Input value={formData.password} onChange={(e) => setFormData({ ...formData, password: e.target.value })} type="password" placeholder="At least 6 characters" />
+              </div>
+            )}
             <div className="grid gap-2">
               <Label>Phone</Label>
               <Input value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} placeholder="Enter phone number" />
@@ -268,7 +302,7 @@ export default function StaffPage() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => { setDialogOpen(false); setEditStaff(null) }}>Cancel</Button>
-            <Button onClick={handleSave} disabled={saving}>{saving ? "Saving..." : "Save Changes"}</Button>
+            <Button onClick={handleSave} disabled={saving || !formData.full_name.trim() || (!editStaff && (!formData.email.trim() || formData.password.length < 6))}>{saving ? "Saving..." : editStaff ? "Save Changes" : "Add Staff"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
