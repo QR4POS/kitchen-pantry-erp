@@ -169,13 +169,12 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
         if (paymentError) throw paymentError
         setPayments((paymentRows ?? []) as CustomerPaymentRow[])
 
-        const { data: projectFileRows, error: fileError } = await supabase
+        const { data: projectFileRows } = await supabase
           .from("project_files")
           .select("*, projects!inner(customer_id, project_name)")
           .eq("projects.customer_id", id)
           .order("created_at", { ascending: false })
 
-        if (fileError) throw fileError
         if (projectFileRows && projectFileRows.length > 0) {
           const docs: CustomerDocument[] = (projectFileRows as unknown as Record<string, unknown>[]).map((r) => ({
             id: r.id as string,
@@ -192,13 +191,12 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
         const customerPhone = customerData?.phone ? String(customerData.phone) : null
         if (customerPhone) {
           // Real WhatsApp conversation history for this customer.
-          const { data: waRows, error: waError } = await supabase
+          const { data: waRows } = await supabase
             .from("whatsapp_messages")
             .select("id,phone_number,direction,message,ai_generated,created_at")
             .eq("phone_number", customerPhone)
             .order("created_at", { ascending: true })
 
-          if (waError) throw waError
           if (waRows && waRows.length > 0) {
             const msgs: CustomerMessage[] = (waRows as unknown as Record<string, unknown>[]).map((r) => ({
               id: r.id as string,
