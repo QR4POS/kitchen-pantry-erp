@@ -50,7 +50,17 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { useToast } from "@/hooks/use-toast"
 import {
   PieChart,
   Pie,
@@ -120,6 +130,10 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
   const [conversation, setConversation] = useState<AiConversationRow | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [editOpen, setEditOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [editForm, setEditForm] = useState({ full_name: "", phone: "", email: "", city: "", address: "" })
+  const { addToast } = useToast()
 
   useEffect(() => {
     async function fetchData() {
@@ -248,6 +262,48 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
     })
     return Object.entries(counts).map(([name, value]) => ({ name, value }))
   }, [projects])
+
+  function openEdit() {
+    setEditForm({
+      full_name: customer?.full_name ?? "",
+      phone: customer?.phone ?? "",
+      email: customer?.email ?? "",
+      city: customer?.city ?? "",
+      address: customer?.address ?? "",
+    })
+    setEditOpen(true)
+  }
+
+  async function handleSaveEdit() {
+    if (!editForm.full_name.trim() && !editForm.phone.trim()) return
+    setSaving(true)
+    try {
+      const updates = {
+        full_name: editForm.full_name.trim() || null,
+        phone: editForm.phone.trim() || null,
+        email: editForm.email.trim() || null,
+        city: editForm.city.trim() || null,
+        address: editForm.address.trim() || null,
+      }
+      const { error: updateError } = await supabase
+        .from("customers")
+        .update(updates)
+        .eq("id", id)
+      if (updateError) throw updateError
+
+      setCustomer((current) => current ? { ...current, ...updates } as CustomerRow : current)
+      setEditOpen(false)
+      addToast({ title: "Customer updated", description: "Customer details have been updated." })
+    } catch (err) {
+      addToast({
+        title: "Error",
+        description: err instanceof Error ? err.message : "Failed to update customer.",
+        variant: "destructive",
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
 
   const projectColumns: Column<ProjectRow>[] = [
     { key: "project_name", label: "Project Name", sortable: true },
@@ -398,7 +454,7 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                 </div>
               </div>
               <div className="flex flex-wrap gap-2 shrink-0">
-                <Button variant="outline" size="sm">
+                <Button variant="outline" size="sm" onClick={openEdit}>
                   <Edit className="size-4 mr-1.5" />
                   Edit
                 </Button>
@@ -425,6 +481,44 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
           </CardContent>
         </Card>
       </motion.div>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Customer</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-2">
+              <Label>Full Name</Label>
+              <Input value={editForm.full_name} onChange={(event) => setEditForm({ ...editForm, full_name: event.target.value })} />
+            </div>
+            <div className="grid gap-2">
+              <Label>Phone</Label>
+              <Input value={editForm.phone} onChange={(event) => setEditForm({ ...editForm, phone: event.target.value })} />
+            </div>
+            <div className="grid gap-2">
+              <Label>Email</Label>
+              <Input type="email" value={editForm.email} onChange={(event) => setEditForm({ ...editForm, email: event.target.value })} />
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label>City</Label>
+                <Input value={editForm.city} onChange={(event) => setEditForm({ ...editForm, city: event.target.value })} />
+              </div>
+              <div className="grid gap-2">
+                <Label>Address</Label>
+                <Input value={editForm.address} onChange={(event) => setEditForm({ ...editForm, address: event.target.value })} />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
+            <Button onClick={handleSaveEdit} disabled={saving || (!editForm.full_name.trim() && !editForm.phone.trim())}>
+              {saving ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <motion.div variants={itemVariants} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard title="Total Projects" value={stats.totalProjects} icon={FolderKanban} />
