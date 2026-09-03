@@ -424,6 +424,21 @@ export default function ContractorProjectDetailPage() {
                       </CardContent>
                     </Card>
                   </div>
+
+                  {project.notes && (
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2 text-base">
+                          <FileText className="size-4" />
+                          Project Note
+                        </CardTitle>
+                        <CardDescription>Instructions from the admin for this project.</CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <p className="text-sm whitespace-pre-wrap">{project.notes}</p>
+                      </CardContent>
+                    </Card>
+                  )}
                 </TabsContent>
 
                 <TabsContent value="timeline" className="p-6 pt-4">

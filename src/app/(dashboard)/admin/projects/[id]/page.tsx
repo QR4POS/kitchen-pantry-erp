@@ -25,7 +25,15 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Separator } from "@/components/ui/separator"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
@@ -172,6 +180,23 @@ export default function ProjectDetailPage() {
   const [changeStatusOpen, setChangeStatusOpen] = useState(false)
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [savingEdit, setSavingEdit] = useState(false)
+  const [editForm, setEditForm] = useState({
+    name: "",
+    description: "",
+    kitchen_type: KitchenType.Straight as KitchenType,
+    material_type: MaterialType.MDF as MaterialType,
+    length: "",
+    width: "",
+    height: "",
+    start_date: "",
+    expected_end_date: "",
+    address: "",
+    city: "",
+  })
+  const [noteInput, setNoteInput] = useState("")
+  const [savingNote, setSavingNote] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -232,6 +257,7 @@ export default function ProjectDetailPage() {
           created_at: proj.created_at as string,
           updated_at: proj.updated_at as string,
         } as Project)
+        setNoteInput((proj.notes as string | null) ?? "")
 
         const c = proj.customers as Record<string, unknown> | Record<string, unknown>[] | null
         const customerRow = Array.isArray(c) ? c[0] : c
@@ -367,6 +393,88 @@ export default function ProjectDetailPage() {
     setMessageInput("")
   }
 
+  const handleSaveNote = async () => {
+    setSavingNote(true)
+    try {
+      const note = noteInput.trim()
+      const { error } = await supabase
+        .from("projects")
+        .update({ notes: note || null, updated_at: new Date().toISOString() })
+        .eq("id", id)
+
+      if (error) throw error
+      setProject((current) => current ? { ...current, notes: note || undefined } : current)
+      addToast({ title: "Note saved", description: "The contractor can now view this project note." })
+    } catch {
+      addToast({ title: "Error", description: "Failed to save the project note.", variant: "destructive" })
+    } finally {
+      setSavingNote(false)
+    }
+  }
+
+  const openEditDialog = () => {
+    if (!project) return
+    setEditForm({
+      name: project.name,
+      description: project.description ?? "",
+      kitchen_type: project.kitchen_type,
+      material_type: project.material_type,
+      length: String(project.length || ""),
+      width: String(project.width || ""),
+      height: String(project.height || ""),
+      start_date: project.start_date ?? "",
+      expected_end_date: project.expected_end_date ?? "",
+      address: project.address ?? "",
+      city: project.city ?? "",
+    })
+    setEditOpen(true)
+  }
+
+  const handleSaveEdit = async () => {
+    if (!editForm.name.trim()) return
+    setSavingEdit(true)
+    try {
+      const updates = {
+        project_name: editForm.name.trim(),
+        description: editForm.description.trim() || null,
+        kitchen_type: editForm.kitchen_type,
+        material_type: editForm.material_type,
+        length: Number(editForm.length) || null,
+        width: Number(editForm.width) || null,
+        height: Number(editForm.height) || null,
+        start_date: editForm.start_date || null,
+        expected_completion: editForm.expected_end_date || null,
+        address: editForm.address.trim() || null,
+        city: editForm.city.trim() || null,
+        updated_at: new Date().toISOString(),
+      }
+      const { error } = await supabase.from("projects").update(updates).eq("id", id)
+      if (error) throw error
+
+      setProject((current) => current ? {
+        ...current,
+        name: updates.project_name,
+        description: updates.description ?? undefined,
+        kitchen_type: updates.kitchen_type,
+        material_type: updates.material_type,
+        length: updates.length ?? 0,
+        width: updates.width ?? 0,
+        height: updates.height ?? 0,
+        start_date: updates.start_date ?? undefined,
+        expected_end_date: updates.expected_completion ?? undefined,
+        address: updates.address ?? undefined,
+        city: updates.city ?? undefined,
+        updated_at: updates.updated_at,
+      } : current)
+      setEditOpen(false)
+      addToast({ title: "Project updated", description: "The project details have been saved." })
+    } catch {
+      addToast({ title: "Error", description: "Failed to update the project.", variant: "destructive" })
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
   const kitchenTypeLabel: Record<KitchenType, string> = {
     [KitchenType.Straight]: "Straight",
     [KitchenType.LShape]: "L-Shape",
@@ -438,7 +546,7 @@ export default function ProjectDetailPage() {
             <Scissors className="size-4 mr-2" />
             Cutting Plan
           </Button>
-          <Button variant="outline" size="sm">
+          <Button variant="outline" size="sm" onClick={openEditDialog}>
             <Edit className="size-4 mr-2" />
             Edit
           </Button>
@@ -472,6 +580,82 @@ export default function ProjectDetailPage() {
           </Button>
         </div>
       </motion.div>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Project</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-2">
+              <Label>Project Name</Label>
+              <Input value={editForm.name} onChange={(event) => setEditForm({ ...editForm, name: event.target.value })} />
+            </div>
+            <div className="grid gap-2">
+              <Label>Description</Label>
+              <Textarea value={editForm.description} onChange={(event) => setEditForm({ ...editForm, description: event.target.value })} rows={3} />
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label>Kitchen Type</Label>
+                <Select value={editForm.kitchen_type} onValueChange={(value) => setEditForm({ ...editForm, kitchen_type: value as KitchenType })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={KitchenType.Straight}>Straight</SelectItem>
+                    <SelectItem value={KitchenType.LShape}>L-Shape</SelectItem>
+                    <SelectItem value={KitchenType.UShape}>U-Shape</SelectItem>
+                    <SelectItem value={KitchenType.Island}>Island</SelectItem>
+                    <SelectItem value={KitchenType.Parallel}>Parallel</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label>Material</Label>
+                <Select value={editForm.material_type} onValueChange={(value) => setEditForm({ ...editForm, material_type: value as MaterialType })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {Object.values(MaterialType).map((material) => <SelectItem key={material} value={material}>{material}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              {(["length", "width", "height"] as const).map((dimension) => (
+                <div className="grid gap-2" key={dimension}>
+                  <Label>{dimension.charAt(0).toUpperCase() + dimension.slice(1)} (ft)</Label>
+                  <Input type="number" step="0.01" min="0" value={editForm[dimension]} onChange={(event) => setEditForm({ ...editForm, [dimension]: event.target.value })} />
+                </div>
+              ))}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label>Start Date</Label>
+                <Input type="date" value={editForm.start_date} onChange={(event) => setEditForm({ ...editForm, start_date: event.target.value })} />
+              </div>
+              <div className="grid gap-2">
+                <Label>Expected Completion</Label>
+                <Input type="date" value={editForm.expected_end_date} onChange={(event) => setEditForm({ ...editForm, expected_end_date: event.target.value })} />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label>Address</Label>
+                <Input value={editForm.address} onChange={(event) => setEditForm({ ...editForm, address: event.target.value })} />
+              </div>
+              <div className="grid gap-2">
+                <Label>City</Label>
+                <Input value={editForm.city} onChange={(event) => setEditForm({ ...editForm, city: event.target.value })} />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
+            <Button onClick={handleSaveEdit} disabled={savingEdit || !editForm.name.trim()}>
+              {savingEdit ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <motion.div variants={itemVariants} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
@@ -647,6 +831,32 @@ export default function ProjectDetailPage() {
                       </CardContent>
                     </Card>
                   </div>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2 text-base">
+                        <FileText className="size-4" />
+                        Project Note
+                      </CardTitle>
+                      <CardDescription>
+                        Add instructions or updates for the contractor assigned to this project.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      <Textarea
+                        value={noteInput}
+                        onChange={(event) => setNoteInput(event.target.value)}
+                        placeholder="Write a note for the assigned contractor..."
+                        rows={4}
+                      />
+                      <div className="flex justify-end">
+                        <Button onClick={handleSaveNote} disabled={savingNote}>
+                          {savingNote && <Loader2 className="size-4 mr-2 animate-spin" />}
+                          Save Note
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
 
                   <Card>
                     <CardHeader>
