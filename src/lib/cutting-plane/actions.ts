@@ -8,6 +8,7 @@
 
 import { createAdminClient } from '@/lib/supabase/admin'
 import { createServerSupabaseClient } from '@/lib/supabase/server'
+import { resolveRecordIdByProfile } from '@/lib/auth/helpers'
 import type { ProjectRow, CustomerRow } from '@/types/database'
 import {
   generateCuttingPlanPDFBuffer,
@@ -221,12 +222,7 @@ export async function getCuttingPlansForProject(projectId: string): Promise<{
 
     // Contractors may only view plans for their assigned projects
     if (role === 'contractor') {
-      const { data: contractor } = await supabase
-        .from('contractors')
-        .select('id')
-        .eq('user_id', user.id)
-        .single()
-      const contractorId = (contractor as unknown as { id: string } | null)?.id
+      const contractorId = await resolveRecordIdByProfile<{ id: string }>(supabase, 'contractors', user.id)
       const { data: project } = await supabase
         .from('projects')
         .select('contractor_id')
@@ -301,12 +297,7 @@ export async function getCuttingPlanDownloadUrl(
     const role = (profile as unknown as { role: string } | null)?.role
 
     if (role === 'contractor') {
-      const { data: contractor } = await supabase
-        .from('contractors')
-        .select('id')
-        .eq('user_id', user.id)
-        .single()
-      const contractorId = (contractor as unknown as { id: string } | null)?.id
+      const contractorId = await resolveRecordIdByProfile<{ id: string }>(supabase, 'contractors', user.id)
       const { data: project } = await supabase
         .from('projects')
         .select('contractor_id')
