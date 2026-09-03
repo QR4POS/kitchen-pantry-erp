@@ -345,12 +345,7 @@ export async function getCuttingPlanPDF(projectId: string, planId: string): Prom
     const role = (profile as unknown as { role: string } | null)?.role
 
     if (role === 'contractor') {
-      const { data: contractor } = await supabase
-        .from('contractors')
-        .select('id')
-        .eq('user_id', user.id)
-        .single()
-      const contractorId = (contractor as unknown as { id: string } | null)?.id
+      const contractorId = await resolveRecordIdByProfile<{ id: string }>(supabase, 'contractors', user.id)
       const { data: project } = await supabase
         .from('projects')
         .select('contractor_id')
