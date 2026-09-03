@@ -3,7 +3,7 @@
 import Link from "next/link"
 import {
   LayoutDashboard, Users, FolderKanban, Calculator, CreditCard,
-  MessageSquare, ClipboardList, FileText, Bot, type LucideIcon,
+  MessageSquare, ClipboardList, FileText, Bot, UserCog, type LucideIcon,
 } from "lucide-react"
 import { Role } from "@/types"
 import { resolveNavHref } from "@/lib/auth/helpers"
@@ -15,6 +15,7 @@ const navConfig: Record<Role, MobileNavItem[]> = {
   [Role.ADMIN]: [
     { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { label: "Customers", href: "/customers", icon: Users },
+    { label: "Staff", href: "/staff", icon: UserCog },
     { label: "Projects", href: "/projects", icon: FolderKanban },
     { label: "Estimates", href: "/admin/estimates", icon: Calculator },
     { label: "Payments", href: "/payments", icon: CreditCard },
