@@ -54,6 +54,15 @@ Authorization is enforced by `src/middleware.ts` (route-level), `src/lib/auth/ap
 - **WhatsApp AI Sales Agent** (see below).
 - AI-assisted chat, kitchen design, estimates, image analysis, and business insights (`/api/ai/*`).
 
+### WhatsApp calls
+- **Call history** — admin/staff users can view consented call records, recordings, transcripts, summaries, key points, and action items in the customer profile's Calls tab.
+- **Global Calls** — the sidebar Calls page searches phone numbers, customers, transcripts, and summaries; unknown numbers can later be assigned to an existing customer, updating their call history.
+- **Call lifecycle boundary** — an approved external/native provider can post signed `ringing`, `dialing`, `connected`, `ended`, and `missed` events to `/api/calls/events`. Calls are always keyed by normalized phone number and provider call ID.
+- **Processing pipeline** — an approved capture layer uploads audio to the private `call-recordings` bucket; Gemini transcribes it and the shared AI provider layer creates a structured summary.
+- **Provider boundary** — `src/lib/calls/recording/provider.ts` defines the replaceable `CallRecordingProvider` interface. The current `external_capture` provider stores supplied audio but does not attempt to capture WhatsApp Web calls.
+
+WhatsApp Web limitation: the current Playwright worker can read voice-note `<audio>` blobs, but WhatsApp call audio is not reliably exposed as a DOM audio source or supported call event. The worker therefore continues to ignore the Calls tab and is not modified to fake call detection or covertly record calls. A supported telephony, OS-level, or other explicitly consented capture layer must provide the recording and call metadata.
+
 ---
 
 ## WhatsApp AI Sales Agent
@@ -130,6 +139,9 @@ cp .env.example .env.local
 | `AI_FALLBACK_PROVIDER`       | no       | `deepseek` (default).                             |
 | `AI_GEMINI_MODEL`            | no       | Default `gemini-flash-latest`.                    |
 | `WHATSAPP_WORKER_SECRET`     | worker   | Shared secret between worker and `/api/whatsapp/*`. |
+| `CALL_RECORDING_PROVIDER`    | no       | `external_capture` (recordings supplied by an approved capture layer). |
+| `CALL_RECORDING_BUCKET`      | no       | Private Supabase Storage bucket; defaults to `call-recordings`. |
+| `CALL_RECORDING_WEBHOOK_SECRET` | provider | Secret for an approved external/native provider lifecycle webhook. |
 | `NEXT_PUBLIC_SITE_URL`       | no       | Public site URL (login credential messages).      |
 
 Optional worker tuning (see `scripts/whatsapp-worker.mjs`): `WHATSAPP_SESSION_DIR`, `WHATSAPP_STATUS_FILE`, `WHATSAPP_LAST_MESSAGES_FILE`, `WHATSAPP_APP_URL`, `WHATSAPP_POLL_INTERVAL_MS`, `WHATSAPP_API_RETRIES`, `WHATSAPP_API_BACKOFF_MS`, `WHATSAPP_SCAN_CHAT_LIMIT`, `WHATSAPP_MAX_DEEP_READS`, `WHATSAPP_DEBUG` (`=1` enables per-scan chat-candidate debug logging).
@@ -167,6 +179,17 @@ npm run whatsapp-worker
 ```
 
 Scan the QR code shown in the Chromium window once. On Windows you can also use **`start.bat`**, which starts the Next.js server and the WhatsApp worker together.
+
+### Call recording setup
+
+1. Apply the migrations so the private `call-recordings` bucket and call tables exist.
+2. Configure `CALL_RECORDING_PROVIDER` and `CALL_RECORDING_BUCKET` if using different names.
+3. Use the authenticated `POST /api/calls` endpoint to create a call with `recording_consent_status: "granted"` only after consent is obtained.
+4. Upload the approved audio as multipart field `file` to `POST /api/calls/{id}/recording`. The route validates the audio type, stores it privately, transcribes it, and generates the summary. Failed processing keeps the recording and can be retried with `POST /api/calls/{id}`.
+
+An external provider may send lifecycle events to `POST /api/calls/events` with the `x-call-recording-secret` header. The endpoint handles unknown numbers without requiring a saved WhatsApp contact name and links them later when staff assigns a customer.
+
+Supported upload types are WebM, WAV, MP3, and M4A up to 20MB. No recording is created by the WhatsApp worker itself.
 
 ---
 

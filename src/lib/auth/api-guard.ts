@@ -12,6 +12,8 @@ type GuardResult = {
   profile: Record<string, unknown>
 }
 
+type RouteContext = { params?: Promise<Record<string, string | string[]>> }
+
 /**
  * Wraps an API route handler with authentication + role/permission checks.
  *
@@ -21,9 +23,9 @@ type GuardResult = {
  */
 export function apiGuard(
   guard: RoleOrPermission,
-  handler: (params: GuardResult & { request: Request }) => Promise<NextResponse>
+  handler: (params: GuardResult & { request: Request }, context?: RouteContext) => Promise<NextResponse>
 ) {
-  return async (request: Request): Promise<NextResponse> => {
+  return async (request: Request, context?: RouteContext): Promise<NextResponse> => {
     try {
       const supabase = await createServerSupabaseClient()
       const { data: { user } } = await supabase.auth.getUser()
@@ -70,7 +72,7 @@ export function apiGuard(
         }
       }
 
-      return handler({ userId: user.id, role, profile, request })
+      return handler({ userId: user.id, role, profile, request }, context)
     } catch (err) {
       console.error('API guard error:', err)
       return NextResponse.json({ error: 'Internal server error' }, { status: 500 })

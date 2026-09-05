@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from "framer-motion"
 import {
   LayoutDashboard, Users, Building2, FolderKanban, Calculator, Package,
   CreditCard, BarChart3, Settings, ChevronLeft, ChevronRight, ClipboardList,
-  Wallet, MessageSquare, FileText, HardHat, ClipboardCheck, LogOut, User,
+  Wallet, MessageSquare, FileText, HardHat, ClipboardCheck, LogOut, User, Phone,
   FileSignature, CalendarDays, Bell, UserCog, Bot,
 } from "lucide-react"
 import { Role, type User as UserType } from "@/types"
@@ -38,6 +38,7 @@ const navItems: NavItem[] = [
   { label: "Finance", href: "/finance/dashboard", icon: Wallet, roles: [Role.ADMIN] },
   { label: "Expenses", href: "/expenses", icon: Wallet, roles: [Role.ADMIN] },
   { label: "Messages", href: "/messages", icon: MessageSquare, roles: [Role.ADMIN, Role.STAFF] },
+  { label: "WhatsApp Calls", href: "/calls", icon: Phone, roles: [Role.ADMIN, Role.STAFF] },
   { label: "Calendar", href: "/calendar", icon: CalendarDays, roles: [Role.ADMIN] },
   { label: "AI Assistant", href: "/ai", icon: Bot, roles: [Role.ADMIN] },
   { label: "WhatsApp Leads", href: "/admin/leads", icon: MessageSquare, roles: [Role.ADMIN] },

@@ -460,6 +460,64 @@ export interface LeadRow {
   updated_at: string
 }
 
+export type CallDirection = 'incoming' | 'outgoing'
+export type CallStatus = 'detected' | 'ringing' | 'dialing' | 'connected' | 'recording' | 'ended' | 'missed' | 'completed' | 'processing' | 'failed'
+export type CallRecordingStatus = 'unavailable' | 'not_started' | 'preparing' | 'recording' | 'stopping' | 'stopped' | 'processing' | 'uploaded' | 'completed' | 'failed'
+export type CallProcessingStatus = 'pending' | 'transcribing' | 'summarizing' | 'completed' | 'failed'
+export type RecordingConsentStatus = 'unknown' | 'granted' | 'denied'
+
+export interface CallRow {
+  id: string
+  customer_id: string | null
+  phone_number: string | null
+  contact_name: string | null
+  whatsapp_contact_id: string | null
+  provider_call_id: string | null
+  recording_provider: string
+  direction: CallDirection
+  started_at: string
+  connected_at: string | null
+  ended_at: string | null
+  duration_seconds: number | null
+  status: CallStatus
+  recording_status: CallRecordingStatus
+  recording_consent_status: RecordingConsentStatus
+  processing_status: CallProcessingStatus
+  recording_path: string | null
+  recording_mime_type: string | null
+  recording_size_bytes: number | null
+  processing_error: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CallTranscriptRow {
+  id: string
+  call_id: string
+  transcript: string
+  language: string | null
+  confidence: number | null
+  segments: Array<Record<string, unknown>>
+  created_at: string
+  updated_at: string
+}
+
+export interface CallSummaryRow {
+  id: string
+  call_id: string
+  summary: string
+  key_points: string[]
+  customer_requests: string[]
+  action_items: Array<{ task: string; status: string }>
+  decisions: string[]
+  important_information: string[]
+  follow_up_date: string | null
+  sentiment: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -489,6 +547,9 @@ export interface Database {
       leads: { Row: LeadRow; Insert: Partial<LeadRow>; Update: Partial<LeadRow> }
       whatsapp_customer_account_provisioning: { Row: WhatsappCustomerAccountProvisioningRow; Insert: Partial<WhatsappCustomerAccountProvisioningRow>; Update: Partial<WhatsappCustomerAccountProvisioningRow> }
       whatsapp_transport_config: { Row: WhatsappTransportConfigRow; Insert: Partial<WhatsappTransportConfigRow>; Update: Partial<WhatsappTransportConfigRow> }
+      calls: { Row: CallRow; Insert: Partial<CallRow>; Update: Partial<CallRow> }
+      call_transcripts: { Row: CallTranscriptRow; Insert: Partial<CallTranscriptRow>; Update: Partial<CallTranscriptRow> }
+      call_summaries: { Row: CallSummaryRow; Insert: Partial<CallSummaryRow>; Update: Partial<CallSummaryRow> }
     }
     Functions: {
       get_user_role: { Args: never; Returns: UserRole }

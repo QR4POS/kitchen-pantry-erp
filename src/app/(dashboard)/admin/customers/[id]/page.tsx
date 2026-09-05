@@ -34,6 +34,9 @@ import type {
   WhatsappCustomerAccountProvisioningRow,
   LeadRow,
   AiConversationRow,
+  CallRow,
+  CallTranscriptRow,
+  CallSummaryRow,
 } from "@/types/database"
 import { canonicalPhone } from "@/lib/phone"
 import { formatCurrency, formatDate } from "@/lib/auth/helpers"
@@ -99,6 +102,11 @@ interface CustomerMessage {
   is_outgoing: boolean
 }
 
+interface CustomerCall extends CallRow {
+  call_transcripts?: CallTranscriptRow[]
+  call_summaries?: CallSummaryRow[]
+}
+
 function getInitials(name: string): string {
   return name
     .split(" ")
@@ -128,6 +136,8 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
   const [provisioning, setProvisioning] = useState<WhatsappCustomerAccountProvisioningRow | null>(null)
   const [lead, setLead] = useState<LeadRow | null>(null)
   const [conversation, setConversation] = useState<AiConversationRow | null>(null)
+  const [calls, setCalls] = useState<CustomerCall[]>([])
+  const [recordingUrls, setRecordingUrls] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editOpen, setEditOpen] = useState(false)
@@ -149,6 +159,12 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
         if (customerError) throw customerError
         if (customerData) {
           setCustomer(customerData as CustomerRow)
+        }
+
+        const callsResponse = await fetch(`/api/calls?customer_id=${encodeURIComponent(id)}`)
+        if (callsResponse.ok) {
+          const callsPayload = await callsResponse.json() as { calls?: CustomerCall[] }
+          setCalls(callsPayload.calls ?? [])
         }
 
         const { data: projectRows, error: projectError } = await supabase
@@ -270,6 +286,19 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
       address: customer?.address ?? "",
     })
     setEditOpen(true)
+  }
+
+  async function loadRecordingUrl(callId: string) {
+    const response = await fetch(`/api/calls/${callId}`)
+    if (!response.ok) return
+    const payload = await response.json() as { recording_url?: string | null }
+    if (payload.recording_url) setRecordingUrls((current) => ({ ...current, [callId]: payload.recording_url as string }))
+  }
+
+  function formatCallDuration(seconds: number | null) {
+    if (seconds === null || seconds === undefined) return "-"
+    const minutes = Math.floor(seconds / 60)
+    return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`
   }
 
   async function handleSaveEdit() {
@@ -534,6 +563,10 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                   <TabsTrigger value="payments">Payments</TabsTrigger>
                   <TabsTrigger value="documents">Documents</TabsTrigger>
                   <TabsTrigger value="communication">Communication</TabsTrigger>
+                  <TabsTrigger value="calls" className="gap-1.5">
+                    <Phone className="size-3.5" />
+                    Calls
+                  </TabsTrigger>
                   <TabsTrigger value="onboarding" className="gap-1.5">
                     <ClipboardList className="size-3.5" />
                     Onboarding
@@ -683,6 +716,71 @@ export default function CustomerProfilePage({ params }: { params: Promise<{ id: 
                   <div className="text-center py-12 text-muted-foreground">
                     <MessageSquare className="size-8 mx-auto mb-2 opacity-40" />
                     <p>No WhatsApp messages found</p>
+                  </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="calls" className="space-y-4 px-6 pb-6">
+                {calls.length > 0 ? calls.map((call) => {
+                  const transcript = call.call_transcripts?.[0]
+                  const summary = call.call_summaries?.[0]
+                  return (
+                    <Card key={call.id}>
+                      <CardHeader className="pb-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <CardTitle className="text-sm flex items-center gap-2">
+                              <Phone className="size-4" />
+                              {call.direction === "incoming" ? "Incoming" : "Outgoing"} call
+                            </CardTitle>
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {new Date(call.started_at).toLocaleString("en-IN")} · {formatCallDuration(call.duration_seconds)}
+                            </p>
+                          </div>
+                          <Badge variant={call.status === "failed" ? "destructive" : "outline"} className="capitalize">
+                            {call.status.replace(/_/g, " ")}
+                          </Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="space-y-4 text-sm">
+                        <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
+                          <span>Consent: {call.recording_consent_status}</span>
+                          <span>Recording: {call.recording_status}</span>
+                        </div>
+                        {call.recording_path && (
+                          recordingUrls[call.id] ? (
+                            <audio controls src={recordingUrls[call.id]} className="w-full" />
+                          ) : (
+                            <Button variant="outline" size="sm" onClick={() => loadRecordingUrl(call.id)}>
+                              <Phone className="size-4 mr-1.5" />
+                              Load recording
+                            </Button>
+                          )
+                        )}
+                        {call.processing_error && <p className="text-destructive">{call.processing_error}</p>}
+                        {summary && (
+                          <div className="space-y-2">
+                            <p className="font-medium">AI Summary</p>
+                            <p className="text-muted-foreground">{summary.summary}</p>
+                            {summary.key_points.length > 0 && <div><p className="font-medium">Key points</p><ul className="list-disc pl-5 text-muted-foreground">{summary.key_points.map((point) => <li key={point}>{point}</li>)}</ul></div>}
+                            {summary.customer_requests.length > 0 && <div><p className="font-medium">Customer requests</p><ul className="list-disc pl-5 text-muted-foreground">{summary.customer_requests.map((request) => <li key={request}>{request}</li>)}</ul></div>}
+                            {summary.action_items.length > 0 && <div><p className="font-medium">Action items</p><ul className="list-disc pl-5 text-muted-foreground">{summary.action_items.map((item) => <li key={item.task}>{item.task} ({item.status})</li>)}</ul></div>}
+                            {summary.follow_up_date && <p><span className="font-medium">Follow-up:</span> {summary.follow_up_date}</p>}
+                          </div>
+                        )}
+                        {transcript && (
+                          <details>
+                            <summary className="cursor-pointer font-medium">Transcript</summary>
+                            <p className="mt-2 whitespace-pre-wrap text-muted-foreground">{transcript.transcript}</p>
+                          </details>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )
+                }) : (
+                  <div className="text-center py-12 text-muted-foreground">
+                    <Phone className="size-8 mx-auto mb-2 opacity-40" />
+                    <p>No recorded calls found</p>
                   </div>
                 )}
               </TabsContent>

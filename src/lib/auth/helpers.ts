@@ -13,6 +13,7 @@ import { canViewContractorCost, canViewProfit, type RoleKey } from '@/lib/permis
  * admin, "/staff/dashboard" for staff, etc.
  */
 const SPECIAL_NAV_HREF: Record<string, Partial<Record<Role, string>>> = {
+  '/calls': { [Role.ADMIN]: '/calls', [Role.STAFF]: '/calls' },
   '/my-projects': { [Role.CONTRACTOR]: '/contractor/projects' },
   '/my-quotation': { [Role.CUSTOMER]: '/customer/quotation' },
   '/chat': { [Role.CONTRACTOR]: '/contractor/messages', [Role.CUSTOMER]: '/customer/messages' },
@@ -40,27 +41,38 @@ export function isAuthorized(userRole: Role, requiredRoles: Role[]): boolean {
   return requiredRoles.includes(userRole)
 }
 
-export async function resolveRecordIdByProfile<T extends { id: string }>(
-  supabase: { from: (table: string) => any },
+type ProfileLookupClient = {
+  from: (table: string) => {
+    select: (columns: string) => {
+      eq: (column: string, value: string) => {
+          maybeSingle: () => PromiseLike<{ data: unknown }>
+      }
+    }
+  }
+}
+
+export async function resolveRecordIdByProfile(
+  supabase: unknown,
   table: 'contractors' | 'customers',
   profileId: string
 ): Promise<string | null> {
-  const { data } = await supabase
+  const client = supabase as ProfileLookupClient
+  const { data } = await client
     .from(table)
     .select('id')
     .eq('profile_id', profileId)
     .maybeSingle()
 
-  const recordId = (data as T | null)?.id
+  const recordId = (data as { id: string } | null)?.id
   if (recordId) return recordId
 
-  const { data: legacyData } = await supabase
+  const { data: legacyData } = await client
     .from(table)
     .select('id')
     .eq('user_id', profileId)
     .maybeSingle()
 
-  return (legacyData as T | null)?.id ?? null
+  return (legacyData as { id: string } | null)?.id ?? null
 }
 
 export function normalizeBusinessExpenseCategory(category: string): string {

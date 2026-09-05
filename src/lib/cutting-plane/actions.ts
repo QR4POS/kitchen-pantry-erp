@@ -222,7 +222,7 @@ export async function getCuttingPlansForProject(projectId: string): Promise<{
 
     // Contractors may only view plans for their assigned projects
     if (role === 'contractor') {
-      const contractorId = await resolveRecordIdByProfile<{ id: string }>(supabase, 'contractors', user.id)
+      const contractorId = await resolveRecordIdByProfile(supabase, 'contractors', user.id)
       const { data: project } = await supabase
         .from('projects')
         .select('contractor_id')
@@ -297,7 +297,7 @@ export async function getCuttingPlanDownloadUrl(
     const role = (profile as unknown as { role: string } | null)?.role
 
     if (role === 'contractor') {
-      const contractorId = await resolveRecordIdByProfile<{ id: string }>(supabase, 'contractors', user.id)
+      const contractorId = await resolveRecordIdByProfile(supabase, 'contractors', user.id)
       const { data: project } = await supabase
         .from('projects')
         .select('contractor_id')
@@ -345,7 +345,7 @@ export async function getCuttingPlanPDF(projectId: string, planId: string): Prom
     const role = (profile as unknown as { role: string } | null)?.role
 
     if (role === 'contractor') {
-      const contractorId = await resolveRecordIdByProfile<{ id: string }>(supabase, 'contractors', user.id)
+      const contractorId = await resolveRecordIdByProfile(supabase, 'contractors', user.id)
       const { data: project } = await supabase
         .from('projects')
         .select('contractor_id')
