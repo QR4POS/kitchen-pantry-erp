@@ -518,6 +518,20 @@ export interface CallSummaryRow {
   updated_at: string
 }
 
+export type CallProcessingJobStatus = 'pending' | 'processing' | 'completed' | 'failed'
+
+export interface CallProcessingJobRow {
+  id: string
+  call_id: string
+  status: CallProcessingJobStatus
+  attempts: number
+  available_at: string
+  locked_at: string | null
+  last_error: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -548,6 +562,7 @@ export interface Database {
       whatsapp_customer_account_provisioning: { Row: WhatsappCustomerAccountProvisioningRow; Insert: Partial<WhatsappCustomerAccountProvisioningRow>; Update: Partial<WhatsappCustomerAccountProvisioningRow> }
       whatsapp_transport_config: { Row: WhatsappTransportConfigRow; Insert: Partial<WhatsappTransportConfigRow>; Update: Partial<WhatsappTransportConfigRow> }
       calls: { Row: CallRow; Insert: Partial<CallRow>; Update: Partial<CallRow> }
+      call_processing_jobs: { Row: CallProcessingJobRow; Insert: Partial<CallProcessingJobRow>; Update: Partial<CallProcessingJobRow> }
       call_transcripts: { Row: CallTranscriptRow; Insert: Partial<CallTranscriptRow>; Update: Partial<CallTranscriptRow> }
       call_summaries: { Row: CallSummaryRow; Insert: Partial<CallSummaryRow>; Update: Partial<CallSummaryRow> }
     }

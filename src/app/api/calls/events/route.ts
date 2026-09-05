@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { resolveCallIdentity } from '@/lib/calls/identity'
+import { callEventForStatus, transitionCallState } from '@/lib/calls/state-machine'
+import { CALL_RECORDING_ENABLED } from '@/lib/calls/recording/provider'
 
 const eventSchema = z.object({
   provider_call_id: z.string().trim().min(1).max(200),
@@ -28,7 +30,7 @@ export async function POST(request: Request) {
   const identity = await resolveCallIdentity(admin, input.phone_number, input.contact_name)
   const occurredAt = input.occurred_at || new Date().toISOString()
   const status = input.event
-  const { data: existing } = await admin.from('calls').select('id').eq('provider_call_id', input.provider_call_id).maybeSingle()
+  const { data: existing } = await admin.from('calls').select('id, status').eq('provider_call_id', input.provider_call_id).maybeSingle()
 
   if (!existing) {
     const { data: created, error } = await admin.from('calls').insert({
@@ -47,9 +49,19 @@ export async function POST(request: Request) {
       processing_status: 'pending',
     }).select('id').single()
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-    return NextResponse.json({ ok: true, call_id: created.id, recording_action: 'external_provider_required' }, { status: 201 })
+    return NextResponse.json({ ok: true, call_id: created.id, recording_action: CALL_RECORDING_ENABLED ? 'external_provider_required' : 'disabled' }, { status: 201 })
   }
 
+  const event = callEventForStatus(input.event)
+  if (!event) return NextResponse.json({ error: 'Unsupported call event' }, { status: 400 })
+  if (existing.status === input.event) {
+    return NextResponse.json({ ok: true, call_id: existing.id, duplicate: true, recording_action: CALL_RECORDING_ENABLED ? 'external_provider_required' : 'disabled' })
+  }
+  try {
+    transitionCallState(existing.status, event)
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Invalid call transition' }, { status: 409 })
+  }
   const update: Record<string, unknown> = { status, updated_at: new Date().toISOString() }
   if (input.event === 'connected') update.connected_at = occurredAt
   if (input.event === 'ended' || input.event === 'missed') {
@@ -59,5 +71,5 @@ export async function POST(request: Request) {
   if (input.recording_consent_status !== 'unknown') update.recording_consent_status = input.recording_consent_status
   const { error } = await admin.from('calls').update(update).eq('id', existing.id)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ ok: true, call_id: existing.id, recording_action: 'external_provider_required' })
+  return NextResponse.json({ ok: true, call_id: existing.id, recording_action: CALL_RECORDING_ENABLED ? 'external_provider_required' : 'disabled' })
 }

@@ -109,20 +109,22 @@ export default function CallsPage() {
 
       <Card>
         <CardContent className="p-0">
-          <div className="hidden grid-cols-[minmax(0,1.5fr)_110px_100px_120px_110px] gap-4 border-b px-5 py-3 text-xs font-medium text-muted-foreground md:grid">
-            <span>Customer / number</span><span>Direction</span><span>Duration</span><span>Status</span><span />
+          <div className="hidden grid-cols-[minmax(0,1.4fr)_90px_80px_110px_110px_110px_90px] gap-4 border-b px-5 py-3 text-xs font-medium text-muted-foreground lg:grid">
+            <span>Customer / number</span><span>Direction</span><span>Duration</span><span>Recording</span><span>Transcript</span><span>Summary</span><span />
           </div>
           {loading ? <div className="flex items-center justify-center p-12 text-muted-foreground"><Loader2 className="mr-2 size-4 animate-spin" />Loading calls...</div> : filteredCalls.length === 0 ? <div className="p-12 text-center text-muted-foreground"><Phone className="mx-auto mb-2 size-8 opacity-40" />No calls found.</div> : (
             <div className="divide-y">
               {filteredCalls.map((call) => (
-                <div key={call.id} className="grid gap-3 px-5 py-4 md:grid-cols-[minmax(0,1.5fr)_110px_100px_120px_110px] md:items-center md:gap-4">
+                <div key={call.id} className="grid gap-3 px-5 py-4 lg:grid-cols-[minmax(0,1.4fr)_90px_80px_110px_110px_110px_90px] lg:items-center lg:gap-4">
                   <button type="button" onClick={() => void showCall(call)} className="min-w-0 text-left">
                     <p className="truncate font-medium">{call.contact_name || "Unknown Contact"}</p>
                     <p className="text-xs text-muted-foreground">{call.phone_number || "Phone unavailable"} · {new Date(call.started_at).toLocaleString("en-IN")}</p>
                   </button>
                   <span className="text-sm capitalize">{call.direction}</span>
                   <span className="text-sm">{duration(call.duration_seconds)}</span>
-                  <Badge variant={call.status === "failed" ? "destructive" : "outline"} className="w-fit capitalize">{call.status.replace(/_/g, " ")}</Badge>
+                  <Badge variant={call.recording_status === "failed" ? "destructive" : "outline"} className="w-fit capitalize">{call.recording_status.replace(/_/g, " ")}</Badge>
+                  <Badge variant={call.processing_status === "failed" ? "destructive" : "outline"} className="w-fit capitalize">{call.processing_status === "completed" ? "completed" : call.processing_status.replace(/_/g, " ")}</Badge>
+                  <Badge variant={call.processing_status === "failed" ? "destructive" : "outline"} className="w-fit capitalize">{call.call_summaries?.[0] ? "completed" : call.status === "failed" ? "failed" : "pending"}</Badge>
                   <Button variant="ghost" size="sm" onClick={() => setAssigning(call)} className="w-fit gap-1.5"><UserPlus className="size-4" />Assign</Button>
                 </div>
               ))}
@@ -140,6 +142,12 @@ export default function CallsPage() {
               <p><span className="text-muted-foreground">Phone:</span> {selected.phone_number || "-"}</p>
               <p><span className="text-muted-foreground">Direction:</span> {selected.direction}</p>
               <p><span className="text-muted-foreground">Duration:</span> {duration(selected.duration_seconds)}</p>
+              <p><span className="text-muted-foreground">Started:</span> {new Date(selected.started_at).toLocaleString("en-IN")}</p>
+              <p><span className="text-muted-foreground">Connected:</span> {selected.connected_at ? new Date(selected.connected_at).toLocaleString("en-IN") : "Not connected"}</p>
+              <p><span className="text-muted-foreground">Ended:</span> {selected.ended_at ? new Date(selected.ended_at).toLocaleString("en-IN") : "In progress"}</p>
+              <p><span className="text-muted-foreground">Recording:</span> <span className="capitalize">{selected.recording_status.replace(/_/g, " ")}</span></p>
+              <p><span className="text-muted-foreground">Transcript:</span> <span className="capitalize">{selected.call_transcripts?.[0] ? "completed" : selected.processing_status.replace(/_/g, " ")}</span></p>
+              <p><span className="text-muted-foreground">Summary:</span> <span className="capitalize">{selected.call_summaries?.[0] ? "completed" : selected.status === "failed" ? "failed" : "pending"}</span></p>
             </div>
             {recordingUrl && <div><p className="mb-2 font-medium">Recording</p><audio controls src={recordingUrl} className="w-full" /></div>}
             {selected.call_summaries?.[0] && <div><p className="font-medium">AI Summary</p><p className="mt-1 text-muted-foreground">{selected.call_summaries[0].summary}</p><ul className="mt-2 list-disc pl-5 text-muted-foreground">{selected.call_summaries[0].key_points.map((point) => <li key={point}>{point}</li>)}</ul></div>}

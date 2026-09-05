@@ -59,9 +59,11 @@ Authorization is enforced by `src/middleware.ts` (route-level), `src/lib/auth/ap
 - **Global Calls** — the sidebar Calls page searches phone numbers, customers, transcripts, and summaries; unknown numbers can later be assigned to an existing customer, updating their call history.
 - **Call lifecycle boundary** — an approved external/native provider can post signed `ringing`, `dialing`, `connected`, `ended`, and `missed` events to `/api/calls/events`. Calls are always keyed by normalized phone number and provider call ID.
 - **Processing pipeline** — an approved capture layer uploads audio to the private `call-recordings` bucket; Gemini transcribes it and the shared AI provider layer creates a structured summary.
+- **Automatic provider ingestion** — an approved capture layer posts multipart audio to `/api/calls/{id}/recording/provider` with `x-call-recording-secret`; the response queues durable background processing and never waits for transcription or summarization. `/api/calls/process-queue` retries pending/failed jobs with bounded exponential backoff when invoked by a scheduler or provider.
 - **Provider boundary** — `src/lib/calls/recording/provider.ts` defines the replaceable `CallRecordingProvider` interface. The current `external_capture` provider stores supplied audio but does not attempt to capture WhatsApp Web calls.
 
 WhatsApp Web limitation: the current Playwright worker can read voice-note `<audio>` blobs, but WhatsApp call audio is not reliably exposed as a DOM audio source or supported call event. The worker therefore continues to ignore the Calls tab and is not modified to fake call detection or covertly record calls. A supported telephony, OS-level, or other explicitly consented capture layer must provide the recording and call metadata.
+The current `external_capture` provider intentionally reports `unavailable` for `startRecording`/`stopRecording`; no `recording_started` event is emitted unless a real provider has captured audio. Deployment of a native/OS recorder must provide call lifecycle events, consent, both-sided audio capture, crash recovery, and the signed upload request above.
 
 ---
 

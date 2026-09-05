@@ -2,6 +2,7 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import { callRecordingProvider } from '@/lib/calls/recording/provider'
 import { transcribeCallRecording } from '@/lib/calls/transcription'
 import { summarizeCall } from '@/lib/calls/summary'
+import { enqueueCallProcessing, markCallJob } from '@/lib/calls/processing-queue'
 
 export async function processCall(callId: string): Promise<void> {
   const admin = createAdminClient()
@@ -10,6 +11,8 @@ export async function processCall(callId: string): Promise<void> {
   if (call.recording_consent_status !== 'granted') throw new Error('Recording consent is not granted')
   if (!call.recording_path) throw new Error('Call has no recording')
 
+  await enqueueCallProcessing(callId)
+  await markCallJob(callId, 'processing')
   await admin.from('calls').update({ status: 'processing', processing_status: 'transcribing', processing_error: null, error_message: null }).eq('id', callId)
   try {
     const { data: recording, error: downloadError } = await admin.storage
@@ -53,15 +56,18 @@ export async function processCall(callId: string): Promise<void> {
       processing_error: null,
       updated_at: new Date().toISOString(),
     }).eq('id', callId)
+    await markCallJob(callId, 'completed')
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'Call processing failed'
     await admin.from('calls').update({
       status: 'failed',
       recording_status: 'completed',
       processing_status: 'failed',
-      processing_error: error instanceof Error ? error.message : 'Call processing failed',
-      error_message: error instanceof Error ? error.message : 'Call processing failed',
+      processing_error: message,
+      error_message: message,
       updated_at: new Date().toISOString(),
     }).eq('id', callId)
+    await markCallJob(callId, 'failed', message)
     throw error
   }
 }

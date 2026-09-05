@@ -184,12 +184,24 @@ describe('sequential identity collection — one field at a time', () => {
     expect(result.complete).toBe(false)
     expect(result.reply).toContain('full name')
 
-    // Three outbound messages in order: welcome → first field question → answer.
+    // Three outbound messages in order: welcome → answer → first field question.
     expect(queueOutgoingMessage).toHaveBeenCalledTimes(3)
     expect(queueOutgoingMessage).toHaveBeenNthCalledWith(1, '+94760000000', 'Welcome to LUXUS ELEMENTE!', true, expect.anything())
-    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(2, '+94760000000', expect.stringContaining('full name'), true, expect.anything())
-    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(3, '+94760000000', expect.stringContaining('costs between'), true, expect.anything())
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(2, '+94760000000', expect.stringContaining('costs between'), true, expect.anything())
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(3, '+94760000000', expect.stringContaining('full name'), true, expect.anything())
     expect(decideConversationTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers a Singlish location question before asking for the name', async () => {
+    callAgentAI.mockResolvedValue({ content: '{}' })
+
+    const result = await turn({ incomingText: 'koheda?' })
+
+    expect(result.reply).toContain('full name')
+    expect(queueOutgoingMessage).toHaveBeenCalledTimes(3)
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(1, '+94760000000', 'Welcome to LUXUS ELEMENTE!', true, expect.objectContaining({ sourceInboundMessageId: 'wa-1' }))
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(2, '+94760000000', expect.stringContaining('Colombo'), true, expect.anything())
+    expect(queueOutgoingMessage).toHaveBeenNthCalledWith(3, '+94760000000', expect.stringContaining('full name'), true, expect.anything())
   })
 
   it('asks the FIRST identity field when no welcome is configured', async () => {

@@ -870,11 +870,19 @@ async function extractBatchFields(input: {
 }
 
 // Detects whether the customer's first message is a question (or a request)
-// that deserves a real answer alongside the welcome + batch question.
-const QUESTION_RE = /[?？]|(?:how\s+(?:much|many)|what|which|why|when|where|can\s+(?:i|you)|could|would|cost|price|quote|estimate)\b/i
+// that deserves a real answer alongside the welcome + batch question. Include
+// common Sinhala/Singlish location spellings because they often have no '?'.
+const QUESTION_RE = /[?？]|(?:how\s+(?:much|many)|what|which|why|when|where|can\s+(?:i|you)|could|would|cost|price|quote|estimate)\b|\b(?:koheda|kohed|kohenda|kohedha)\b/i
+
+const LOCATION_QUESTION_RE = /\b(?:where|koheda|kohed|kohenda|kohedha)\b|\b(?:showroom|branch|location|address)\b/i
 
 function looksLikeQuestion(text: string): boolean {
   return QUESTION_RE.test(String(text || ''))
+}
+
+function answerKnownFirstQuestion(text: string): string | null {
+  if (!LOCATION_QUESTION_RE.test(String(text || ''))) return null
+  return 'We serve Colombo, Gampaha, Negombo, Kalutara, Kandy, and surrounding areas. Please share your area so we can guide you with the nearest service option.'
 }
 
 // Best-effort answer to the customer's very first question, generated through
@@ -967,9 +975,8 @@ async function handleBatchCollectionTurn(input: {
     reply = buildIdentitySummary(collected)
     nextStep = CONFIRM_STEP
   } else if (isFirstTurn) {
-    // FIRST identity turn — the customer receives TWO separate messages:
-    //   1. the configured welcome message (plain, verbatim — never modified),
-    //   2. then the first step question — the first configured identity step
+    // FIRST identity turn — the customer receives the welcome, any direct
+    // answer to their first question, then the first step question.
     //      unless ALL identity fields were already volunteered, in which case
     //      the first configured project step is asked instead.
     // If no welcome is configured, only the step question is sent.
@@ -986,6 +993,34 @@ async function handleBatchCollectionTurn(input: {
     const firstQuestion = next.question
     if (settings.auto_reply_enabled) {
       const welcome = settings.welcome_message
+      const knownFirstAnswer = looksLikeQuestion(incomingText)
+        ? answerKnownFirstQuestion(incomingText)
+        : null
+
+      // Send the welcome, direct answer, and onboarding question as separate
+      // WhatsApp messages so each part is easy for the customer to read.
+      if (knownFirstAnswer) {
+        if (welcome?.trim()) {
+          await queueOutgoingMessage(phone, welcome, true, {
+            conversationId: conversation.id,
+            sourceInboundMessageId: providerMessageId ?? null,
+            decisionAction: 'reply',
+            postSendState: 'waiting_customer',
+          })
+        }
+        const answerQueued = await queueOutgoingMessage(phone, knownFirstAnswer, true, {
+          conversationId: conversation.id,
+          decisionAction: 'reply',
+          postSendState: 'waiting_customer',
+        })
+        const questionQueued = await queueOutgoingMessage(phone, firstQuestion, true, {
+          conversationId: conversation.id,
+          decisionAction: 'reply',
+          postSendState: 'waiting_customer',
+        })
+        firstTurnBatchQueued = Boolean(answerQueued || questionQueued)
+        skipEndQueue = true
+      } else {
       if (welcome?.trim()) {
         await queueOutgoingMessage(phone, welcome, true, {
           conversationId: conversation.id,
@@ -994,27 +1029,20 @@ async function handleBatchCollectionTurn(input: {
           postSendState: 'waiting_customer',
         })
       }
-      // Content-based dedup key (no sourceInboundMessageId) so the field
-      // question never collides with the welcome message above.
-      firstTurnBatchQueued = Boolean(await queueOutgoingMessage(phone, firstQuestion, true, {
-        conversationId: conversation.id,
-        decisionAction: 'reply',
-        postSendState: 'waiting_customer',
-      }))
-
-      // After the welcome + first question, also answer the question the
-      // customer actually asked on their very first message.
+      // Answer the customer's question before resuming onboarding. This is
+      // deterministic for common location questions so Singlish messages do
+      // not depend on an English-only classifier or an LLM response.
       if (looksLikeQuestion(incomingText)) {
         const answer = await answerFirstMessage({
-          conversation,
-          phone,
-          incomingText,
-          settings,
-          isReturning,
-          lastInteractionAt,
-          isNewConversation,
-          requiredFields: flow.requiredFields,
-        })
+            conversation,
+            phone,
+            incomingText,
+            settings,
+            isReturning,
+            lastInteractionAt,
+            isNewConversation,
+            requiredFields: flow.requiredFields,
+          })
         if (answer) {
           await queueOutgoingMessage(phone, answer, true, {
             conversationId: conversation.id,
@@ -1022,6 +1050,14 @@ async function handleBatchCollectionTurn(input: {
             postSendState: 'waiting_customer',
           })
         }
+      }
+      // Content-based dedup key (no sourceInboundMessageId) so the field
+      // question never collides with the welcome or answer above.
+      firstTurnBatchQueued = Boolean(await queueOutgoingMessage(phone, firstQuestion, true, {
+        conversationId: conversation.id,
+        decisionAction: 'reply',
+        postSendState: 'waiting_customer',
+      }))
       }
     }
     reply = firstQuestion
