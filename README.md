@@ -65,6 +65,19 @@ Authorization is enforced by `src/middleware.ts` (route-level), `src/lib/auth/ap
 WhatsApp Web limitation: the current Playwright worker can read voice-note `<audio>` blobs, but WhatsApp call audio is not reliably exposed as a DOM audio source or supported call event. The worker therefore continues to ignore the Calls tab and is not modified to fake call detection or covertly record calls. A supported telephony, OS-level, or other explicitly consented capture layer must provide the recording and call metadata.
 The current `external_capture` provider intentionally reports `unavailable` for `startRecording`/`stopRecording`; no `recording_started` event is emitted unless a real provider has captured audio. Deployment of a native/OS recorder must provide call lifecycle events, consent, both-sided audio capture, crash recovery, and the signed upload request above.
 
+### Windows WhatsApp audio capture provider
+
+The repository includes a real FFmpeg/DirectShow capture process for a Windows deployment. It requires a virtual mixer or loopback recording device that contains both WhatsApp browser output and the microphone input; alternatively, configure separate system-output and microphone devices and the recorder will mix them. A normal microphone device captures only one side of the call.
+
+```bash
+npm run call-recorder -- list-devices
+npm run call-recorder -- daemon
+npm run call-recorder -- start <call-uuid>
+npm run call-recorder -- stop <session-id>
+```
+
+Configure `CALL_CAPTURE_AUDIO_DEVICE` with one mixed DirectShow device, or configure both `CALL_CAPTURE_SYSTEM_DEVICE` and `CALL_CAPTURE_MIC_DEVICE` with exact device names. The recorder refuses to start without valid configuration, flushes the audio on stop, verifies that the file is non-empty, and uploads it through the signed provider endpoint. This is a capture mechanism, not a WhatsApp call detector: the existing Playwright worker still has no reliable incoming/outgoing/connected/ended call events, so those lifecycle events must come from a supported provider integration before automatic start/stop can be enabled.
+
 ---
 
 ## WhatsApp AI Sales Agent
